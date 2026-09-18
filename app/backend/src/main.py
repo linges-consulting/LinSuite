@@ -10,6 +10,7 @@ from sqlalchemy import text
 from auth.login import router as auth_router
 from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
+from core.business import router as business_router
 from core.config import get_settings
 from core.db import SessionDep, get_engine, get_purge_engine, session_scope
 from core.logging import configure_logging
@@ -83,4 +84,5 @@ async def health(session: SessionDep) -> JSONResponse:
 
 api.include_router(auth_router)
 api.include_router(setup_router)
+api.include_router(business_router)
 app.include_router(api)

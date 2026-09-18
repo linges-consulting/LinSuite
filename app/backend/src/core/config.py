@@ -23,8 +23,13 @@ class Settings(BaseSettings):
     # HS256 signing key for session JWTs. Rotating it logs everyone out, which is the
     # intended emergency lever. No default: a shipped default is a forgeable session.
     jwt_secret: str
-    # Staff Mode is the long-lived session. Admin Mode's short window is a separate token.
+    # Staff Mode is the long-lived session, so a practitioner is never logged out mid-treatment.
     staff_session_hours: int = 12
+    # Admin Mode's window (PRD §1), held in Redis against the session — not in the token.
+    # Idle: the sliding part. Every admin request pushes it out again.
+    admin_idle_minutes: int = 15
+    # Hard: the ceiling the sliding window never passes. Re-authentication after this.
+    admin_hard_limit_minutes: int = 30
     # `Secure` on the session cookie. Off only for plain-HTTP local development.
     cookie_secure: bool = True
 

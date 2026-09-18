@@ -1,21 +1,29 @@
-"""Password login, logout, and the endpoint that answers "who am I".
+"""Password login, logout, the endpoint that answers "who am I", and the mode switch.
 
 Every failure here answers the same way and takes the same time, so that neither the body
 nor a stopwatch says whether an address has an account. The detail that *is* recorded —
 which address was tried, and why it failed — goes to the audit log, where an administrator
 can read it and an attacker cannot.
+
+All four endpoints live together because they are one thing: the lifecycle of a session.
+The rule the mode switch adds to that lifecycle is in `auth/modes.py`; this module is only
+its HTTP surface.
 """
 
 import logging
 import uuid
+from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import func, select
 
+from auth import modes
 from auth.models import User
 from auth.session import (
     COOKIE_NAME,
+    ClaimsDep,
     CurrentUser,
     clear_session_cookie,
     decode_token,
@@ -42,16 +50,33 @@ class LoginRequest(BaseModel):
 
 
 class UserOut(BaseModel):
-    """What the frontend is told about the signed-in account. The hash is not in here, and
-    must never be: this model is the boundary that guarantees it."""
+    """What the frontend is told about the signed-in account and the session serving it. The
+    hash is not in here, and must never be: this model is the boundary that guarantees it.
+
+    The mode fields are what the context switcher is drawn from — including the two instants
+    behind the countdown, so the window running out is never a surprise. One shape for
+    login, `/me` and `/mode`, so the frontend has one cache entry and one type.
+    """
 
     id: str
     email: str
     is_admin: bool
+    mode: str
+    can_switch_modes: bool
+    admin_grant_expires_at: datetime | None
+    admin_hard_limit_at: datetime | None
 
     @classmethod
-    def of(cls, user: User) -> "UserOut":
-        return cls(id=str(user.id), email=user.email, is_admin=user.is_admin)
+    def of(cls, user: User, state: modes.ModeState | None = None) -> "UserOut":
+        return cls(
+            id=str(user.id),
+            email=user.email,
+            is_admin=user.is_admin,
+            mode=state.mode if state else modes.STAFF_MODE,
+            can_switch_modes=modes.can_switch_modes(user),
+            admin_grant_expires_at=state.grant_expires_at if state else None,
+            admin_hard_limit_at=state.hard_limit_at if state else None,
+        )
 
 
 @router.post("/login")
@@ -108,6 +133,75 @@ async def logout(request: Request, response: Response, db: SessionDep) -> None:
 
 
 @router.get("/me")
-async def me(user: CurrentUser) -> UserOut:
-    """The protected endpoint. Anonymous, expired and logged-out requests all get a 401."""
-    return UserOut.of(user)
+async def me(user: CurrentUser, claims: ClaimsDep) -> UserOut:
+    """The protected endpoint. Anonymous, expired and logged-out requests all get a 401.
+
+    Reading the mode deliberately does not slide the admin window: the frontend polls this
+    to keep the countdown honest, and a poll that counted as activity would hold an idle
+    browser tab in Admin Mode indefinitely.
+    """
+    return UserOut.of(user, await modes.read_state(claims))
+
+
+class ModeRequest(BaseModel):
+    mode: Literal["staff", "admin"]
+    # Required to *open* an admin window, and only then. Switching back and forth inside a
+    # live window is free (PRD §1), and returning to Staff Mode never needs it.
+    password: str | None = None
+
+
+@router.post("/mode")
+async def switch_mode(
+    payload: ModeRequest, user: CurrentUser, claims: ClaimsDep, db: SessionDep
+) -> UserOut:
+    """Enter or leave Admin Mode.
+
+    Refusals here are 403, never 401. The session is valid — it is the elevation that is
+    being refused — and the frontend treats a 401 as "this session is gone, go to /login",
+    which is precisely the wrong thing to do to someone who just mistyped a password.
+    """
+    if payload.mode == modes.ADMIN_MODE:
+        if not modes.can_switch_modes(user):
+            raise modes.ADMIN_MODE_REQUIRED
+        if (await modes.read_state(claims)).grant_expires_at is None:
+            await _reauthenticate(payload.password, user, claims, db)
+
+    await modes.set_mode(claims, payload.mode)
+    record_event(
+        db,
+        "mode.switched",
+        target_type="session",
+        target_id=claims["jti"],
+        actor_user_id=user.id,
+        metadata={"mode": payload.mode},
+    )
+    await db.commit()
+    return UserOut.of(user, await modes.read_state(claims))
+
+
+async def _reauthenticate(password: str | None, user: User, claims: dict, db: SessionDep) -> None:
+    """No live window, so the password is the price of a new one. A missing password is
+    verified against the dummy hash rather than short-circuited, so "you sent nothing" and
+    "you sent the wrong thing" cost the same time and give the same answer."""
+    if not await verify_password(user.password_hash, password or ""):
+        record_event(
+            db,
+            "login.failed",
+            target_type="user",
+            target_id=str(user.id),
+            actor_user_id=user.id,
+            metadata={"email": user.email, "reason": "reauth"},
+        )
+        await db.commit()
+        log.warning("auth: failed Admin Mode re-authentication for %s", user.email)
+        raise HTTPException(status_code=403, detail="Incorrect password")
+
+    await modes.grant_admin(claims)
+    record_event(
+        db,
+        "admin.reauth",
+        target_type="session",
+        target_id=claims["jti"],
+        actor_user_id=user.id,
+        metadata={"email": user.email},
+    )

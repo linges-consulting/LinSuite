@@ -10,8 +10,10 @@ know the holder pressed Log out. Logout writes the token's `jti` to a denylist t
 exactly when the token would have, so the list stays the size of "sessions ended early"
 rather than growing forever. Password and MFA changes will revoke through the same list.
 
-This task issues Staff Mode only — the long-lived session. Admin Mode's short window is a
-separate token with its own claim, and arrives next.
+**Why there is no mode in here.** The token is identity only — `sub`, `jti`, `exp`. Which
+mode a session is being served in changes several times within one token's life and must be
+revocable on idle, so it lives in Redis against the `jti` (`auth/modes.py`) rather than in a
+signed statement nothing can retract.
 """
 
 import uuid
@@ -30,7 +32,6 @@ from core.redis import get_redis
 
 COOKIE_NAME = "linsuite_session"
 ALGORITHM = "HS256"
-STAFF_MODE = "staff"
 
 _DENYLIST_PREFIX = "session:denied:"
 
@@ -43,14 +44,14 @@ class IssuedToken:
 
 
 def issue_token(user_id: uuid.UUID | str, *, ttl: timedelta | None = None) -> IssuedToken:
-    """Mint a Staff Mode session token. `ttl` is for tests; production uses the setting."""
+    """Mint a session token. `ttl` is for tests; production uses the setting."""
     if ttl is None:
         ttl = timedelta(hours=get_settings().staff_session_hours)
     now = datetime.now(UTC)
     expires_at = now + ttl
     jti = uuid.uuid4().hex
     token = jwt.encode(
-        {"sub": str(user_id), "jti": jti, "mode": STAFF_MODE, "iat": now, "exp": expires_at},
+        {"sub": str(user_id), "jti": jti, "iat": now, "exp": expires_at},
         get_settings().jwt_secret,
         algorithm=ALGORITHM,
     )
