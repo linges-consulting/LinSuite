@@ -120,6 +120,7 @@ async def logout(request: Request, response: Response, db: SessionDep) -> None:
     claims = decode_token(token) if token else None
     if claims and not await is_revoked(claims["jti"]):
         await revoke(claims)
+        await modes.forget(claims["jti"])
         record_event(
             db,
             "logout",
@@ -179,11 +180,29 @@ async def switch_mode(
     return UserOut.of(user, await modes.read_state(claims))
 
 
+_REAUTH_REQUIRED = HTTPException(
+    status_code=403, detail="Enter your password to switch to Admin Mode."
+)
+
+
 async def _reauthenticate(password: str | None, user: User, claims: dict, db: SessionDep) -> None:
-    """No live window, so the password is the price of a new one. A missing password is
-    verified against the dummy hash rather than short-circuited, so "you sent nothing" and
-    "you sent the wrong thing" cost the same time and give the same answer."""
-    if not await verify_password(user.password_hash, password or ""):
+    """No live window, so the password is the price of a new one.
+
+    **A request carrying no password is not a failed authentication.** It is the expected
+    race: the frontend offers the free switch from the grant it last saw, and the window can
+    lapse between that poll and the click. Recording `login.failed` for it would put an
+    accusation nobody earned into an append-only log, and hand the escalating lockout a count
+    a user could trip by clicking once. It is refused before the hash is touched, which also
+    stops an unthrottled endpoint burning an Argon2 verify on a request with no credential.
+
+    There is no dummy-hash timing equalisation here either, deliberately. `/login` pads an
+    unknown address so the response time cannot confirm an account exists; by this point the
+    caller is authenticated and named, and there is nothing left to enumerate.
+    """
+    if password is None:
+        raise _REAUTH_REQUIRED
+
+    if not await verify_password(user.password_hash, password):
         record_event(
             db,
             "login.failed",
@@ -196,7 +215,8 @@ async def _reauthenticate(password: str | None, user: User, claims: dict, db: Se
         log.warning("auth: failed Admin Mode re-authentication for %s", user.email)
         raise HTTPException(status_code=403, detail="Incorrect password")
 
-    await modes.grant_admin(claims)
+    # Audited, and committed, before the window opens. If Redis then refuses, the log says an
+    # administrator re-authenticated and no window exists — which is the harmless way round.
     record_event(
         db,
         "admin.reauth",
@@ -205,3 +225,5 @@ async def _reauthenticate(password: str | None, user: User, claims: dict, db: Se
         actor_user_id=user.id,
         metadata={"email": user.email},
     )
+    await db.commit()
+    await modes.grant_admin(claims)

@@ -194,6 +194,27 @@ async def test_entering_admin_mode_without_a_password_is_refused(client):
     assert (await me(client))["mode"] == "staff"
 
 
+async def test_a_request_with_no_password_is_not_recorded_as_a_failed_login(client):
+    """The expected race, not an attack: the frontend offers the free switch from the grant it
+    last saw, and the window can lapse between that poll and the click. Writing `login.failed`
+    for it would put an accusation nobody earned into an append-only log, and hand the
+    escalating lockout a count that lets a user lock themselves out with one click."""
+    await login(client)
+
+    assert (await switch(client, "admin")).status_code == 403
+
+    assert [event for event, _ in await audit()] == ["login.succeeded"]
+
+
+async def test_only_a_password_that_was_actually_tried_records_a_failure(client):
+    await login(client)
+
+    await switch(client, "admin")  # nothing tried
+    await switch(client, "admin", "not the password")  # tried, and wrong
+
+    assert [event for event, _ in await audit()].count("login.failed") == 1
+
+
 async def test_entering_admin_mode_with_the_wrong_password_is_refused(client):
     await login(client)
 
@@ -345,6 +366,18 @@ async def test_the_staff_session_outlives_the_admin_window(client):
     assert body["mode"] == "staff"
     assert body["email"] == EMAIL
     assert (await client.get("/api/health")).status_code == 200
+
+
+async def test_logging_out_forgets_the_mode_state(client):
+    await login(client)
+    await enter_admin(client)
+    keys = (grant_key(client), modes.mode_key(jti(client)))
+
+    await client.post("/api/auth/logout", json={})
+
+    # The token is revoked either way, but leaving the grant to time out on its own would
+    # keep a live admin window in Redis for a session that ended.
+    assert await get_redis().exists(*keys) == 0
 
 
 async def test_a_second_login_starts_in_staff_mode(client):

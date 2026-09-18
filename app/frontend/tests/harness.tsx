@@ -100,6 +100,14 @@ export function stubApi({
             return Response.json({ detail: 'Switch to Admin Mode to do this.' }, { status: 403 })
           }
           if (!granted()) {
+            // A request with no password is the lapsed-grant race, not a failed attempt —
+            // the server refuses it before it looks at the hash, and records nothing.
+            if (body.password === undefined) {
+              return Response.json(
+                { detail: 'Enter your password to switch to Admin Mode.' },
+                { status: 403 },
+              )
+            }
             if (body.password !== PASSWORD) {
               return Response.json({ detail: 'Incorrect password' }, { status: 403 })
             }

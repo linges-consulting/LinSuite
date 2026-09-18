@@ -49,6 +49,17 @@ def grant_key(jti: str) -> str:
     return _GRANT_PREFIX + jti
 
 
+def mode_key(jti: str) -> str:
+    return _MODE_PREFIX + jti
+
+
+async def forget(jti: str) -> None:
+    """Drop a session's mode state. Logout revokes the token anyway, so nothing could use the
+    grant — but leaving it to time out keeps a live admin window in Redis for a session that
+    is over, and the next reader of that key would have to know why it does not count."""
+    await get_redis().delete(mode_key(jti), grant_key(jti))
+
+
 @dataclass(frozen=True)
 class ModeState:
     """What mode this session is being served in, and how long Admin Mode has left."""
@@ -72,7 +83,7 @@ async def read_state(claims: dict) -> ModeState:
     jti = claims["jti"]
     redis = get_redis()
     async with redis.pipeline(transaction=False) as pipe:
-        pipe.get(_MODE_PREFIX + jti)
+        pipe.get(mode_key(jti))
         pipe.get(grant_key(jti))
         pipe.ttl(grant_key(jti))
         stored_mode, hard_limit, ttl = await pipe.execute()
@@ -104,7 +115,7 @@ async def grant_admin(claims: dict) -> None:
 
 
 async def set_mode(claims: dict, mode: str) -> None:
-    await get_redis().set(_MODE_PREFIX + claims["jti"], mode, ex=_session_seconds(claims))
+    await get_redis().set(mode_key(claims["jti"]), mode, ex=_session_seconds(claims))
 
 
 async def slide(claims: dict, hard_limit_at: datetime) -> None:
