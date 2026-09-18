@@ -9,7 +9,7 @@ import { renderApp, stubApi } from './harness'
 afterEach(() => vi.unstubAllGlobals())
 
 test('the top bar names the signed-in account and logs it out', async () => {
-  const calls = stubApi({ signedIn: true })
+  const { calls } = stubApi({ signedIn: true })
   const user = userEvent.setup()
 
   renderApp('/')

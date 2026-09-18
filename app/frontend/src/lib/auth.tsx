@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchMe, login, logout, type User } from '@/lib/api'
+import { fetchMe, login, logout, switchMode, type User } from '@/lib/api'
 
 /**
  * The session, as server state.
@@ -9,13 +9,20 @@ import { fetchMe, login, logout, type User } from '@/lib/api'
  * cache already gives every component one shared, deduplicated answer — a Context around it
  * would be a second copy of the same thing, with its own staleness.
  */
-const SESSION = ['session'] as const
+export const SESSION = ['session'] as const
 
 export function useSession() {
   const { data, isPending } = useQuery({
     queryKey: SESSION,
     queryFn: fetchMe,
-    staleTime: Infinity,
+    // Not `staleTime: Infinity`. Two things end a session without this tab hearing about
+    // it — the cookie expiring and an administrator revoking it — and the admin window ends
+    // on a schedule of its own. Asking again on focus and on a timer is the only way a page
+    // that cannot read the cookie finds out. In Admin Mode the timer tightens, because the
+    // countdown drawn from this answer has to stay honest to the second.
+    staleTime: 10_000,
+    refetchOnWindowFocus: true,
+    refetchInterval: (query) => (query.state.data?.mode === 'admin' ? 5_000 : 30_000),
     retry: false,
   })
   return { user: data ?? null, isPending }
@@ -41,5 +48,15 @@ export function useLogout() {
       queryClient.setQueryData(SESSION, null)
       queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== SESSION[0] })
     },
+  })
+}
+
+export function useSwitchMode() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: switchMode,
+    // The answer is the same shape `/me` returns, so it replaces the session outright —
+    // mode, countdown and all — without a round trip to confirm what we were just told.
+    onSuccess: (user: User) => queryClient.setQueryData(SESSION, user),
   })
 }

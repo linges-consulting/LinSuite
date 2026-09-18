@@ -44,7 +44,7 @@ test('an unclaimed instance sends even /login to the wizard', async () => {
 // --- signing in --------------------------------------------------------------------------
 
 test('correct credentials post one JSON body and open the shell', async () => {
-  const calls = stubApi()
+  const { calls } = stubApi()
   const user = userEvent.setup()
 
   renderApp('/login')

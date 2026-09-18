@@ -1,6 +1,7 @@
 import { LogOut, Menu, UserRound, X } from 'lucide-react'
 import { useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router'
+import { ModeSwitcher } from '@/components/mode-switcher'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Button } from '@/components/ui/button'
 import {
@@ -87,6 +88,7 @@ export function AppShell() {
           </Button>
           <h1 className="text-base font-semibold tracking-tight">{title}</h1>
           <div className="ml-auto flex items-center gap-1">
+            <ModeSwitcher />
             <ThemeToggle />
             <UserMenu />
           </div>
