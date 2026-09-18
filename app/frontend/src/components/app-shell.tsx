@@ -1,6 +1,6 @@
-import { LogOut, Menu, UserRound, X } from 'lucide-react'
+import { LogOut, Menu, ShieldCheck, UserRound, X } from 'lucide-react'
 import { useState } from 'react'
-import { NavLink, Outlet, useLocation } from 'react-router'
+import { Link, NavLink, Outlet, useLocation } from 'react-router'
 import { ModeSwitcher } from '@/components/mode-switcher'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Button } from '@/components/ui/button'
@@ -25,7 +25,9 @@ export function AppShell() {
   const nav = navFor(user)
   // The title comes from the full list, not the filtered one: someone who reaches a screen
   // they hold no capability for still deserves a heading over the refusal.
-  const title = NAV.find((n) => pathname.startsWith(n.to))?.label ?? 'Home'
+  const title =
+    NAV.find((n) => pathname.startsWith(n.to))?.label ??
+    (pathname.startsWith('/security') ? 'Security' : 'Home')
 
   return (
     <div className="flex min-h-dvh">
@@ -122,6 +124,15 @@ function UserMenu() {
           {user.email}
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
+        {/* Here rather than in the sidebar: it is a page about the person signed in, not a
+            section of the business, and every account has one — including the staff accounts
+            that are offered no Settings link at all. */}
+        <DropdownMenuItem asChild>
+          <Link to="/security">
+            <ShieldCheck aria-hidden />
+            Security
+          </Link>
+        </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => signOut.mutate()} disabled={signOut.isPending}>
           <LogOut aria-hidden />
           Log out

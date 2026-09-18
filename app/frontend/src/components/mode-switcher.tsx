@@ -2,6 +2,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Briefcase, Check, ShieldCheck } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Field, Form, FormError } from '@/components/form'
+import { CodeField } from '@/components/mfa'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -42,6 +43,10 @@ export function ModeSwitcher() {
   const { user } = useSession()
   const switchMode = useSwitchMode()
   const [askingPassword, setAskingPassword] = useState(false)
+  // Whether the server has said this window also needs a code. It is asked for only when
+  // the twelve-hourly interval has elapsed, so it is discovered from a 403 rather than
+  // predicted — the frontend cannot know when the interval ran out.
+  const [needsCode, setNeedsCode] = useState(false)
 
   if (!user?.can_switch_modes) return null
 
@@ -55,12 +60,18 @@ export function ModeSwitcher() {
     if (!user.admin_grant_expires_at) return openDialog()
     switchMode.mutate(
       { mode: 'admin' },
-      { onError: (error) => error instanceof ApiError && error.status === 403 && openDialog() },
+      {
+        onError: (error) =>
+          error instanceof ApiError &&
+          error.status === 403 &&
+          openDialog(error.code === 'mfa_required'),
+      },
     )
   }
 
-  const openDialog = () => {
+  const openDialog = (withCode = false) => {
     switchMode.reset()
+    setNeedsCode(withCode)
     setAskingPassword(true)
   }
 
@@ -113,10 +124,19 @@ export function ModeSwitcher() {
         pending={switchMode.isPending}
         error={switchMode.error?.message}
         throttleError={switchMode.error}
-        onSubmit={(password) =>
+        needsCode={needsCode}
+        onSubmit={(password, totp) =>
           switchMode.mutate(
-            { mode: 'admin', password },
-            { onSuccess: () => setAskingPassword(false) },
+            { mode: 'admin', password, totp },
+            {
+              onSuccess: () => setAskingPassword(false),
+              // The first attempt with a password can still come back asking for a code:
+              // a live window excuses the password, never the stale verification. Growing
+              // the dialog is the right answer — closing it and reopening would throw away
+              // what was already typed.
+              onError: (error) =>
+                error instanceof ApiError && error.code === 'mfa_required' && setNeedsCode(true),
+            },
           )
         }
       />
@@ -186,10 +206,11 @@ function formatRemaining(seconds: number): string {
 function ReauthDialog(props: {
   open: boolean
   onOpenChange: (open: boolean) => void
-  onSubmit: (password: string) => void
+  onSubmit: (password: string, totp?: string) => void
   pending: boolean
   error?: string
   throttleError: unknown
+  needsCode: boolean
 }) {
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
@@ -199,6 +220,8 @@ function ReauthDialog(props: {
           <DialogDescription>
             Administration runs in a short window that ends on its own, including while you are
             still working. Confirm your password to start one.
+            {props.needsCode &&
+              ' Your second factor has not been checked in a while, so a code is needed too — about once every twelve hours, not on every switch.'}
           </DialogDescription>
         </DialogHeader>
         {/* Radix unmounts everything in here when the dialog closes, so the typed password
@@ -211,17 +234,20 @@ function ReauthDialog(props: {
 
 function ReauthForm(props: {
   onOpenChange: (open: boolean) => void
-  onSubmit: (password: string) => void
+  onSubmit: (password: string, totp?: string) => void
   pending: boolean
   error?: string
   throttleError: unknown
+  needsCode: boolean
 }) {
   const [password, setPassword] = useState('')
-  // The same per-account counter a login feeds: mistyping it here is mistyping it anywhere.
+  const [totp, setTotp] = useState('')
+  // The same per-account counter a login feeds: mistyping either of these here is mistyping
+  // it anywhere, and a wrong code costs exactly what a wrong password does.
   const throttle = useThrottle(props.throttleError)
 
   return (
-    <Form onSubmit={() => props.onSubmit(password)}>
+    <Form onSubmit={() => props.onSubmit(password, props.needsCode ? totp : undefined)}>
       <Field
         label="Password"
         htmlFor="reauth-password"
@@ -238,6 +264,15 @@ function ReauthForm(props: {
           aria-invalid={props.error && !throttle.is429 ? true : undefined}
         />
       </Field>
+      {props.needsCode && (
+        <CodeField
+          id="reauth-totp"
+          label="Code from your authenticator"
+          value={totp}
+          onChange={setTotp}
+          hint="A recovery code works here too."
+        />
+      )}
       {throttle.message && <FormError>{throttle.message}</FormError>}
       <DialogFooter>
         <Button type="button" variant="ghost" onClick={() => props.onOpenChange(false)}>

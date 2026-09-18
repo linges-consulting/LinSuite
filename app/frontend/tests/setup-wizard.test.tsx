@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import App from '@/App'
+import { NO_MFA } from './harness'
 import { ThemeProvider } from '@/lib/theme'
 
 type Api = { claimed?: boolean; signedIn?: boolean; post?: Response }
@@ -22,6 +23,7 @@ function stubApi({ claimed = false, signedIn = false, post }: Api = {}) {
           email: 'owner@cedar.example',
           role: 'Administrator',
           capabilities: ['admin', 'roles.manage', 'users.manage', 'catalog.manage'],
+          mfa: NO_MFA,
         })
       }
       // status and timezones answer either way; only POST closes once the instance is claimed.

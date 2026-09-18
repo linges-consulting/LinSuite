@@ -1,6 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { changePassword, fetchMe, login, logout, switchMode, type User } from '@/lib/api'
+import {
+  changePassword,
+  fetchMe,
+  login,
+  logout,
+  switchMode,
+  verifyMfa,
+  type User,
+} from '@/lib/api'
 
 /**
  * The session, as server state.
@@ -80,6 +88,21 @@ export function useChangePassword() {
     onSuccess: (user: User) => {
       queryClient.setQueryData(SESSION, user)
       toast.success('Password changed', { description: 'Every other device has been signed out.' })
+    },
+  })
+}
+
+export function useVerifyMfa() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: verifyMfa,
+    // The answer is the same shape `/me` returns, with `mfa.pending` now false — which is
+    // what routes out of the verify screen, without a round trip to confirm what we were
+    // just told. Everything else in the cache was fetched by a session that could reach
+    // almost nothing, so it goes.
+    onSuccess: (user: User) => {
+      queryClient.setQueryData(SESSION, user)
+      queryClient.invalidateQueries({ predicate: (query) => query.queryKey[0] !== SESSION[0] })
     },
   })
 }

@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import App from '@/App'
+import { NO_MFA } from './harness'
 import { ThemeProvider } from '@/lib/theme'
 
 /** A claimed instance with someone signed in; `health` is what /api/health answers. */
@@ -19,6 +20,7 @@ function stubApi(health: Response) {
           email: 'owner@cedar.example',
           role: 'Administrator',
           capabilities: ['admin', 'roles.manage', 'users.manage', 'catalog.manage'],
+          mfa: NO_MFA,
         })
       return health.clone()
     }),

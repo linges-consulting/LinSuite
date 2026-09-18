@@ -111,6 +111,27 @@ export type User = {
    * having elapsed. Routing, not this flag, is what enforces it (`App.tsx`).
    */
   must_change_password: boolean
+  /** The second factor, as this session stands. Routed on the same way as the flag above. */
+  mfa: MfaState
+}
+
+export type MfaMethod = 'totp' | 'email'
+
+export type MfaState = {
+  enrolled: boolean
+  method: MfaMethod | null
+  /**
+   * This session has presented a password and nothing else. The server refuses everything
+   * but the verify screen's own calls, `/me` and logout, so routing sends the browser there
+   * and nowhere else — the same shape of gate as `must_change_password`.
+   */
+  pending: boolean
+  /** The business requires a second factor on this account and it has none yet. */
+  enrolment_required: boolean
+  /** When this session last presented a code. Null until it has. ISO-8601. */
+  verified_at: string | null
+  /** Whether the business allows emailed codes, so the verify screen knows what to offer. */
+  email_otp_allowed: boolean
 }
 
 /**
@@ -164,7 +185,11 @@ export async function fetchMe(): Promise<User | null> {
  * A refusal here is a 403, never a 401: the session is fine, it is the elevation that was
  * declined, and a 401 would send someone who mistyped a password back to the login screen.
  */
-export async function switchMode(request: { mode: Mode; password?: string }): Promise<User> {
+export async function switchMode(request: {
+  mode: Mode
+  password?: string
+  totp?: string
+}): Promise<User> {
   const res = await post('/api/auth/mode', request)
   if (!res.ok) throw await failure(res, 'Mode switch failed')
   return res.json()
@@ -302,4 +327,101 @@ export async function assignRole(userId: string, roleId: string): Promise<Accoun
 export async function unlockAccount(userId: string): Promise<void> {
   const res = await send('POST', `/api/admin/users/${userId}/unlock`, {})
   if (!res.ok) throw await failure(res, 'Could not unlock the account')
+}
+
+
+// --- the second factor ------------------------------------------------------------------
+
+export type Enrolment = {
+  /** The base32 secret, for somebody whose phone cannot scan. Shown once and never fetched again. */
+  secret: string
+  /** `otpauth://…`. The QR code is drawn from this in the browser (`components/qr-code.tsx`). */
+  provisioning_uri: string
+}
+
+export type MfaStatus = {
+  enrolled: boolean
+  method: MfaMethod | null
+  /** A count, never the codes: only their digests survive the one time they were shown. */
+  recovery_codes_remaining: number
+  email_otp_allowed: boolean
+  required_for_admin: boolean
+}
+
+export async function startEnrolment(): Promise<Enrolment> {
+  const res = await post('/api/auth/mfa/enrol', {})
+  if (!res.ok) throw await failure(res, 'Could not start the enrolment')
+  return res.json()
+}
+
+/** The code is what makes the enrolment real. The recovery codes come back once, here. */
+export async function confirmEnrolment(code: string): Promise<string[]> {
+  const res = await post('/api/auth/mfa/enrol/confirm', { code })
+  if (!res.ok) throw await failure(res, 'Could not confirm the code')
+  return (await res.json()).recovery_codes
+}
+
+export async function startEmailEnrolment(): Promise<void> {
+  const res = await post('/api/auth/mfa/enrol/email', {})
+  if (!res.ok) throw await failure(res, 'Could not send the code')
+}
+
+export async function confirmEmailEnrolment(code: string): Promise<string[]> {
+  const res = await post('/api/auth/mfa/enrol/email/confirm', { code })
+  if (!res.ok) throw await failure(res, 'Could not confirm the code')
+  return (await res.json()).recovery_codes
+}
+
+/**
+ * Finish signing in. One field takes an authenticator code, an emailed code or a recovery
+ * code — the person typing knows which they are holding, and the server tells them apart.
+ *
+ * A wrong code is a 403 with `invalid_mfa_code`, and it feeds the same per-account lockout a
+ * wrong password does, so a 429 is possible here too.
+ */
+export async function verifyMfa(code: string): Promise<User> {
+  const res = await post('/api/auth/mfa/verify', { code })
+  if (!res.ok) throw await failure(res, 'Could not verify the code')
+  return res.json()
+}
+
+export async function requestEmailOtp(): Promise<void> {
+  const res = await post('/api/auth/mfa/email-otp/request', {})
+  if (!res.ok) throw await failure(res, 'Could not send the code')
+}
+
+export async function fetchMfaStatus(): Promise<MfaStatus> {
+  const res = await fetch('/api/auth/mfa')
+  if (!res.ok) throw await failure(res, 'Could not load your security settings')
+  return res.json()
+}
+
+/** A fresh set. Everything issued before stops working the moment this returns. */
+export async function regenerateRecoveryCodes(): Promise<string[]> {
+  const res = await post('/api/auth/mfa/recovery-codes', {})
+  if (!res.ok) throw await failure(res, 'Could not issue new recovery codes')
+  return (await res.json()).recovery_codes
+}
+
+/** Admin Mode + `users.manage`. Clears the enrolment and signs the account out everywhere. */
+export async function resetUserMfa(userId: string): Promise<void> {
+  const res = await post(`/api/admin/users/${userId}/mfa/reset`, {})
+  if (!res.ok) throw await failure(res, 'Could not reset the second factor')
+}
+
+export type SecurityPolicy = {
+  mfa_required_for_admin: boolean
+  mfa_email_otp_allowed: boolean
+}
+
+export async function fetchSecurityPolicy(): Promise<SecurityPolicy> {
+  const res = await fetch('/api/admin/business/security')
+  if (!res.ok) throw await failure(res, 'Could not load the security policy')
+  return res.json()
+}
+
+export async function updateSecurityPolicy(policy: SecurityPolicy): Promise<SecurityPolicy> {
+  const res = await send('PATCH', '/api/admin/business/security', policy)
+  if (!res.ok) throw await failure(res, 'Could not save the security policy')
+  return res.json()
 }

@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router'
 import { toast } from 'sonner'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from '@/App'
+import { NO_MFA } from './harness'
 import { Toaster } from '@/components/ui/sonner'
 import { createQueryClient } from '@/lib/query-client'
 import { ThemeProvider } from '@/lib/theme'
@@ -318,6 +319,7 @@ describe('the query client tells the three 403s apart', () => {
     admin_grant_expires_at: mode === 'admin' ? new Date(Date.now() + 900_000).toISOString() : null,
     admin_hard_limit_at: mode === 'admin' ? new Date(Date.now() + 1_800_000).toISOString() : null,
     must_change_password: false,
+    mfa: NO_MFA,
   })
 
   /** A signed-in app whose one admin call answers with the refusal under test. */
@@ -336,6 +338,7 @@ describe('the query client tells the three 403s apart', () => {
           return Response.json({
             ...body,
             must_change_password: mustChangeAfter && changed,
+        mfa: NO_MFA,
           })
         }
         if (url.startsWith('/api/admin/')) {

@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import App from '@/App'
+import { NO_MFA } from './harness'
 import { Toaster } from '@/components/ui/sonner'
 import { createQueryClient } from '@/lib/query-client'
 import { ThemeProvider } from '@/lib/theme'
@@ -36,6 +37,7 @@ test('entering Admin Mode re-asks for what Staff Mode was refused', async () => 
     admin_grant_expires_at: new Date(Date.now() + 900_000).toISOString(),
     admin_hard_limit_at: new Date(Date.now() + 1_800_000).toISOString(),
     must_change_password: false,
+    mfa: NO_MFA,
   })
 
   vi.stubGlobal(

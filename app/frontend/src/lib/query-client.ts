@@ -50,10 +50,21 @@ export function createQueryClient(): QueryClient {
         })
         return
       case 'password_change_required':
-        // No router in here, and none needed: `/me` answers `must_change_password: true`,
-        // and the gate in `App.tsx` is what redirects. One mechanism for the forced change
-        // rather than two that can disagree about which screen is showing.
+      case 'mfa_verification_required':
+      case 'mfa_enrolment_required':
+        // No router in here, and none needed: `/me` answers the flag, and the gate in
+        // `App.tsx` is what redirects. One mechanism per gate rather than two that can
+        // disagree about which screen is showing.
+        //
+        // No toast either. All three are states the session is *in*, not things that just
+        // went wrong — the screen the browser lands on says what is owed, and a toast
+        // beside it would be the same sentence twice.
         client.invalidateQueries({ queryKey: SESSION })
+        return
+      case 'mfa_required':
+        // Entering Admin Mode needs a code this time round. Nothing about the session
+        // changed and nothing global should react: the re-authentication dialog asked, and
+        // the dialog is what grows a second field.
         return
     }
   }

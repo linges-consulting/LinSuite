@@ -7,20 +7,28 @@ import { ChangePasswordPage } from '@/routes/change-password'
 import { ForgotPasswordPage } from '@/routes/forgot-password'
 import { HomePage } from '@/routes/home'
 import { LoginPage } from '@/routes/login'
+import { MfaEnrolPage } from '@/routes/mfa-enrol'
+import { MfaVerifyPage } from '@/routes/mfa-verify'
 import { PlaceholderPage } from '@/routes/placeholder'
 import { ResetPasswordPage } from '@/routes/reset-password'
+import { SecurityPage } from '@/routes/security'
 import { SettingsPage } from '@/routes/settings'
 import { SetupPage } from '@/routes/setup'
 
 /**
- * Four states, in order: an unclaimed instance goes to the wizard, an anonymous visitor to
- * the login screen, an account that must change its password to that screen and nothing
- * else, and everyone else into the shell. `/setup` and `/login` stay routed in every state
- * so each can explain itself rather than bounce.
+ * Six states, in order: an unclaimed instance goes to the wizard, an anonymous visitor to the
+ * login screen, then the three things a session can owe — a new password, the second factor
+ * it has not presented, the enrolment its business requires — and everyone else into the
+ * shell. `/setup` and `/login` stay routed in every state so each can explain itself rather
+ * than bounce.
  *
- * The forced change is a redirect rather than a swapped element, so the address bar says
- * what is happening and a reload lands back where it was. It sits *above* the shell: while
- * the flag is set there is no route that renders the application.
+ * The order matches the server's (`auth/session.py`), and it has to: routing to a screen
+ * whose own calls the server would refuse for a different reason is a loop. A password
+ * change comes first, then the code this session owes, then the enrolment.
+ *
+ * Each gate is a redirect rather than a swapped element, so the address bar says what is
+ * happening and a reload lands back where it was. They sit *above* the shell: while anything
+ * is owed there is no route that renders the application.
  */
 export default function App() {
   const { data: setup, isPending: setupPending } = useQuery({
@@ -42,6 +50,10 @@ export default function App() {
     <Navigate to="/login" replace />
   ) : user.must_change_password ? (
     <Navigate to="/change-password" replace />
+  ) : user.mfa.pending ? (
+    <Navigate to="/mfa" replace />
+  ) : user.mfa.enrolment_required ? (
+    <Navigate to="/mfa/enrol" replace />
   ) : (
     <AppShell />
   )
@@ -72,12 +84,46 @@ export default function App() {
           )
         }
       />
+      <Route
+        path="/mfa"
+        element={
+          setup?.required ? (
+            toSetup
+          ) : !user ? (
+            <Navigate to="/login" replace />
+          ) : user.mfa.pending ? (
+            <MfaVerifyPage />
+          ) : (
+            // Both directions hang off the one flag, so the gate and this route can never
+            // disagree about which screen is showing and bounce the browser between them.
+            <Navigate to="/" replace />
+          )
+        }
+      />
+      <Route
+        path="/mfa/enrol"
+        element={
+          setup?.required ? (
+            toSetup
+          ) : !user ? (
+            <Navigate to="/login" replace />
+          ) : user.mfa.pending ? (
+            <Navigate to="/mfa" replace />
+          ) : (
+            // Unlike the other gate screens this one is also reachable by choice, from the
+            // Security page — so it renders whether or not the policy is demanding it, and
+            // only its copy and its way out change (`gated`).
+            <MfaEnrolPage gated={user.mfa.enrolment_required} />
+          )
+        }
+      />
       <Route element={gate}>
         <Route index element={<HomePage />} />
         <Route path="schedule" element={<PlaceholderPage title="Schedule" />} />
         <Route path="clients" element={<PlaceholderPage title="Clients" />} />
         <Route path="catalog" element={<PlaceholderPage title="Catalog" />} />
         <Route path="settings" element={<SettingsPage />} />
+        <Route path="security" element={<SecurityPage />} />
       </Route>
     </Routes>
   )

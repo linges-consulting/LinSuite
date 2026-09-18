@@ -1,5 +1,6 @@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { RolesPanel } from '@/routes/settings-roles'
+import { SecurityPanel } from '@/routes/settings-security'
 import { UsersPanel } from '@/routes/settings-users'
 
 /**
@@ -9,7 +10,7 @@ import { UsersPanel } from '@/routes/settings-users'
  * you define what a role may do, then you put people on it — and splitting them across the
  * sidebar would make the second half of that job something you go looking for.
  *
- * Both panels need Admin Mode. Nothing here hides itself when the window lapses; the panels
+ * All three panels need Admin Mode. Nothing here hides itself when the window lapses; the panels
  * surface the server's refusal instead, because a screen that empties on expiry looks broken
  * rather than locked.
  */
@@ -19,12 +20,16 @@ export function SettingsPage() {
       <TabsList>
         <TabsTrigger value="roles">Roles</TabsTrigger>
         <TabsTrigger value="users">People</TabsTrigger>
+        <TabsTrigger value="security">Security</TabsTrigger>
       </TabsList>
       <TabsContent value="roles">
         <RolesPanel />
       </TabsContent>
       <TabsContent value="users">
         <UsersPanel />
+      </TabsContent>
+      <TabsContent value="security">
+        <SecurityPanel />
       </TabsContent>
     </Tabs>
   )

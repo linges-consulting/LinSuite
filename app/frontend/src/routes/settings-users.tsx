@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { LockOpen } from 'lucide-react'
+import { LockOpen, ShieldOff } from 'lucide-react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -12,7 +12,14 @@ import {
 } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { assignRole, fetchAccounts, fetchRoles, unlockAccount, type AccountRow } from '@/lib/api'
+import {
+  assignRole,
+  fetchAccounts,
+  fetchRoles,
+  resetUserMfa,
+  unlockAccount,
+  type AccountRow,
+} from '@/lib/api'
 import { ACCOUNTS, ROLES } from '@/lib/query-keys'
 import { clockTime } from '@/lib/throttle'
 
@@ -45,6 +52,7 @@ export function UsersPanel() {
           <TableHead>Email</TableHead>
           <TableHead>Role</TableHead>
           <TableHead>Status</TableHead>
+          <TableHead className="text-right">Two-factor</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -83,6 +91,17 @@ function AccountLine(props: { account: AccountRow; roles: { id: string; name: st
     mutationFn: () => unlockAccount(account.id),
     onSuccess: () => {
       toast.success(`Unlocked ${account.email}`)
+      refresh()
+    },
+    onError: (error) => toast.error(error.message),
+  })
+
+  const resetMfa = useMutation({
+    mutationFn: () => resetUserMfa(account.id),
+    onSuccess: () => {
+      toast.success(`Reset the second factor on ${account.email}`, {
+        description: 'They are signed out everywhere and will be asked to set one up again.',
+      })
       refresh()
     },
     onError: (error) => toast.error(error.message),
@@ -127,6 +146,29 @@ function AccountLine(props: { account: AccountRow; roles: { id: string; name: st
         ) : (
           <span className="text-muted-foreground">Active</span>
         )}
+      </TableCell>
+      <TableCell className="text-right">
+        {/* Destructive and apart from the primary controls, and it confirms first
+            (DESIGN.md): this takes a protection off somebody's account and signs them out
+            of every device, and there is no undo — the recovery codes are gone too. */}
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={resetMfa.isPending}
+          onClick={() => {
+            if (
+              confirm(
+                `Reset the second factor on ${account.email}?\n\n` +
+                  'Their authenticator and recovery codes stop working, and they are signed ' +
+                  'out everywhere. Only do this if they have lost access.',
+              )
+            )
+              resetMfa.mutate()
+          }}
+        >
+          <ShieldOff aria-hidden />
+          Reset MFA
+        </Button>
       </TableCell>
     </TableRow>
   )

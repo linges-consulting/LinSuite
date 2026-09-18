@@ -9,3 +9,5 @@
 export const ROLES = ['roles'] as const
 export const CAPABILITIES = ['capabilities'] as const
 export const ACCOUNTS = ['accounts'] as const
+export const MFA = ['mfa'] as const
+export const SECURITY = ['security-policy'] as const
