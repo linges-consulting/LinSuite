@@ -2,7 +2,8 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
@@ -30,6 +31,17 @@ app = FastAPI(
     title="LinSuite", lifespan=lifespan, docs_url="/api/docs", openapi_url="/api/openapi.json"
 )
 api = APIRouter(prefix="/api")
+
+# What the client sent stays out of the response. FastAPI's default 422 body echoes the
+# offending value in `input`, which would put a rejected password in every proxy log, HAR
+# export and error tracker that sees the response. `loc` says which field; that is enough.
+_SAFE_ERROR_KEYS = ("type", "loc", "msg")
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+    detail = [{k: e[k] for k in _SAFE_ERROR_KEYS if k in e} for e in exc.errors()]
+    return JSONResponse({"detail": detail}, status_code=422)
 
 
 @api.get("/health")

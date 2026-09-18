@@ -54,36 +54,52 @@ async def bootstrap_setup_token(session: AsyncSession) -> str | None:
     if await setup_is_complete(session):
         return None
 
-    path = get_settings().setup_token_file
-    # The stored digest is the authority: a file without one is a leftover, not a token.
-    minted = await session.scalar(select(exists().select_from(SetupToken)))
-    if minted and _token_file_exists():
-        # Already minted, and still readable. Restarting must not invalidate the token the
-        # operator is part way through using.
-        log.info("setup: this instance is unclaimed. The setup token is in %s", path)
-        return None
-
+    # Exactly one process may end up owning the token, so each branch lets the database
+    # pick the winner and every loser returns without touching the file. The stored digest
+    # is the authority: a file with no digest behind it is a leftover, not a token.
+    stored = await session.scalar(select(SetupToken.token_hash))
     token = secrets.token_urlsafe(32)
-    # Concurrent workers all reach here on a first boot; the database picks the winner.
-    claimed = await session.execute(
-        insert(SetupToken)
-        .values(id=1, token_hash=_digest(token))
-        .on_conflict_do_nothing(index_elements=["id"])
-    )
-    if claimed.rowcount == 0:
+
+    if stored is not None:
         if _token_file_exists():
-            # A sibling worker won and has already written its token out.
-            log.info("setup: this instance is unclaimed. The setup token is in %s", path)
+            # Already minted and still readable. Restarting must not invalidate the token
+            # the operator is part way through using.
+            return _announce_existing_token()
+        # The token is unusable now that nobody can read it, so replace it — but only if
+        # this is still the digest we read. A sibling doing the same replacement wins here
+        # and we keep our hands off the file.
+        replaced = await session.execute(
+            update(SetupToken)
+            .values(token_hash=_digest(token))
+            .where(SetupToken.token_hash == stored)
+        )
+        if replaced.rowcount == 0:
             await session.rollback()
-            return None
-        # A digest from an earlier boot whose file is gone: unusable, so replace it.
-        await session.execute(update(SetupToken).values(token_hash=_digest(token)))
+            return _announce_existing_token()
         log.warning("setup: the token file was missing, so the setup token has been replaced")
+    else:
+        claimed = await session.execute(
+            insert(SetupToken)
+            .values(id=1, token_hash=_digest(token))
+            .on_conflict_do_nothing(index_elements=["id"])
+        )
+        if claimed.rowcount == 0:
+            # A sibling worker minted first; its token is the valid one and it writes the file.
+            await session.rollback()
+            return _announce_existing_token()
 
     await session.commit()
     log.info("setup: this instance is unclaimed. Setup token: %s", token)
     _write_token_file(token)
     return token
+
+
+def _announce_existing_token() -> None:
+    log.info(
+        "setup: this instance is unclaimed. The setup token is in %s",
+        get_settings().setup_token_file,
+    )
+    return None
 
 
 # Every filesystem touch sits in a sync helper: these run at boot, before the server takes

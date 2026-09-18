@@ -1,5 +1,6 @@
 """S1: the token-gated first-run setup wizard, over a real PostgreSQL as `linsuite_app`."""
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -73,6 +74,38 @@ async def test_a_restart_keeps_the_original_token(client):
 
     resp = await client.post("/api/setup", json={**PAYLOAD, "token": original})
     assert resp.status_code == 201
+
+
+async def test_two_instances_booting_at_once_agree_on_one_token(client):
+    # The loser must not overwrite the winner's digest: the operator reads one file, and
+    # the token in it has to be the one the database will accept.
+    first, second = await asyncio.gather(boot(), boot())
+
+    minted = [t for t in (first, second) if t]
+    assert len(minted) == 1
+    with open(token_file()) as f:
+        assert f.read().strip() == minted[0]
+    assert await rows("SELECT token_hash FROM setup_token") == [
+        (hashlib.sha256(minted[0].encode()).hexdigest(),)
+    ]
+    assert (
+        await client.post("/api/setup", json={**PAYLOAD, "token": minted[0]})
+    ).status_code == 201
+
+
+async def test_two_instances_replacing_a_lost_token_agree_on_one_token(client):
+    await boot()
+    os.remove(token_file())
+
+    first, second = await asyncio.gather(boot(), boot())
+
+    minted = [t for t in (first, second) if t]
+    assert len(minted) == 1
+    with open(token_file()) as f:
+        assert f.read().strip() == minted[0]
+    assert (
+        await client.post("/api/setup", json={**PAYLOAD, "token": minted[0]})
+    ).status_code == 201
 
 
 async def test_a_token_file_without_a_stored_digest_is_a_leftover(client):
@@ -170,6 +203,24 @@ async def test_setup_rejects_a_password_under_twelve_characters(client):
 
     assert resp.status_code == 422
     assert await rows("SELECT 1 FROM users") == []
+    # A validation error must never reflect what was submitted: this body reaches proxies,
+    # HAR exports and error trackers.
+    assert "eleven char" not in resp.text
+    assert resp.json()["detail"][0]["loc"] == ["body", "admin_password"]
+
+
+async def test_a_validation_error_never_echoes_the_submitted_value(client):
+    token = await boot()
+
+    resp = await client.post(
+        "/api/setup",
+        json={**PAYLOAD, "token": token, "admin_password": "s3cret", "admin_email": "nope"},
+    )
+
+    assert resp.status_code == 422
+    assert "s3cret" not in resp.text and "nope" not in resp.text
+    for error in resp.json()["detail"]:
+        assert set(error) <= {"type", "loc", "msg"}
 
 
 async def test_setup_rejects_a_timezone_that_is_not_an_iana_name(client):
