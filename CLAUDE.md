@@ -2,26 +2,43 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Repo state
-
-Directory skeleton only — no package manifests, no dependencies installed, no actual code yet. Git repo initialized, remote `origin` → `github.com/linges-consulting/LinSuite` (empty, nothing pushed).
+## Repo layout
 
 ```
-app/
-  backend/src/{auth,customers,scheduling,inventory,forms,billing,notifications,core}/
-  backend/tests/
-  frontend/src/
-  frontend/tests/
-infra/            # docker-compose, traefik/nginx config — not yet written
-docs/             # app_prd.md, tech-stack.md, agents/
-scripts/          # empty
+compose.yaml          # `docker compose up` — includes infra/compose.yaml
+infra/                # compose stack (app, db, redis, worker, traefik), db init script
+app/backend/          # uv project; src/ is the import root (from core.db import ...)
+  src/{auth,customers,scheduling,inventory,forms,billing,notifications,core}/
+  alembic/            # migrations; 0001 creates the two DB roles (ADR-0001)
+  tests/              # conftest.py = S1 harness (testcontainers Postgres + httpx ASGI)
+app/frontend/         # Vite + React + TS + Tailwind v4 + shadcn (src/components/ui)
+docs/                 # app_prd.md, tech-stack.md, DESIGN.md, adr/, agents/
 ```
 
-`core/` under `backend/src` is the only non-domain module — shared config, DB session, security/JWT helpers, and `store_document`/`fetch_document`.
+`core/` under `backend/src` is the only non-domain module — config, the two DB engines, logging, Celery app, and later security/JWT helpers and `store_document`/`fetch_document`.
 
-Note: the PRD's section 8 tree shows these domains directly under `app/`; the scaffold nests them under `app/backend/src/` to leave room for `app/frontend/`. The domain boundaries are what matter.
+## Commands
 
-There are no build/lint/test commands yet because no manifest or tooling exists. Once `package.json`/`pyproject.toml` are added, update this file with real commands (build, lint, single-test invocation) — don't invent them before then.
+Backend (`cd app/backend`, Python 3.12 via `uv`; system python is too old):
+
+- `uv sync` — install
+- `uv run pytest` / `uv run pytest tests/test_health.py -k name` — tests start a throwaway Postgres in Docker
+- `uv run ruff check . && uv run ruff format .`
+- `uv run alembic revision -m "..."` (needs `DATABASE_URL_MIGRATE`; copy `.env.example` to `.env` at the repo root)
+
+Frontend (`cd app/frontend`, Node 24 + npm):
+
+- `npm install` · `npm run dev` (proxies `/api` to traefik on `$VITE_API_PROXY`, default `http://localhost`)
+- `npm test` (vitest) · `npm run lint` (oxlint + tsc) · `npm run build`
+- `npx shadcn@latest add <component>` — follow `docs/DESIGN.md`
+
+Stack: `cp .env.example .env`, then `docker compose up` from the repo root. API at `http://localhost:${TRAEFIK_HTTP_PORT}/api/health`.
+
+## Testing seams
+
+- **S1** — HTTP through `httpx.ASGITransport` against a real PostgreSQL (testcontainers), migrated by Alembic, connected as `linsuite_app`. Fixture: `client` in `tests/conftest.py`. Never mock the database.
+- **S2** — pure functions, plain pytest.
+- Frontend: Vitest + React Testing Library, `fetch` stubbed per test.
 
 ## Stack
 

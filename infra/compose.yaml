@@ -1,0 +1,64 @@
+name: linsuite
+
+x-backend: &backend
+  build: ../app/backend
+  env_file: ../.env
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  db:
+    image: postgres:16-alpine
+    env_file: ../.env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init-roles.sh:/docker-entrypoint-initdb.d/10-roles.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    <<: *backend
+    command: sh -c "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000"
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.app.rule: Host(`${APP_HOST:-localhost}`)
+      traefik.http.routers.app.entrypoints: web
+      traefik.http.services.app.loadbalancer.server.port: "8000"
+
+  worker:
+    <<: *backend
+    command: celery -A core.celery_app worker --loglevel=info
+
+  traefik:
+    # 3.7+ required: older 3.x pin a Docker API version that Engine 29 rejects.
+    image: traefik:v3.7
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+    ports:
+      - "${TRAEFIK_HTTP_PORT:-80}:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - app
+
+volumes:
+  pgdata:
+  redisdata:
