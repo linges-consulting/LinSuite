@@ -19,6 +19,19 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     log_level: str = "INFO"
 
+    # --- Sessions (tech-stack §14) ---------------------------------------------------
+    # HS256 signing key for session JWTs. Rotating it logs everyone out, which is the
+    # intended emergency lever. No default: a shipped default is a forgeable session.
+    jwt_secret: str
+    # Staff Mode is the long-lived session. Admin Mode's short window is a separate token.
+    staff_session_hours: int = 12
+    # `Secure` on the session cookie. Off only for plain-HTTP local development.
+    cookie_secure: bool = True
+
+    # Screen new passwords against HaveIBeenPwned (only a 5-character SHA-1 prefix leaves
+    # the server). Off for air-gapped installs; the bundled list is then the only check.
+    breach_check_enabled: bool = True
+
     # First-run setup token (tech-stack §17): written 0600 here on every boot until setup
     # completes. In compose this path is a volume, so it survives a container replacement.
     setup_token_file: str = "/var/lib/linsuite/setup-token"

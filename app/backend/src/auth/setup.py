@@ -32,7 +32,7 @@ from auth.models import SetupToken, User
 from core.config import get_settings
 from core.db import SessionDep
 from core.models import Business
-from core.security import MIN_PASSWORD_LENGTH, hash_password
+from core.security import check_password_policy, hash_password
 
 log = logging.getLogger(__name__)
 
@@ -141,7 +141,10 @@ class SetupRequest(BaseModel):
     business_name: str = Field(min_length=1, max_length=200)
     timezone: str
     admin_email: EmailStr
-    admin_password: str = Field(min_length=MIN_PASSWORD_LENGTH)
+    # Not validated here: the policy includes a breach lookup, which is async and belongs
+    # in the handler. `core.security.check_password_policy` is the one authority, and this
+    # wizard uses it exactly as the account screens will.
+    admin_password: str
 
     @field_validator("timezone")
     @classmethod
@@ -179,6 +182,15 @@ async def complete_setup(payload: SetupRequest, session: SessionDep) -> dict[str
         log.warning("setup: rejected an attempt with an invalid token")
         raise HTTPException(status_code=403, detail="Invalid setup token")
 
+    rejected = await check_password_policy(payload.admin_password)
+    if rejected:
+        # Shaped like FastAPI's own 422 so the frontend reads one error format, and — like
+        # main.py's handler — carrying no trace of what was submitted.
+        raise HTTPException(
+            status_code=422,
+            detail=[{"type": "value_error", "loc": ["body", "admin_password"], "msg": rejected}],
+        )
+
     session.add(
         Business(
             id=1,
@@ -190,7 +202,7 @@ async def complete_setup(payload: SetupRequest, session: SessionDep) -> dict[str
     session.add(
         User(
             email=payload.admin_email.lower(),
-            password_hash=hash_password(payload.admin_password),
+            password_hash=await hash_password(payload.admin_password),
             is_admin=True,
         )
     )

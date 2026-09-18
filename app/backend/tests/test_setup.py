@@ -209,6 +209,21 @@ async def test_setup_rejects_a_password_under_twelve_characters(client):
     assert resp.json()["detail"][0]["loc"] == ["body", "admin_password"]
 
 
+async def test_setup_rejects_a_password_from_the_breach_list(client):
+    # The wizard screens with the same policy as login does; the harness has outbound
+    # checks disabled, so this is the bundled list answering.
+    token = await boot()
+
+    resp = await client.post(
+        "/api/setup", json={**PAYLOAD, "token": token, "admin_password": "passwordpassword"}
+    )
+
+    assert resp.status_code == 422
+    assert "passwordpassword" not in resp.text
+    assert resp.json()["detail"][0]["loc"] == ["body", "admin_password"]
+    assert await rows("SELECT 1 FROM users") == []
+
+
 async def test_a_validation_error_never_echoes_the_submitted_value(client):
     token = await boot()
 

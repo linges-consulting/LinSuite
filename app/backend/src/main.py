@@ -7,11 +7,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from auth.login import router as auth_router
 from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
 from core.config import get_settings
 from core.db import SessionDep, get_engine, get_purge_engine, session_scope
 from core.logging import configure_logging
+from core.redis import get_redis
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +27,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
     await get_engine().dispose()
     await get_purge_engine().dispose()
+    await get_redis().aclose()
 
 
 app = FastAPI(
@@ -44,6 +47,23 @@ async def validation_error(_: Request, exc: RequestValidationError) -> JSONRespo
     return JSONResponse({"detail": detail}, status_code=422)
 
 
+# Half of the CSRF defence for the session cookie; `SameSite=Lax` is the other half. An
+# HTML form can only send these three content types, so refusing them means a cross-origin
+# page cannot forge a state-changing request without a preflight it will not survive. This
+# is a middleware rather than a per-route dependency precisely so a future endpoint cannot
+# forget it.
+_FORM_CONTENT_TYPES = ("application/x-www-form-urlencoded", "multipart/form-data", "text/plain")
+_MUTATING = ("POST", "PUT", "PATCH", "DELETE")
+
+
+@app.middleware("http")
+async def require_json_body(request: Request, call_next):
+    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if request.method in _MUTATING and content_type in _FORM_CONTENT_TYPES:
+        return JSONResponse({"detail": "Send application/json"}, status_code=415)
+    return await call_next(request)
+
+
 @api.get("/health")
 async def health(session: SessionDep) -> JSONResponse:
     try:
@@ -55,5 +75,6 @@ async def health(session: SessionDep) -> JSONResponse:
     return JSONResponse({"status": "ok", "database": "ok"})
 
 
+api.include_router(auth_router)
 api.include_router(setup_router)
 app.include_router(api)
