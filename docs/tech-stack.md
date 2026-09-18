@@ -154,6 +154,25 @@ Cancelled invoices are retained rather than deleted: CRA requires business recor
   * **date-fns-tz** for wall-clock ↔ UTC conversion against the business timezone.
   * Overlap layout (concurrent appointments in one slot) hand-written — a small interval-packing function whose behaviour should be controlled directly.
 
+### Calendar grid specification (binding for the custom grid)
+
+**Grid structure.** 24 rows (hours), each hour exactly 60 px high. Columns are a configurable axis on one grid engine: the **day view** (default landing) shows one column per working staff member; the **week view** shows 7 columns (days). Both views share every rule below.
+
+**Typography and labels.** Time labels sit directly on the grid lines, not centred within the cells. Event titles must remain readable regardless of the event's background colour (contrast is computed, not assumed).
+
+**Current-time indicator.** A distinct red line marks the current time in the business timezone. The initial view scrolls to this line, not to the top of the day (midnight).
+
+**Event styling.** Each event takes a background colour from its owner — the staff member's colour. A 3 px stripe sits on the left edge; border radius is 10 % of the event's height (a fillet, not a fixed pixel radius).
+
+**Zero overlap (conflict handling).** Events occurring at the same time never overlap visually. Two simultaneous events sit side by side at 50 % width each; three take 33 % each; N take 1/N. Events are never stacked or hidden behind a "+1" indicator.
+
+**Interaction.**
+- *Creation:* click and drag on empty space to draw a new event.
+- *Snapping:* all actions snap to 15-minute increments. Even a 15-minute event displays a single-line, clipped title.
+- *Moving / resizing:* move an event by dragging its body. Resize only by dragging the bottom edge. Time labels on the event update live during the drag, not only on release.
+
+**All-day row.** Whole-day items — time off, vacation, statutory holidays — are pinned in a separate row above the main scrolling grid so they are always visible without obscuring the morning hours.
+
 ## 14. Account Security
 
 ### Authentication hardening
