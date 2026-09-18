@@ -47,6 +47,8 @@ test('a delayed sign-in counts the wait down and re-enables itself', async () =>
   await tick(2000)
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   expect(button).toBeEnabled()
+  // And the server's own "try again in 3 seconds" does not linger once it is untrue.
+  expect(screen.queryByText(/Too many attempts/)).not.toBeInTheDocument()
 })
 
 test('a locked account is named as locked, with the time it reopens', async () => {

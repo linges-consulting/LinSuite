@@ -225,7 +225,7 @@ function ReauthForm(props: {
       <Field
         label="Password"
         htmlFor="reauth-password"
-        error={throttle.blocked ? undefined : props.error}
+        error={throttle.is429 ? undefined : props.error}
       >
         <Input
           id="reauth-password"

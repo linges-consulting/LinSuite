@@ -14,6 +14,12 @@ import { ApiError } from '@/lib/api'
  * clock time it reopens — nobody watches a fifteen-minute countdown.
  */
 export type Throttle = {
+  /**
+   * The refusal was a 429, so this hook owns what is said about it — including once the wait
+   * has run out, when the server's own "try again in 4 seconds" has become untrue and the
+   * only honest thing on screen is nothing at all.
+   */
+  is429: boolean
   /** True while the server would refuse another attempt. The submit button follows this. */
   blocked: boolean
   message?: string
@@ -36,14 +42,15 @@ export function useThrottle(error: unknown): Throttle {
     return () => clearInterval(id)
   }, [retryAt])
 
-  if (retryAt === null) return { blocked: false }
+  if (retryAt === null) return { is429: false, blocked: false }
   // Reading the clock during render is the point: the remaining time is *meant* to differ on
   // every render, and holding a copy of it in state is what would make it wrong — a snapshot
   // taken before this error arrived would count down from the wrong instant.
   // oxlint-disable-next-line react/purity
   const seconds = Math.ceil((retryAt - Date.now()) / 1000)
-  if (seconds <= 0) return { blocked: false }
+  if (seconds <= 0) return { is429: true, blocked: false }
   return {
+    is429: true,
     blocked: true,
     message: locked
       ? `This account is temporarily locked until ${clockTime(retryAt)}.`

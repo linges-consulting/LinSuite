@@ -86,7 +86,7 @@ export function ChangePasswordPage() {
               onConfirm={setConfirm}
               error={
                 local.error ??
-                (currentError || throttle.blocked ? undefined : submit.error?.message)
+                (currentError || throttle.is429 ? undefined : submit.error?.message)
               }
               confirmError={local.confirmError}
             />

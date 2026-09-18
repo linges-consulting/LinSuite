@@ -44,7 +44,7 @@ export function ForgotPasswordPage() {
               <Field
                 label="Email"
                 htmlFor="email"
-                error={throttle.blocked ? undefined : submit.error?.message}
+                error={throttle.is429 ? undefined : submit.error?.message}
               >
                 <Input
                   id="email"

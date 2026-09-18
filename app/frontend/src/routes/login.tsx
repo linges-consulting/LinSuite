@@ -45,7 +45,7 @@ export function LoginPage() {
             <Field
               label="Password"
               htmlFor="password"
-              error={throttle.blocked ? undefined : submit.error?.message}
+              error={throttle.is429 ? undefined : submit.error?.message}
             >
               <Input
                 id="password"
