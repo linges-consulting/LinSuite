@@ -49,6 +49,7 @@ from auth.session import (
 from core.audit import record_event
 from core.config import get_settings
 from core.db import SessionDep
+from core.errors import INVALID_PASSWORD, Forbidden
 from core.security import check_password_policy, hash_password, verify_password
 from notifications.tasks import send_email
 
@@ -247,7 +248,9 @@ async def change_password(
         locked = await throttle.record_failure(db, user.email, user)
         await db.commit()
         log.warning("auth: failed password change for %s", user.email)
-        raise locked or HTTPException(status_code=403, detail="Incorrect password")
+        # The same reasoning as the re-authentication path: a wrong current password says
+        # nothing about the session, so it carries its own code and nothing global reacts.
+        raise locked or Forbidden(INVALID_PASSWORD, "Incorrect password")
 
     await throttle.clear(user.email)
 

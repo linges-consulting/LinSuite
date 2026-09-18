@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.models import Role, SetupToken, User
 from core.config import get_settings
 from core.db import SessionDep
+from core.errors import INVALID_SETUP_TOKEN, Forbidden
 from core.models import Business
 from core.security import check_password_policy, hash_password
 
@@ -180,7 +181,9 @@ async def complete_setup(payload: SetupRequest, session: SessionDep) -> dict[str
     stored = await session.scalar(select(SetupToken.token_hash))
     if stored is None or not secrets.compare_digest(_digest(payload.token), stored):
         log.warning("setup: rejected an attempt with an invalid token")
-        raise HTTPException(status_code=403, detail="Invalid setup token")
+        # Its own code rather than one of the session kinds: nobody is signed in here, so
+        # "your session changed" is not a thing this can mean. The wizard shows it inline.
+        raise Forbidden(INVALID_SETUP_TOKEN, "Invalid setup token")
 
     rejected = await check_password_policy(payload.admin_password)
     if rejected:

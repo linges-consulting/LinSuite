@@ -13,9 +13,8 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { assignRole, fetchAccounts, fetchRoles, unlockAccount, type AccountRow } from '@/lib/api'
+import { ACCOUNTS, ROLES } from '@/lib/query-keys'
 import { clockTime } from '@/lib/throttle'
-
-const ACCOUNTS = ['accounts'] as const
 
 /**
  * Who has an account, what role they hold, and the early unlock (PRD §7).
@@ -28,7 +27,7 @@ const ACCOUNTS = ['accounts'] as const
  */
 export function UsersPanel() {
   const accounts = useQuery({ queryKey: ACCOUNTS, queryFn: fetchAccounts })
-  const roles = useQuery({ queryKey: ['roles'], queryFn: fetchRoles })
+  const roles = useQuery({ queryKey: ROLES, queryFn: fetchRoles })
 
   if (accounts.isPending || roles.isPending) return <Skeleton className="h-48 w-full" />
   if (accounts.isError || roles.isError) {

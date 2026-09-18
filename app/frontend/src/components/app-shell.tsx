@@ -13,7 +13,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { useLogout, useSession } from '@/lib/auth'
-import { NAV } from '@/lib/nav'
+import { NAV, navFor } from '@/lib/nav'
 import { cn } from '@/lib/utils'
 
 const BUSINESS_NAME = 'LinSuite' // replaced by the business's own name once branding lands
@@ -21,6 +21,10 @@ const BUSINESS_NAME = 'LinSuite' // replaced by the business's own name once bra
 export function AppShell() {
   const [open, setOpen] = useState(false)
   const { pathname } = useLocation()
+  const { user } = useSession()
+  const nav = navFor(user)
+  // The title comes from the full list, not the filtered one: someone who reaches a screen
+  // they hold no capability for still deserves a heading over the refusal.
   const title = NAV.find((n) => pathname.startsWith(n.to))?.label ?? 'Home'
 
   return (
@@ -56,7 +60,7 @@ export function AppShell() {
           </Button>
         </div>
         <nav aria-label="Primary" className="flex flex-col gap-0.5 p-2">
-          {NAV.map(({ to, label, icon: Icon }) => (
+          {nav.map(({ to, label, icon: Icon }) => (
             <NavLink
               key={to}
               to={to}

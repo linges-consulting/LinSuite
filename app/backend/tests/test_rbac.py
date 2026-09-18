@@ -11,16 +11,19 @@ takes_effect_on_a_live_session` is the one that would fail if anybody ever cache
 the token.
 """
 
+import asyncio
 import json
 
 import pytest
 from fastapi import Depends
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
 from auth.capabilities import CAPABILITIES, Requires
 from core.db import get_purge_engine, session_scope
 from core.redis import get_redis
 from core.security import hash_password
+from main import app as main_app
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -558,6 +561,65 @@ async def _id_of(email: str) -> str:
         return str(await db.scalar(text("SELECT id FROM users WHERE email = :e"), {"e": email}))
 
 
+async def test_two_administrators_cannot_be_demoted_at_the_same_time(client, monkeypatch):
+    """The write skew the guard exists to survive.
+
+    Two requests demoting two *different* administrators touch no row in common, so under
+    READ COMMITTED neither blocks the other and each still sees the other's administrator
+    administering. Both counts pass, both commit, and the instance is left with nobody who
+    can administer it — which on a single-tenant deployment has no way back short of a
+    database console. Serialising the check is the whole of the fix, so this is the test
+    that fails without the advisory lock rather than merely looking concurrent.
+    """
+    await as_admin(client)
+    administrator = await role_id_named("Administrator")
+    staff = await role_id_named("Staff")
+    second = await add_user("second@cedar.example", administrator)
+    first = await _id_of(EMAIL)
+    cookie = client.cookies[COOKIE]
+
+    # The window between counting and committing is real but narrow — narrow enough that two
+    # requests through one ASGI transport miss it by luck rather than by design, which would
+    # make this test pass against the very bug it is here to catch. Holding each transaction
+    # open for a moment after its count makes the interleaving certain instead of lucky. It
+    # widens the existing window; it does not invent one.
+    #
+    # With the advisory lock in place the second request never reaches the count until the
+    # first has committed and released it, so the pause costs the guard nothing.
+    from auth import admin_users
+
+    real_guard = admin_users.assert_an_administrator_remains
+
+    async def slow_guard(db):
+        await real_guard(db)
+        await asyncio.sleep(0.25)
+
+    monkeypatch.setattr(admin_users, "assert_an_administrator_remains", slow_guard)
+
+    async def demote(user_id: str):
+        # A client each: one `AsyncClient` serialises its own requests, so sharing one would
+        # test the guard against a queue rather than against a race.
+        async with AsyncClient(transport=ASGITransport(app=main_app), base_url="http://test") as c:
+            c.cookies.set(COOKIE, cookie)
+            return await c.patch(f"{USERS_ENDPOINT}/{user_id}/role", json={"role_id": staff})
+
+    results = await asyncio.gather(demote(first), demote(second))
+
+    codes = sorted(r.status_code for r in results)
+    assert codes == [200, 409], [r.text for r in results]
+    # The point of the exercise: somebody is still administering.
+    async with session_scope() as db:
+        left = await db.scalar(
+            text(
+                "SELECT count(*) FROM users u WHERE EXISTS (SELECT 1 FROM role_capabilities "
+                "rc WHERE rc.role_id = u.role_id AND rc.capability = 'admin') AND EXISTS "
+                "(SELECT 1 FROM role_capabilities rc WHERE rc.role_id = u.role_id AND "
+                "rc.capability = 'roles.manage')"
+            )
+        )
+    assert left >= 1
+
+
 # --- users ---------------------------------------------------------------------------------
 
 
@@ -649,6 +711,55 @@ async def test_every_403_the_api_emits_names_its_kind(client):
 
     assert staff_mode.json()["code"] == "admin_mode_required"
     assert no_capability.json()["code"] == "capability_required"
+
+
+async def test_every_403_the_api_emits_carries_a_code(client):
+    """The invariant, kept honest in one place.
+
+    "Some 403s are coded" is the state that invites a test fake to invent a code the server
+    never sends — which is how `Incorrect password` came to be labelled `admin_mode_required`
+    in the frontend harness, one step from telling somebody who mistyped that their Admin
+    Mode had expired. Every 403 below is a different code path, and every one must name its
+    kind.
+    """
+    # The setup wizard, before anybody is signed in at all.
+    async with session_scope() as db:
+        await db.execute(text("DELETE FROM businesses"))
+        await db.commit()
+    from auth import setup as setup_mod
+
+    async with session_scope() as db:
+        await setup_mod.bootstrap_setup_token(db)
+    bad_token = await client.post("/api/setup", json={**SETUP, "token": "not the token"})
+
+    await login(client)
+    # No live window, and no password offered: the expected lapsed-grant race.
+    reauth_needed = await client.post("/api/auth/mode", json={"mode": "admin"})
+    # A password that was actually tried, and was wrong.
+    wrong_password = await client.post(
+        "/api/auth/mode", json={"mode": "admin", "password": "not the password"}
+    )
+    # Both wrong passwords feed the one per-account counter, so the second attempt is
+    # inside the progressive delay by design. The user coming back a second later is the
+    # case under test here; the delay itself is `test_lockout.py`'s subject.
+    from auth import throttle
+
+    await get_redis().delete(throttle.delay_key(EMAIL))
+    wrong_current = await client.post(
+        "/api/auth/password/change",
+        json={"current_password": "also not it", "new_password": "a brand new passphrase"},
+    )
+
+    for resp, code in (
+        (bad_token, "invalid_setup_token"),
+        (reauth_needed, "admin_mode_required"),
+        (wrong_password, "invalid_password"),
+        (wrong_current, "invalid_password"),
+    ):
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["code"] == code, resp.text
+        # `detail` stays the sentence a person reads, whatever the code says.
+        assert isinstance(resp.json()["detail"], str)
 
 
 # --- the audit log ---------------------------------------------------------------------------

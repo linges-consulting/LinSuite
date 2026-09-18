@@ -19,6 +19,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
+import { CAPABILITIES, ROLES } from '@/lib/query-keys'
 import {
   createRole,
   deleteRole,
@@ -28,9 +29,6 @@ import {
   type Capability,
   type Role,
 } from '@/lib/api'
-
-const ROLES = ['roles'] as const
-const CAPABILITIES = ['capabilities'] as const
 
 /**
  * Roles, and the capabilities toggled on each (PRD §1, §7).

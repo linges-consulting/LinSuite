@@ -144,9 +144,13 @@ export function stubApi({
       if (url === '/api/auth/me') return Response.json(account())
       if (url === '/api/auth/password/change') {
         if (body.current_password !== password) {
-          // Not a capability or mode refusal — a wrong current password. No `code`, so the
-          // query client leaves it to the screen that asked.
-          return Response.json({ detail: 'Incorrect password' }, { status: 403 })
+          // A wrong current password. It carries a code like every 403 the server sends,
+          // and it is deliberately one the query client does not act on — the form that
+          // collected the password is what should react.
+          return Response.json(
+            { detail: 'Incorrect password', code: 'invalid_password' },
+            { status: 403 },
+          )
         }
         if (body.new_password.length < 12) {
           return Response.json(
@@ -180,8 +184,11 @@ export function stubApi({
               )
             }
             if (body.password !== PASSWORD) {
+              // `invalid_password`, never `admin_mode_required`: the window is not the
+              // problem, the typing is. Labelling it the other way would have the query
+              // client toast "Admin Mode expired" at somebody who simply mistyped.
               return Response.json(
-                { detail: 'Incorrect password', code: 'admin_mode_required' },
+                { detail: 'Incorrect password', code: 'invalid_password' },
                 { status: 403 },
               )
             }

@@ -69,7 +69,11 @@ One primary action per screen. Destructive actions sit apart from primary ones a
 shadcn/ui (Radix, `radix-nova` preset) in `src/components/ui/` — vendored, edit freely but keep the API.
 Installed: button, input, label, card, dialog, dropdown-menu, table, sonner (toasts), tabs, badge, skeleton,
 popover, command (+ its input-group/textarea dependencies — the searchable-list half of a combobox).
-Add more with `npx shadcn@latest add <name>` from `app/frontend`.
+Add more with `npx shadcn@latest add <name>` from `app/frontend`. The generator writes
+`import { cn } from "cn"` — repoint it at `@/lib/utils` and do **not** install the `cn`
+package to make the error go away: it is a real package (the CLI's own dependency) that
+resolves to something else entirely. `tests/dependencies.test.ts` fails if either half
+comes back.
 
 - `EmptyState` (`src/components/empty-state.tsx`) for every empty list/table: icon, title, one sentence, optional action.
 - `Badge` variants for status: `success`, `warning`, `info`, `destructive` (tinted), `secondary`/`outline` for neutral tags.

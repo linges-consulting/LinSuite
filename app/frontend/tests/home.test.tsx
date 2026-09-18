@@ -11,7 +11,15 @@ function stubApi(health: Response) {
     vi.fn(async (url: string) => {
       if (url === '/api/setup/status') return Response.json({ required: false })
       if (url === '/api/auth/me')
-        return Response.json({ id: 'u1', email: 'owner@cedar.example', role: 'Administrator' })
+        // Capabilities included, because the nav is drawn from them: a fake that names a
+        // role but sends no capabilities describes an account the server cannot produce,
+        // and this test would then be asserting the sidebar of a user who does not exist.
+        return Response.json({
+          id: 'u1',
+          email: 'owner@cedar.example',
+          role: 'Administrator',
+          capabilities: ['admin', 'roles.manage', 'users.manage', 'catalog.manage'],
+        })
       return health.clone()
     }),
   )

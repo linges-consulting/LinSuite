@@ -36,6 +36,7 @@ from auth.session import (
 )
 from core.audit import record_event
 from core.db import SessionDep
+from core.errors import ADMIN_MODE_REQUIRED, INVALID_PASSWORD, Forbidden
 from core.security import verify_password
 
 log = logging.getLogger(__name__)
@@ -219,9 +220,8 @@ async def switch_mode(
     )
 
 
-_REAUTH_REQUIRED = HTTPException(
-    status_code=403, detail="Enter your password to switch to Admin Mode."
-)
+# Genuinely the Admin Mode kind: there is no live window, and the way out is to open one.
+_REAUTH_REQUIRED = Forbidden(ADMIN_MODE_REQUIRED, "Enter your password to switch to Admin Mode.")
 
 
 async def _reauthenticate(password: str | None, user: User, claims: dict, db: SessionDep) -> None:
@@ -260,7 +260,11 @@ async def _reauthenticate(password: str | None, user: User, claims: dict, db: Se
         locked = await throttle.record_failure(db, user.email, user)
         await db.commit()
         log.warning("auth: failed Admin Mode re-authentication for %s", user.email)
-        raise locked or HTTPException(status_code=403, detail="Incorrect password")
+        # Not an Admin Mode refusal, however much it looks like one from the endpoint it
+        # came from: the window is not the problem, the typing was. A global handler that
+        # treated this as a lapsed window would tell somebody who mistyped that their Admin
+        # Mode expired, and send them to do again the thing they were already doing.
+        raise locked or Forbidden(INVALID_PASSWORD, "Incorrect password")
 
     await throttle.clear(user.email)
 

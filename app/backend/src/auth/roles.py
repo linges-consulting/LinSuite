@@ -16,7 +16,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import delete, exists, func, select
+from sqlalchemy import delete, exists, func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from auth.capabilities import CAPABILITIES, Requires, unknown
@@ -32,6 +32,12 @@ RolesManager = Annotated[User, Depends(Requires("roles.manage"))]
 # `roles.manage` can reach Admin Mode and not the screen that hands out capabilities, which
 # is a lockout with extra steps.
 ADMIN_FLOOR = ("admin", "roles.manage")
+
+# The advisory-lock key that serialises every check of the floor above. An arbitrary
+# constant, chosen once: what matters is only that every caller of
+# `assert_an_administrator_remains` names the same number, since two callers using different
+# keys would not exclude each other and the guard would be back to being skewable.
+_ADMIN_FLOOR_LOCK = 0x11B5_017E  # "linsuite" floor, as a memorable constant
 
 _SYSTEM_ROLE_EDIT = (
     "Administrator and Staff are built-in roles, so what they can do is fixed. "
@@ -134,7 +140,19 @@ async def assert_an_administrator_remains(db: SessionDep) -> None:
     It counts capabilities rather than membership of a role named `Administrator`. A business
     that renames the job, or splits it across a custom role, is doing something legitimate;
     what must never happen is the capability itself going unheld.
+
+    **Why the lock.** This is a write skew, and READ COMMITTED does not prevent it: two
+    requests demoting two *different* administrators touch no common row, so neither blocks
+    the other, and each counts the other's administrator as still administering. Both pass,
+    both commit, and the instance is left with nobody who can administer it — a state that
+    has no way back on a single-tenant deployment short of a database console.
+
+    The count is over rows the change does not touch, so there is nothing to `SELECT ... FOR
+    UPDATE`: the conflict is with a row that must keep *not* changing. A transaction-scoped
+    advisory lock is the thing that serialises check-and-write here, and it is released by
+    commit or rollback, so no path has to remember to give it back.
     """
+    await db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _ADMIN_FLOOR_LOCK})
     await db.flush()
 
     def holds(capability: str):
@@ -263,4 +281,15 @@ async def delete_role(role_id: uuid.UUID, admin: RolesManager, db: SessionDep) -
         actor_user_id=admin.id,
         metadata={"name": name},
     )
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # The count above and this delete are two statements, so somebody can be assigned
+        # the role in between. `ON DELETE RESTRICT` then refuses, and without this the
+        # administrator would get a 500 for losing a race — the same answer as the counted
+        # case is the honest one, since the fact is identical: somebody holds it.
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Somebody was given this role a moment ago. Move them off it and try again.",
+        ) from None
