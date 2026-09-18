@@ -193,8 +193,11 @@ async def confirm_reset(payload: ResetConfirm, db: SessionDep) -> None:
     # A reset is exactly the event somebody whose mailbox was taken over needs to hear about,
     # and the one they did not initiate. Enqueued after the commit, like the link itself.
     throttle.notify_password_changed(user.email)
-    # The link proved the mailbox; whatever failed attempts preceded it are not this person's.
-    await throttle.clear(user.email)
+    # The lock goes too, not just the failure count. The link proved control of the mailbox and
+    # the password it was protecting no longer exists, so there is nothing left for the lock to
+    # defend — and this is the recovery path a locked sole administrator has, since unlocking
+    # through the admin endpoint would need an Admin Mode window the lock itself refuses.
+    await throttle.unlock(user.email)
     log.info("auth: password reset completed for %s", user.email)
 
 

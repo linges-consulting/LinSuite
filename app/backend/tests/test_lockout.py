@@ -290,6 +290,19 @@ async def test_the_offence_tier_decays(client):
     assert round(await get_redis().ttl(throttle.lock_key(EMAIL)) / 60) == TIERS[0]
 
 
+async def test_every_counter_carries_an_expiry_the_moment_it_is_written(client):
+    """`INCR` creates a key with no TTL, so the expiry is a second command — and one that goes
+    missing changes the rules silently. A failure count that never expires turns "consecutive"
+    into "ever"; an offence tier that never expires opens every later lockout at the ceiling."""
+    await login(client, password="not the password")
+
+    assert await get_redis().ttl(throttle.fail_key(EMAIL)) > 0
+
+    await burn(client, THRESHOLD - 1)
+
+    assert await get_redis().ttl(throttle.tier_key(EMAIL)) > 0
+
+
 async def test_the_tier_key_expires_on_its_own(client):
     await burn(client, THRESHOLD)
 
@@ -409,6 +422,36 @@ async def test_unlocking_an_account_that_is_not_locked_is_harmless(client):
     assert (await unlock(client, user_id)).status_code == 204
 
 
+async def test_a_completed_reset_reopens_a_locked_account(client, sent_emails):
+    """The recovery path a locked administrator actually has.
+
+    The admin unlock endpoint needs an Admin Mode window, which needs a re-authentication the
+    lock refuses — so on a single-administrator instance ten failed guesses would otherwise
+    lock the business out of its own administration for the whole tier, and again after every
+    expiry. A reset proves control of the mailbox and replaces the password the lock was
+    protecting, which leaves the lock nothing to protect.
+    """
+    import re
+
+    await burn(client, THRESHOLD)
+    assert (await login(client)).status_code == 429
+    sent_emails.clear()
+
+    # Asking for a link is not a password attempt, so a locked account may still ask.
+    assert (await request_reset(client)).status_code == 202
+    token = re.search(r"token=([A-Za-z0-9_-]+)", sent_emails[0].text).group(1)
+    assert (
+        await client.post(
+            "/api/auth/password-reset/confirm",
+            json={"token": token, "new_password": NEW_PASSWORD},
+        )
+    ).status_code == 204
+
+    # Immediately, with no wait and nobody intervening.
+    assert (await login(client, password=NEW_PASSWORD)).status_code == 200
+    assert await get_redis().exists(throttle.lock_key(EMAIL), throttle.tier_key(EMAIL)) == 0
+
+
 async def test_unlocking_an_unknown_user_is_a_404(client):
     await login(client)
     await enter_admin(client)
@@ -455,6 +498,10 @@ async def test_the_lockout_is_written_to_the_audit_log(client):
     assert metadata["email"] == EMAIL
     assert metadata["tier"] == 1
     assert metadata["unlock_at"]
+    # No actor. The account is the target — the thing this was done to — and whoever was
+    # guessing is unknown; naming the victim as the actor reads as an accusation.
+    assert locked[0][2] is None
+    assert [e[2] for e in await audit() if e[0] == "login.failed"] == [None] * THRESHOLD
 
 
 async def test_a_password_change_notifies_the_owner(client, sent_emails):

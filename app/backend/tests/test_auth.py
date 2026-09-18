@@ -253,16 +253,22 @@ async def test_a_failed_login_is_written_to_the_audit_log(client):
     assert event == "login.failed"
     assert target == "user"
     assert json.loads(metadata) == {"email": EMAIL, "reason": "bad_password"}
-    assert has_actor is True
+    # Never an actor. Whoever typed that password is exactly who is not known, and filing the
+    # account as the actor reads as an accusation of the person who was attacked. The account
+    # is named as the *target* — the thing an attempt was made against.
+    assert has_actor is False
+    assert (await rows("SELECT target_id FROM audit_events"))[0][0] is not None
 
 
-async def test_a_failed_login_for_an_unknown_account_is_logged_without_an_actor(client):
+async def test_a_failed_login_for_an_unknown_account_names_no_target(client):
+    """The one difference between the two rows, and it is not in the answer the caller got."""
     await login(client, email="nobody@cedar.example", password="whatever you like")
 
     ((event, _, metadata, has_actor),) = await audit()
     assert event == "login.failed"
     assert json.loads(metadata) == {"email": "nobody@cedar.example", "reason": "unknown_email"}
     assert has_actor is False
+    assert (await rows("SELECT target_id FROM audit_events"))[0][0] is None
 
 
 async def test_a_failed_login_never_records_the_attempted_password(client):

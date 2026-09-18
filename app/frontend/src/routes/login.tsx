@@ -54,7 +54,7 @@ export function LoginPage() {
                 autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                aria-invalid={submit.error ? true : undefined}
+                aria-invalid={submit.error && !throttle.is429 ? true : undefined}
               />
             </Field>
             {throttle.message && <FormError>{throttle.message}</FormError>}

@@ -71,7 +71,10 @@ services:
       # rule on the `app` router would otherwise silently take these paths back.
       traefik.http.routers.auth.rule: Host(`${APP_HOST:-localhost}`) && PathPrefix(`/api/auth`)
       traefik.http.routers.auth.entrypoints: web
-      traefik.http.routers.auth.priority: "100"
+      # Well above any rule length: the default priority *is* the rule's length, and a long
+      # production FQDN in APP_HOST would push the `app` router past a smaller number here —
+      # silently putting the credential endpoints back on the loose bucket.
+      traefik.http.routers.auth.priority: "1000"
       traefik.http.routers.auth.service: app
       traefik.http.routers.auth.middlewares: auth-ratelimit@docker
 

@@ -108,8 +108,10 @@ async def login(payload: LoginRequest, response: Response, db: SessionDep) -> Us
             db,
             "login.failed",
             target_type="user",
+            # No actor: whoever typed this is exactly who we do not know. The account is named
+            # as the target, which is what it is — the thing an attempt was made against.
             target_id=str(user.id) if user else None,
-            actor_user_id=user.id if user else None,
+            actor_user_id=None,
             metadata={"email": email, "reason": "bad_password" if user else "unknown_email"},
         )
         locked = await throttle.record_failure(db, email, user)
@@ -242,8 +244,11 @@ async def _reauthenticate(password: str | None, user: User, claims: dict, db: Se
             "login.failed",
             target_type="user",
             target_id=str(user.id),
-            actor_user_id=user.id,
-            metadata={"email": user.email, "reason": "reauth"},
+            # Null like every other `login.failed`, so one event type means one thing. The
+            # session that made the attempt is named in `jti` instead — more precise than an
+            # actor column would be, since what is known here is the session, not the person.
+            actor_user_id=None,
+            metadata={"email": user.email, "reason": "reauth", "jti": claims["jti"]},
         )
         locked = await throttle.record_failure(db, user.email, user)
         await db.commit()

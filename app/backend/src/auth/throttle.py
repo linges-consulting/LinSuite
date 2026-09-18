@@ -116,9 +116,42 @@ async def guard(email: str) -> None:
 
 
 async def clear(email: str) -> None:
-    """A verified password ends the run. The offence tier is deliberately left alone — it
-    decays on its own, and one success is not evidence the earlier lockout was a mistake."""
+    """A verified password ends the run. The lock and the offence tier are deliberately left
+    alone: a password verified *through* a lock is impossible (`guard` refuses first), and one
+    success is not evidence the earlier lockout was a mistake."""
     await get_redis().delete(fail_key(email), delay_key(email))
+
+
+async def unlock(email: str) -> None:
+    """Everything this address has against it, gone — lock, tier, count and delay.
+
+    Two callers, and both have *more* than a password: an administrator in Admin Mode, and a
+    completed reset, which proved control of the mailbox and then rewrote the credential the
+    lock existed to protect.
+
+    The reset path is not a convenience. Without it a locked account's only early exit is the
+    admin endpoint, which needs an Admin Mode window, which needs a re-authentication that
+    `guard` refuses — so ten failures against the only administrator's address would lock an
+    instance out of its own administration for the whole tier, and again after every expiry.
+    That is the denial-of-service this feature exists to avoid, reached the long way round.
+    """
+    await get_redis().delete(lock_key(email), tier_key(email), fail_key(email), delay_key(email))
+
+
+async def _count(key: str, ttl_seconds: int) -> int:
+    """Increment a counter that is only meaningful with an expiry, and give it one.
+
+    Both commands in a single transaction because `INCR` creates the key with no TTL: a failure
+    between the two round trips would strand it. A TTL-less failure count turns "consecutive"
+    into "ever", and a TTL-less offence tier never decays, so every later lockout would open at
+    the 24-hour ceiling. Not `nx`, unlike the reset counter — these windows slide.
+    """
+    redis = get_redis()
+    async with redis.pipeline(transaction=True) as pipe:
+        pipe.incr(key)
+        pipe.expire(key, ttl_seconds)
+        count, _ = await pipe.execute()
+    return count
 
 
 async def record_failure(db: SessionDep, email: str, user: User | None) -> HTTPException | None:
@@ -135,8 +168,7 @@ async def record_failure(db: SessionDep, email: str, user: User | None) -> HTTPE
     # the same millisecond can both cross the threshold and lock twice — one extra audit row,
     # one extra notice, one tier skipped. Move the whole sequence into a Lua script if a real
     # deployment ever shows it happening; a scripted attacker gains nothing from it.
-    failures = await redis.incr(fail_key(email))
-    await redis.expire(fail_key(email), settings.lockout_failure_window_minutes * 60)
+    failures = await _count(fail_key(email), settings.lockout_failure_window_minutes * 60)
 
     if failures < settings.lockout_threshold:
         await redis.set(delay_key(email), "1", ex=_delay_seconds(failures))
@@ -148,8 +180,7 @@ async def record_failure(db: SessionDep, email: str, user: User | None) -> HTTPE
 async def _lock(db: SessionDep, email: str, user: User | None) -> HTTPException:
     settings = get_settings()
     redis = get_redis()
-    tier = await redis.incr(tier_key(email))
-    await redis.expire(tier_key(email), settings.lockout_tier_decay_hours * 3600)
+    tier = await _count(tier_key(email), settings.lockout_tier_decay_hours * 3600)
     minutes = settings.lockout_tier_minutes[min(tier, len(settings.lockout_tier_minutes)) - 1]
     unlock_at = datetime.now(UTC) + timedelta(minutes=minutes)
 
@@ -164,7 +195,10 @@ async def _lock(db: SessionDep, email: str, user: User | None) -> HTTPException:
             "account.locked",
             target_type="user",
             target_id=str(user.id),
-            actor_user_id=user.id,
+            # No actor. The account named here is the one this was done *to*; whoever was
+            # guessing is unknown, and filing them as the actor reads as an accusation of the
+            # person who was attacked.
+            actor_user_id=None,
             metadata={"email": user.email, "tier": tier, "unlock_at": unlock_at.isoformat()},
         )
         # Enqueued here rather than after the caller's commit: the lock is already real in
@@ -261,9 +295,7 @@ async def unlock_account(user_id: uuid.UUID, admin: AdminUser, db: SessionDep) -
     if user is None:
         raise HTTPException(status_code=404, detail="No such user.")
 
-    await get_redis().delete(
-        lock_key(user.email), tier_key(user.email), fail_key(user.email), delay_key(user.email)
-    )
+    await unlock(user.email)
     record_event(
         db,
         "account.unlocked",

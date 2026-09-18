@@ -72,6 +72,9 @@ test('a locked account is named as locked, with the time it reopens', async () =
   // No countdown for a quarter of an hour, and no invitation to try again meanwhile.
   expect(screen.getByRole('button', { name: 'Sign in' })).toBeDisabled()
   expect(screen.queryByText('Incorrect email or password')).not.toBeInTheDocument()
+  // And the field is not marked invalid: nothing is wrong with what was typed, and a red ring
+  // under "this account is locked" tells a screen reader to go and correct the password.
+  expect(screen.getByLabelText('Password')).not.toHaveAttribute('aria-invalid')
 })
 
 test('the forgotten-password form says when it will take another request', async () => {
