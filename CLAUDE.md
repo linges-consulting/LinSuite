@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```
 compose.yaml          # `docker compose up` — includes infra/compose.yaml
-infra/                # compose stack (app, db, redis, worker, traefik), db init script
+infra/                # compose stack (app, worker, frontend, db, redis, traefik), db init script
 app/backend/          # uv project; src/ is the import root (from core.db import ...)
   src/{auth,customers,scheduling,inventory,forms,billing,notifications,core}/
   alembic/            # migrations; 0001 creates the two DB roles (ADR-0001)
@@ -32,7 +32,7 @@ Frontend (`cd app/frontend`, Node 24 + npm):
 - `npm test` (vitest) · `npm run lint` (oxlint + tsc) · `npm run build`
 - `npx shadcn@latest add <component>` — follow `docs/DESIGN.md`
 
-Stack: `cp .env.example .env`, then `docker compose up` from the repo root. API at `http://localhost:${TRAEFIK_HTTP_PORT}/api/health`.
+Stack: `cp .env.example .env`, then `docker compose up` from the repo root. Traefik serves the shell at `http://localhost:${TRAEFIK_HTTP_PORT}/` (Vite dev server in the `frontend` service, bind-mounted, HMR works) and routes `/api` to FastAPI.
 
 ## Testing seams
 

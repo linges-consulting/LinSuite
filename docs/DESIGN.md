@@ -28,7 +28,17 @@ Dark mode is designed with light, not derived from it; check contrast in both.
 
 ## Typography
 
-Inter Variable, self-hosted (`@fontsource-variable/inter`; on-prem installs cannot depend on Google Fonts).
+**One family, deliberately.** Inter Variable, self-hosted (`@fontsource-variable/inter`; on-prem installs
+cannot depend on Google Fonts), for headings, body and data alike. A display/body pairing earns its keep on
+marketing pages; in a tool where the largest text is an 18px page title and most of the screen is a 14px
+table, a second face adds a download and a seam without adding hierarchy — weight and size do that work.
+Inter's `cv11`/`ss01` alternates and tabular figures are enabled globally.
+
+`--font-heading` is a real token (shadcn's `Card`, `Dialog` titles use `font-heading`) and resolves to
+`--font-sans`. It stays as the single place a pairing would be introduced — e.g. a tenant's brand face —
+so that decision never requires touching components. Do not point it at a different family without a
+DESIGN.md update.
+
 Body is **14px** (`text-sm`) — this is a desktop tool; 16px is for marketing. Inputs stay ≥16px on mobile widths.
 
 | Role | Class |

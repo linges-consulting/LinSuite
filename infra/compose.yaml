@@ -37,13 +37,28 @@ services:
     command: sh -c "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000"
     labels:
       traefik.enable: "true"
-      traefik.http.routers.app.rule: Host(`${APP_HOST:-localhost}`)
+      # Longer rule = higher default priority, so /api wins over the frontend's catch-all.
+      traefik.http.routers.app.rule: Host(`${APP_HOST:-localhost}`) && PathPrefix(`/api`)
       traefik.http.routers.app.entrypoints: web
       traefik.http.services.app.loadbalancer.server.port: "8000"
 
   worker:
     <<: *backend
     command: celery -A core.celery_app worker --loglevel=info
+
+  # Vite dev server serving the React shell; a production image is a later task.
+  frontend:
+    image: node:24-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host"
+    volumes:
+      - ../app/frontend:/app
+      - frontend_node_modules:/app/node_modules # Linux binaries, kept off the host tree
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.frontend.rule: Host(`${APP_HOST:-localhost}`)
+      traefik.http.routers.frontend.entrypoints: web
+      traefik.http.services.frontend.loadbalancer.server.port: "5173"
 
   traefik:
     # 3.7+ required: older 3.x pin a Docker API version that Engine 29 rejects.
@@ -58,7 +73,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
       - app
+      - frontend
 
 volumes:
   pgdata:
   redisdata:
+  frontend_node_modules:

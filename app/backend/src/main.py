@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
@@ -10,6 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from core.config import get_settings
 from core.db import get_engine, get_purge_engine, get_session
 from core.logging import configure_logging
+
+log = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -32,7 +35,9 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 async def health(session: SessionDep) -> JSONResponse:
     try:
         await session.execute(text("SELECT 1"))
-    except Exception:  # noqa: BLE001 — any DB failure is "degraded", the detail goes to logs
+    except Exception:
+        # Any DB failure is "degraded" to the caller; the cause goes to the log, never the body.
+        log.exception("health: database unreachable")
         return JSONResponse({"status": "degraded", "database": "unreachable"}, status_code=503)
     return JSONResponse({"status": "ok", "database": "ok"})
 
