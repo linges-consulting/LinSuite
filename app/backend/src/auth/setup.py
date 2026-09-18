@@ -1,13 +1,19 @@
 """First-run setup wizard (tech-stack §17).
 
-A freshly deployed instance is unclaimed. Every boot mints a one-time token, logs it to
-stdout (`docker compose logs app`) and writes it `0600` to disk; the wizard will not act
-without it. Whoever finds the URL before the operator meets a prompt they cannot answer.
+A freshly deployed instance is unclaimed. The first boot mints a token, logs it to stdout
+(`docker compose logs app`) and writes it `0600` to disk; the wizard will not act without
+it. Whoever finds the URL before the operator meets a prompt they cannot answer.
+
+Only the token's digest is persisted, in `setup_token`. That is what makes every worker of
+every restart agree on which token is valid, and it means a restart does not invalidate the
+token the operator already copied out. A later boot re-mints only when the file has gone
+missing, because a token nobody can read is a token nobody can finish setup with.
 
 Completion writes `businesses.setup_completed_at`, and that database flag — not an
-in-memory one — is what disables every route here, permanently and across restarts.
+in-memory one — is what closes `POST /api/setup`, permanently and across restarts.
 """
 
+import hashlib
 import logging
 import os
 import secrets
@@ -17,11 +23,12 @@ from zoneinfo import available_timezones
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field, field_validator
-from sqlalchemy import exists, select
+from sqlalchemy import delete, exists, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.models import User
+from auth.models import SetupToken, User
 from core.config import get_settings
 from core.db import SessionDep
 from core.models import Business
@@ -29,11 +36,11 @@ from core.security import MIN_PASSWORD_LENGTH, hash_password
 
 log = logging.getLogger(__name__)
 
-# This boot's token. Deliberately process-local and never persisted: a restart invalidates
-# it, and the operator reads the new one from the logs.
-# Ceiling: one app process. Under `uvicorn --workers N` each worker would mint its own and
-# only one would accept a given token; move it to a row in `businesses` if that day comes.
-_token: str | None = None
+
+def _digest(token: str) -> str:
+    # The token is 256 bits of urandom; there is no low-entropy secret here for a slow hash
+    # to protect, and a plain digest can be compared in constant time.
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 async def setup_is_complete(session: AsyncSession) -> bool:
@@ -43,24 +50,51 @@ async def setup_is_complete(session: AsyncSession) -> bool:
 
 
 async def bootstrap_setup_token(session: AsyncSession) -> str | None:
-    """Called once per boot. Returns the new token, or None once setup has completed."""
-    global _token
+    """Called once per boot. Returns a newly minted token, or None if none was needed."""
     if await setup_is_complete(session):
-        _token = None
         return None
 
-    _token = secrets.token_urlsafe(32)
-    log.info("setup: this instance is unclaimed. Setup token: %s", _token)
-    _write_token_file(_token)
-    return _token
-
-
-def forget_setup_token() -> None:
-    global _token
-    _token = None
     path = get_settings().setup_token_file
+    # The stored digest is the authority: a file without one is a leftover, not a token.
+    minted = await session.scalar(select(exists().select_from(SetupToken)))
+    if minted and _token_file_exists():
+        # Already minted, and still readable. Restarting must not invalidate the token the
+        # operator is part way through using.
+        log.info("setup: this instance is unclaimed. The setup token is in %s", path)
+        return None
+
+    token = secrets.token_urlsafe(32)
+    # Concurrent workers all reach here on a first boot; the database picks the winner.
+    claimed = await session.execute(
+        insert(SetupToken)
+        .values(id=1, token_hash=_digest(token))
+        .on_conflict_do_nothing(index_elements=["id"])
+    )
+    if claimed.rowcount == 0:
+        if _token_file_exists():
+            # A sibling worker won and has already written its token out.
+            log.info("setup: this instance is unclaimed. The setup token is in %s", path)
+            await session.rollback()
+            return None
+        # A digest from an earlier boot whose file is gone: unusable, so replace it.
+        await session.execute(update(SetupToken).values(token_hash=_digest(token)))
+        log.warning("setup: the token file was missing, so the setup token has been replaced")
+
+    await session.commit()
+    log.info("setup: this instance is unclaimed. Setup token: %s", token)
+    _write_token_file(token)
+    return token
+
+
+# Every filesystem touch sits in a sync helper: these run at boot, before the server takes
+# a connection, and on the one request that finishes setup.
+def _token_file_exists() -> bool:
+    return os.path.exists(get_settings().setup_token_file)
+
+
+def _remove_token_file() -> None:
     try:
-        os.remove(path)
+        os.remove(get_settings().setup_token_file)
     except OSError:
         pass
 
@@ -102,28 +136,30 @@ class SetupRequest(BaseModel):
 
 
 async def _setup_still_open(session: SessionDep) -> None:
-    """Once setup is done this whole router stops existing, for good."""
+    """Completion closes this door for good; the read-only routes stay open."""
     if await setup_is_complete(session):
         raise HTTPException(status_code=404, detail="Not Found")
 
 
-router = APIRouter(prefix="/setup", tags=["setup"], dependencies=[Depends(_setup_still_open)])
+router = APIRouter(prefix="/setup", tags=["setup"])
 
 
 @router.get("/status")
-async def setup_status() -> dict[str, bool]:
-    """Reachable only while setup is pending; afterwards this 404s, which means "done"."""
-    return {"required": True}
+async def setup_status(session: SessionDep) -> dict[str, bool]:
+    """Always answers: the frontend uses it to decide whether to show the wizard."""
+    return {"required": not await setup_is_complete(session)}
 
 
 @router.get("/timezones")
 async def setup_timezones() -> dict[str, list[str]]:
+    """Stays available after setup — changing the business timezone reuses this list."""
     return {"timezones": _iana_timezones()}
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=201, dependencies=[Depends(_setup_still_open)])
 async def complete_setup(payload: SetupRequest, session: SessionDep) -> dict[str, str]:
-    if _token is None or not secrets.compare_digest(payload.token, _token):
+    stored = await session.scalar(select(SetupToken.token_hash))
+    if stored is None or not secrets.compare_digest(_digest(payload.token), stored):
         log.warning("setup: rejected an attempt with an invalid token")
         raise HTTPException(status_code=403, detail="Invalid setup token")
 
@@ -142,6 +178,8 @@ async def complete_setup(payload: SetupRequest, session: SessionDep) -> dict[str
             is_admin=True,
         )
     )
+    # The token dies with the request that used it, in the same transaction as the business.
+    await session.execute(delete(SetupToken))
     try:
         await session.commit()
     except IntegrityError:
@@ -149,6 +187,6 @@ async def complete_setup(payload: SetupRequest, session: SessionDep) -> dict[str
         await session.rollback()
         raise HTTPException(status_code=409, detail="Setup has already been completed") from None
 
-    forget_setup_token()
+    _remove_token_file()
     log.info("setup: completed for %r; the setup routes are now disabled", payload.business_name)
     return {"status": "complete"}

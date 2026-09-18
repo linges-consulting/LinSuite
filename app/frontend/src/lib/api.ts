@@ -10,10 +10,9 @@ export type SetupPayload = {
   admin_password: string
 }
 
-/** The backend deletes its setup routes once setup completes, so 404 means "already done". */
+/** Answers whether this instance is still unclaimed; available before and after setup. */
 export async function fetchSetupStatus(): Promise<SetupStatus> {
   const res = await fetch('/api/setup/status')
-  if (res.status === 404) return { required: false }
   if (!res.ok) throw new Error(`Setup status failed: HTTP ${res.status}`)
   return res.json()
 }

@@ -1,5 +1,6 @@
 """S1: the token-gated first-run setup wizard, over a real PostgreSQL as `linsuite_app`."""
 
+import hashlib
 import logging
 import os
 import stat
@@ -29,8 +30,8 @@ async def unclaimed(database):
     async with session_scope() as session:
         await session.execute(text("DELETE FROM users"))
         await session.execute(text("DELETE FROM businesses"))
+        await session.execute(text("DELETE FROM setup_token"))
         await session.commit()
-    setup.forget_setup_token()
     if os.path.exists(token_file()):
         os.remove(token_file())
     yield
@@ -61,11 +62,43 @@ async def test_boot_writes_the_token_to_stdout_and_to_a_0600_file(caplog):
     assert any(token in r.getMessage() for r in caplog.records if r.name == "auth.setup")
 
 
-async def test_every_boot_regenerates_the_token_until_setup_completes():
-    first = await boot()
-    second = await boot()
+async def test_a_restart_keeps_the_original_token(client):
+    original = await boot()
 
-    assert first and second and first != second
+    # A second instance against the same database: no new token, and the operator is told
+    # where to read the one that still works.
+    assert await boot() is None
+    with open(token_file()) as f:
+        assert f.read().strip() == original
+
+    resp = await client.post("/api/setup", json={**PAYLOAD, "token": original})
+    assert resp.status_code == 201
+
+
+async def test_a_token_file_without_a_stored_digest_is_a_leftover(client):
+    # e.g. a restored database, or an upgrade from a build that kept the token in memory.
+    with open(token_file(), "w") as f:
+        f.write("left-over\n")
+
+    token = await boot()
+
+    assert token and token != "left-over"
+    assert (
+        await client.post("/api/setup", json={**PAYLOAD, "token": "left-over"})
+    ).status_code == 403
+
+
+async def test_a_token_whose_file_was_lost_is_replaced_on_the_next_boot(client):
+    lost = await boot()
+    os.remove(token_file())
+
+    replacement = await boot()
+
+    assert replacement and replacement != lost
+    assert (await client.post("/api/setup", json={**PAYLOAD, "token": lost})).status_code == 403
+    assert (
+        await client.post("/api/setup", json={**PAYLOAD, "token": replacement})
+    ).status_code == 201
 
 
 # --- status and timezones -------------------------------------------------------------
@@ -109,14 +142,20 @@ async def test_setup_rejects_a_wrong_token(client):
     assert await rows("SELECT 1 FROM businesses") == []
 
 
-async def test_setup_rejects_a_token_from_a_previous_boot(client):
-    stale = await boot()
-    await boot()
-
-    resp = await client.post("/api/setup", json={**PAYLOAD, "token": stale})
+async def test_setup_rejects_any_token_when_none_has_been_minted(client):
+    # No boot has run: nothing can be accepted, least of all a guess.
+    resp = await client.post("/api/setup", json={**PAYLOAD, "token": "anything"})
 
     assert resp.status_code == 403
     assert await rows("SELECT 1 FROM businesses") == []
+
+
+async def test_only_the_digest_of_the_token_is_stored(client):
+    token = await boot()
+
+    ((stored,),) = await rows("SELECT token_hash FROM setup_token")
+    assert token not in stored
+    assert stored == hashlib.sha256(token.encode()).hexdigest()
 
 
 # --- validation -----------------------------------------------------------------------
@@ -173,12 +212,13 @@ async def test_completion_creates_the_business_and_the_first_administrator(clien
     assert is_admin is True
 
 
-async def test_completion_removes_the_token_file(client):
+async def test_completion_destroys_the_token_file_and_its_stored_digest(client):
     token = await boot()
 
     await client.post("/api/setup", json={**PAYLOAD, "token": token})
 
     assert not os.path.exists(token_file())
+    assert await rows("SELECT 1 FROM setup_token") == []
 
 
 async def test_a_second_attempt_with_the_original_token_is_rejected(client):
@@ -193,22 +233,25 @@ async def test_a_second_attempt_with_the_original_token_is_rejected(client):
     assert await rows("SELECT name FROM businesses") == [("Cedar Lane Clinic",)]
 
 
-@pytest.mark.parametrize("path", ["/api/setup/status", "/api/setup/timezones"])
-async def test_every_setup_route_is_not_found_after_completion(client, path):
+async def test_status_and_timezones_still_answer_after_completion(client):
     token = await boot()
     assert (await client.post("/api/setup", json={**PAYLOAD, "token": token})).status_code == 201
 
-    assert (await client.get(path)).status_code == 404
+    status = await client.get("/api/setup/status")
+    assert status.status_code == 200
+    assert status.json() == {"required": False}
+    # Task 9 lets an administrator change the timezone, and reuses this list to do it.
+    assert (await client.get("/api/setup/timezones")).status_code == 200
 
 
 async def test_setup_stays_disabled_across_a_restart(client):
     token = await boot()
     assert (await client.post("/api/setup", json={**PAYLOAD, "token": token})).status_code == 201
 
-    # Restart: a fresh process boots against the same database. The flag is in the DB,
-    # so no token is minted and the routes stay gone.
+    # Restart: a fresh instance boots against the same database. The flag is in the DB, so
+    # no token is minted and the original one is dead even to a process that never saw it.
     assert await boot() is None
 
     assert not os.path.exists(token_file())
-    assert (await client.get("/api/setup/status")).status_code == 404
+    assert (await client.get("/api/setup/status")).json() == {"required": False}
     assert (await client.post("/api/setup", json={**PAYLOAD, "token": token})).status_code == 404

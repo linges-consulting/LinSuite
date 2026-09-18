@@ -8,7 +8,7 @@ least one administrator" guarantee.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Index, String, func, text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, Integer, String, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
@@ -26,4 +26,22 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320))
     password_hash: Mapped[str] = mapped_column(String(255))
     is_admin: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SetupToken(Base):
+    """The first-run token, as a SHA-256 hex digest. One row, or none once setup is done.
+
+    In the database rather than in memory so every worker of every restart agrees on which
+    token is valid. Only the digest is stored: the plaintext exists in the boot log and in
+    the 0600 file, and nowhere else.
+    """
+
+    __tablename__ = "setup_token"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_setup_token_single_row"),)
+
+    id: Mapped[int] = mapped_column(
+        Integer, primary_key=True, server_default="1", autoincrement=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

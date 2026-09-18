@@ -234,9 +234,10 @@ PIPEDA requires reporting to the Privacy Commissioner and affected individuals o
 
 ## 17. First-Run Bootstrap: **token-gated setup wizard**
 
-* A browser setup wizard collects the first administrator account, business name, IANA timezone and branding in one flow, ending with TOTP enrolment.
-* **The wizard is gated by a one-time setup token** generated on first boot, written to stdout (`docker compose logs app`) and to a `0600` file on disk. Without this, a setup wizard on a public IP is a race — whoever reaches the instance first between deployment and setup owns the clinic. An attacker who finds the URL first meets a token prompt they cannot answer.
-* On completion the token is invalidated and the setup route is permanently disabled via a database flag, so it cannot be replayed.
+* A browser setup wizard collects **three things and no more**: the business name, its IANA timezone, and the first administrator account (email + Argon2id password, 12-character minimum). Branding is configured later from the admin panel, and TOTP enrolment is prompted at that administrator's first login once MFA exists — neither belongs in the flow that claims the instance, and both are reachable only after there is an account to attach them to. The timezone is collected here rather than later because appointment storage semantics depend on it and retrofitting wall-clock handling is painful.
+* **The wizard is gated by a setup token** minted on first boot, written to stdout (`docker compose logs app`) and to a `0600` file on disk. Without this, a setup wizard on a public IP is a race — whoever reaches the instance first between deployment and setup owns the clinic. An attacker who finds the URL first meets a token prompt they cannot answer.
+* **Only the token's SHA-256 digest is persisted** (single-row `setup_token`, inserted `ON CONFLICT DO NOTHING` so concurrent workers settle the race in the database). The plaintext lives in the log and the file and nowhere else. A restart therefore does not invalidate a token the operator has already copied out: later boots re-log the file path instead of minting. Re-minting happens only when the file has gone missing, since a token nobody can read cannot finish setup.
+* On completion the token row and its file are destroyed in the same transaction that writes `businesses.setup_completed_at`, and that flag makes `POST /api/setup` return 404 for good — across restarts and for processes that never saw the token. `GET /api/setup/status` keeps answering (the frontend needs to know whether to show the wizard) and `GET /api/setup/timezones` stays available for editing the timezone later.
 
 ## 18. Form Template Versioning
 

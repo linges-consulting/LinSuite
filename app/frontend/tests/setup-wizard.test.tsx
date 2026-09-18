@@ -14,11 +14,14 @@ function stubApi({ claimed = false, post }: Api = {}) {
     'fetch',
     vi.fn(async (url: string, init?: RequestInit) => {
       calls.push({ url, body: init?.body ? JSON.parse(init.body as string) : undefined })
-      if (claimed && url.startsWith('/api/setup')) return new Response(null, { status: 404 })
-      if (url === '/api/setup/status') return Response.json({ required: true })
+      // status and timezones answer either way; only POST closes once the instance is claimed.
+      if (url === '/api/setup/status') return Response.json({ required: !claimed })
       if (url === '/api/setup/timezones')
         return Response.json({ timezones: ['America/Toronto', 'Europe/Berlin', 'UTC'] })
-      if (url === '/api/setup') return post ?? Response.json({ status: 'complete' }, { status: 201 })
+      if (url === '/api/setup') {
+        if (claimed) return new Response(null, { status: 404 })
+        return post ?? Response.json({ status: 'complete' }, { status: 201 })
+      }
       return Response.json({ status: 'ok', database: 'ok' })
     }),
   )
@@ -152,13 +155,15 @@ test('a rejected token returns to the first step with the reason', async () => {
   expect(screen.queryByText('Invalid setup token')).not.toBeInTheDocument()
 })
 
-test('/setup is a not-found state once the instance is claimed', async () => {
-  stubApi({ claimed: true })
+test('/setup is a not-found state once status says setup is no longer required', async () => {
+  const calls = stubApi({ claimed: true })
 
   renderApp('/setup')
 
   expect(await screen.findByText('Setup is already complete')).toBeInTheDocument()
   expect(screen.queryByLabelText('Setup token')).not.toBeInTheDocument()
+  // Read from the body, not from a 404.
+  expect(calls.some((c) => c.url === '/api/setup/status')).toBe(true)
 })
 
 test('a claimed instance renders the app shell, not the wizard', async () => {
