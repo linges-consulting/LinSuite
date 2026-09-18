@@ -9,6 +9,7 @@ import { HomePage } from '@/routes/home'
 import { LoginPage } from '@/routes/login'
 import { PlaceholderPage } from '@/routes/placeholder'
 import { ResetPasswordPage } from '@/routes/reset-password'
+import { SettingsPage } from '@/routes/settings'
 import { SetupPage } from '@/routes/setup'
 
 /**
@@ -76,7 +77,7 @@ export default function App() {
         <Route path="schedule" element={<PlaceholderPage title="Schedule" />} />
         <Route path="clients" element={<PlaceholderPage title="Clients" />} />
         <Route path="catalog" element={<PlaceholderPage title="Catalog" />} />
-        <Route path="settings" element={<PlaceholderPage title="Settings" />} />
+        <Route path="settings" element={<SettingsPage />} />
       </Route>
     </Routes>
   )

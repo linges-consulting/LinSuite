@@ -83,7 +83,10 @@ export function stubApi({
   const account = () => ({
     id: 'u1',
     email: 'owner@cedar.example',
-    is_admin: dualRole,
+    role: dualRole ? 'Administrator' : 'Staff',
+    capabilities: dualRole
+      ? ['admin', 'roles.manage', 'users.manage', 'schedule.view']
+      : ['schedule.view', 'customers.view'],
     mode: granted() ? mode : 'staff',
     can_switch_modes: dualRole,
     admin_grant_expires_at: granted() ? new Date(grantExpiresAt).toISOString() : null,
@@ -141,6 +144,8 @@ export function stubApi({
       if (url === '/api/auth/me') return Response.json(account())
       if (url === '/api/auth/password/change') {
         if (body.current_password !== password) {
+          // Not a capability or mode refusal — a wrong current password. No `code`, so the
+          // query client leaves it to the screen that asked.
           return Response.json({ detail: 'Incorrect password' }, { status: 403 })
         }
         if (body.new_password.length < 12) {
@@ -157,19 +162,28 @@ export function stubApi({
       if (url === '/api/auth/mode') {
         if (body.mode === 'admin') {
           if (!dualRole) {
-            return Response.json({ detail: 'Switch to Admin Mode to do this.' }, { status: 403 })
+            return Response.json(
+              { detail: 'Switch to Admin Mode to do this.', code: 'admin_mode_required' },
+              { status: 403 },
+            )
           }
           if (!granted()) {
             // A request with no password is the lapsed-grant race, not a failed attempt —
             // the server refuses it before it looks at the hash, and records nothing.
             if (body.password === undefined) {
               return Response.json(
-                { detail: 'Enter your password to switch to Admin Mode.' },
+                {
+                  detail: 'Enter your password to switch to Admin Mode.',
+                  code: 'admin_mode_required',
+                },
                 { status: 403 },
               )
             }
             if (body.password !== PASSWORD) {
-              return Response.json({ detail: 'Incorrect password' }, { status: 403 })
+              return Response.json(
+                { detail: 'Incorrect password', code: 'admin_mode_required' },
+                { status: 403 },
+              )
             }
             grantExpiresAt = Date.now() + ADMIN_WINDOW_MS
           }
@@ -179,7 +193,10 @@ export function stubApi({
       }
       if (url === '/api/admin/business') {
         if (account().mode !== 'admin') {
-          return Response.json({ detail: 'Switch to Admin Mode to do this.' }, { status: 403 })
+          return Response.json(
+            { detail: 'Switch to Admin Mode to do this.', code: 'admin_mode_required' },
+            { status: 403 },
+          )
         }
         return Response.json({
           name: 'Cedar Lane Clinic',

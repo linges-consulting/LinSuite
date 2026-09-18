@@ -26,6 +26,19 @@ export async function fetchTimezones(): Promise<string[]> {
 export class ApiError extends Error {
   status: number
   /**
+   * The parsed response body, kept whole. `code` is read off it for the 403 rules, and
+   * anything else a screen needs is already here rather than needing a second read of a
+   * stream that has been consumed.
+   */
+  body: unknown
+  /**
+   * Which kind of 403 this is — `admin_mode_required`, `capability_required` or
+   * `password_change_required`. Null for every other status. The server sends it precisely
+   * so the client never has to match on the prose in `detail`, which is written for a
+   * person and gets reworded.
+   */
+  code: string | null
+  /**
    * When the server will accept another attempt, as a local clock instant — absolute rather
    * than a duration, so a screen that renders it a second later still counts down honestly.
    * Null unless the answer was a 429 carrying `Retry-After`.
@@ -34,9 +47,14 @@ export class ApiError extends Error {
   /** A 429 because the account is locked, rather than because the last attempt was too soon. */
   locked: boolean
 
-  constructor(message: string, res: Response) {
+  constructor(message: string, res: Response, body: unknown = null) {
     super(message)
     this.status = res.status
+    this.body = body
+    this.code =
+      typeof (body as { code?: unknown })?.code === 'string'
+        ? (body as { code: string }).code
+        : null
     const retryAfter = Number(res.headers.get('Retry-After'))
     this.retryAt = retryAfter > 0 ? Date.now() + retryAfter * 1000 : null
     // A header rather than an inference from the size of `Retry-After`: the delay ceiling and
@@ -45,9 +63,16 @@ export class ApiError extends Error {
   }
 }
 
-/** The refusal to throw, with everything the server said about it attached. */
+/** The refusal to throw, with everything the server said about it attached.
+ *
+ * The body is read once: a `Response` body is a stream, so parsing it for the message and
+ * again for the code would leave the second read empty. */
 async function failure(res: Response, fallback: string): Promise<ApiError> {
-  return new ApiError(await problem(res, fallback), res)
+  const body = await res
+    .json()
+    .then((parsed) => parsed ?? null)
+    .catch(() => null)
+  return new ApiError(problem(body, fallback, res.status), res, body)
 }
 
 export async function completeSetup(payload: SetupPayload): Promise<void> {
@@ -65,7 +90,14 @@ export type Mode = 'staff' | 'admin'
 export type User = {
   id: string
   email: string
-  is_admin: boolean
+  /** The role's name, for display. */
+  role: string
+  /**
+   * The capability keys this account holds. Used to leave out what it cannot use — never to
+   * decide whether something is allowed. The server re-reads the role on every request and
+   * refuses regardless of what this list says.
+   */
+  capabilities: string[]
   mode: Mode
   /** True only for someone holding both capabilities; the switcher hides entirely otherwise. */
   can_switch_modes: boolean
@@ -165,25 +197,25 @@ export async function logout(): Promise<void> {
 /**
  * The session rides in an httpOnly cookie, so the backend refuses any mutating request
  * that is not `application/json` — the one content type a cross-origin HTML form cannot
- * produce. Every write goes through here so that header is never forgotten.
+ * produce. Every write goes through here so that header is never forgotten, DELETE
+ * included: the guard covers every mutating method, not just the ones that carry a body.
  */
-function post(url: string, body: unknown): Promise<Response> {
+function send(method: string, url: string, body?: unknown): Promise<Response> {
   return fetch(url, {
-    method: 'POST',
+    method,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    body: body === undefined ? undefined : JSON.stringify(body),
   })
 }
 
+const post = (url: string, body: unknown) => send('POST', url, body)
+
 /** FastAPI's `detail` is a string for our own errors and a list for validation failures. */
-async function problem(res: Response, fallback: string): Promise<string> {
-  const detail = await res
-    .json()
-    .then((body) => body?.detail)
-    .catch(() => null)
+function problem(body: unknown, fallback: string, status: number): string {
+  const detail = (body as { detail?: unknown } | null)?.detail
   if (typeof detail === 'string') return detail
   if (Array.isArray(detail) && detail[0]?.msg) return detail[0].msg
-  return `${fallback}: HTTP ${res.status}`
+  return `${fallback}: HTTP ${status}`
 }
 
 export async function fetchHealth(): Promise<Health> {
@@ -191,4 +223,83 @@ export async function fetchHealth(): Promise<Health> {
   // 503 still carries a valid body; anything else is a real failure.
   if (!res.ok && res.status !== 503) throw new Error(`Health check failed: HTTP ${res.status}`)
   return res.json()
+}
+
+// --- roles, capabilities and accounts (Admin Mode) -------------------------------------
+
+/** One entry of the server's capability registry. The list is fetched rather than hard-coded
+ *  here, so the toggles on screen are always the ones the server actually enforces. */
+export type Capability = {
+  key: string
+  description: string
+  group: string
+  requires_admin_mode: boolean
+}
+
+export type Role = {
+  id: string
+  name: string
+  description: string
+  is_system: boolean
+  capabilities: string[]
+  /** How many accounts hold it — what disables the delete button, and the reason it gives. */
+  user_count: number
+}
+
+export type AccountRow = {
+  id: string
+  email: string
+  role: string
+  role_id: string
+  /** When the temporary lock lifts, or null when the account is not locked. ISO-8601. */
+  locked_until: string | null
+}
+
+export async function fetchCapabilities(): Promise<Capability[]> {
+  const res = await fetch('/api/admin/capabilities')
+  if (!res.ok) throw await failure(res, 'Could not load the capabilities')
+  return (await res.json()).capabilities
+}
+
+export async function fetchRoles(): Promise<Role[]> {
+  const res = await fetch('/api/admin/roles')
+  if (!res.ok) throw await failure(res, 'Could not load the roles')
+  return (await res.json()).roles
+}
+
+export type RoleDraft = { name: string; description: string; capabilities: string[] }
+
+export async function createRole(draft: RoleDraft): Promise<Role> {
+  const res = await send('POST', '/api/admin/roles', draft)
+  if (!res.ok) throw await failure(res, 'Could not create the role')
+  return res.json()
+}
+
+export async function updateRole(id: string, draft: Partial<RoleDraft>): Promise<Role> {
+  const res = await send('PATCH', `/api/admin/roles/${id}`, draft)
+  if (!res.ok) throw await failure(res, 'Could not save the role')
+  return res.json()
+}
+
+export async function deleteRole(id: string): Promise<void> {
+  const res = await send('DELETE', `/api/admin/roles/${id}`)
+  if (!res.ok) throw await failure(res, 'Could not delete the role')
+}
+
+export async function fetchAccounts(): Promise<AccountRow[]> {
+  const res = await fetch('/api/admin/users')
+  if (!res.ok) throw await failure(res, 'Could not load the accounts')
+  return (await res.json()).users
+}
+
+export async function assignRole(userId: string, roleId: string): Promise<AccountRow> {
+  const res = await send('PATCH', `/api/admin/users/${userId}/role`, { role_id: roleId })
+  if (!res.ok) throw await failure(res, 'Could not change the role')
+  return res.json()
+}
+
+/** Reopen a locked account before its lock expires. The offence tier goes with it. */
+export async function unlockAccount(userId: string): Promise<void> {
+  const res = await send('POST', `/api/admin/users/${userId}/unlock`, {})
+  if (!res.ok) throw await failure(res, 'Could not unlock the account')
 }
