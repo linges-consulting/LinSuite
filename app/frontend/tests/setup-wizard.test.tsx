@@ -5,15 +5,19 @@ import { MemoryRouter } from 'react-router'
 import App from '@/App'
 import { ThemeProvider } from '@/lib/theme'
 
-type Api = { claimed?: boolean; post?: Response }
+type Api = { claimed?: boolean; signedIn?: boolean; post?: Response }
 
-/** Routes the three setup calls; anything else is the health check. */
-function stubApi({ claimed = false, post }: Api = {}) {
+/** Routes the three setup calls and the session check; anything else is the health check. */
+function stubApi({ claimed = false, signedIn = false, post }: Api = {}) {
   const calls: { url: string; body?: unknown }[] = []
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string, init?: RequestInit) => {
       calls.push({ url, body: init?.body ? JSON.parse(init.body as string) : undefined })
+      if (url === '/api/auth/me') {
+        if (!signedIn) return Response.json({ detail: 'Not authenticated' }, { status: 401 })
+        return Response.json({ id: 'u1', email: 'owner@cedar.example', is_admin: true })
+      }
       // status and timezones answer either way; only POST closes once the instance is claimed.
       if (url === '/api/setup/status') return Response.json({ required: !claimed })
       if (url === '/api/setup/timezones')
@@ -166,8 +170,8 @@ test('/setup is a not-found state once status says setup is no longer required',
   expect(calls.some((c) => c.url === '/api/setup/status')).toBe(true)
 })
 
-test('a claimed instance renders the app shell, not the wizard', async () => {
-  stubApi({ claimed: true })
+test('a claimed instance with a session renders the app shell, not the wizard', async () => {
+  stubApi({ claimed: true, signedIn: true })
 
   renderApp('/')
 

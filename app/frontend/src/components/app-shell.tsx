@@ -1,8 +1,17 @@
-import { Menu, X } from 'lucide-react'
+import { LogOut, Menu, UserRound, X } from 'lucide-react'
 import { useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
+import { useLogout, useSession } from '@/lib/auth'
 import { NAV } from '@/lib/nav'
 import { cn } from '@/lib/utils'
 
@@ -79,6 +88,7 @@ export function AppShell() {
           <h1 className="text-base font-semibold tracking-tight">{title}</h1>
           <div className="ml-auto flex items-center gap-1">
             <ThemeToggle />
+            <UserMenu />
           </div>
         </header>
         <main className="flex-1 p-4 md:p-6">
@@ -86,5 +96,31 @@ export function AppShell() {
         </main>
       </div>
     </div>
+  )
+}
+
+function UserMenu() {
+  const { user } = useSession()
+  const signOut = useLogout()
+  if (!user) return null
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon-sm" aria-label="Account">
+          <UserRound />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuLabel className="truncate font-normal text-muted-foreground">
+          {user.email}
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => signOut.mutate()} disabled={signOut.isPending}>
+          <LogOut aria-hidden />
+          Log out
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   )
 }

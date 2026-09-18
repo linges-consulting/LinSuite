@@ -8,6 +8,12 @@ globalThis.ResizeObserver ??= class {
 }
 Element.prototype.scrollIntoView ??= () => {}
 
+// jsdom implements no Pointer Events API at all, and Radix's menus/popovers open on
+// `pointerdown` and capture the pointer while open. Without these they simply never open.
+Element.prototype.hasPointerCapture ??= () => false
+Element.prototype.setPointerCapture ??= () => {}
+Element.prototype.releasePointerCapture ??= () => {}
+
 
 window.matchMedia ??= (query: string) =>
   ({

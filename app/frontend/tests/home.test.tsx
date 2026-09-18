@@ -4,6 +4,19 @@ import { MemoryRouter } from 'react-router'
 import App from '@/App'
 import { ThemeProvider } from '@/lib/theme'
 
+/** A claimed instance with someone signed in; `health` is what /api/health answers. */
+function stubApi(health: Response) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (url: string) => {
+      if (url === '/api/setup/status') return Response.json({ required: false })
+      if (url === '/api/auth/me')
+        return Response.json({ id: 'u1', email: 'owner@cedar.example', is_admin: true })
+      return health.clone()
+    }),
+  )
+}
+
 function renderApp(path = '/') {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
@@ -20,7 +33,7 @@ function renderApp(path = '/') {
 afterEach(() => vi.unstubAllGlobals())
 
 test('home shows backend health from /api/health', async () => {
-  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ status: 'ok', database: 'ok' })))
+  stubApi(Response.json({ status: 'ok', database: 'ok' }))
 
   renderApp()
 
@@ -30,10 +43,7 @@ test('home shows backend health from /api/health', async () => {
 })
 
 test('home shows a degraded database as unreachable', async () => {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async () => Response.json({ status: 'degraded', database: 'unreachable' }, { status: 503 })),
-  )
+  stubApi(Response.json({ status: 'degraded', database: 'unreachable' }, { status: 503 }))
 
   renderApp()
 
@@ -42,7 +52,7 @@ test('home shows a degraded database as unreachable', async () => {
 })
 
 test('shell exposes the four primary destinations', async () => {
-  vi.stubGlobal('fetch', vi.fn(async () => Response.json({ status: 'ok', database: 'ok' })))
+  stubApi(Response.json({ status: 'ok', database: 'ok' }))
 
   renderApp('/clients')
 

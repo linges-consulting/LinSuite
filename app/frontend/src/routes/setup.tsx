@@ -1,7 +1,8 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Check, ChevronsUpDown, CircleCheck, KeyRound, Lock } from 'lucide-react'
-import { useState, type FormEvent } from 'react'
+import { useState } from 'react'
 import { EmptyState } from '@/components/empty-state'
+import { AuthLayout, Field, Form } from '@/components/form'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import {
@@ -13,13 +14,12 @@ import {
   CommandList,
 } from '@/components/ui/command'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   completeSetup,
   fetchSetupStatus,
   fetchTimezones,
-  SetupError,
+  ApiError,
   type SetupPayload,
 } from '@/lib/api'
 
@@ -71,13 +71,13 @@ export function SetupPage() {
     onSuccess: () => setStep('done'),
     // A bad token can only be found out here, at the end: send them back to fix it.
     onError: (error) => {
-      if (error instanceof SetupError && error.status === 403) setStep('token')
+      if (error instanceof ApiError && error.status === 403) setStep('token')
     },
   })
 
   if (status && !status.required && step !== 'done') {
     return (
-      <Layout>
+      <AuthLayout>
         <EmptyState
           icon={Lock}
           title="Setup is already complete"
@@ -88,13 +88,13 @@ export function SetupPage() {
             </Button>
           }
         />
-      </Layout>
+      </AuthLayout>
     )
   }
 
   if (step === 'done') {
     return (
-      <Layout>
+      <AuthLayout>
         <Card>
           <CardHeader>
             <div className="mb-1 flex size-10 items-center justify-center rounded-lg bg-success/10 text-success">
@@ -113,14 +113,14 @@ export function SetupPage() {
             </Button>
           </CardContent>
         </Card>
-      </Layout>
+      </AuthLayout>
     )
   }
 
   const error = submit.error?.message
 
   return (
-    <Layout>
+    <AuthLayout>
       <Card>
         <CardHeader className="border-b">
           <p className="text-xs font-medium text-muted-foreground">
@@ -163,19 +163,7 @@ export function SetupPage() {
           )}
         </CardContent>
       </Card>
-    </Layout>
-  )
-}
-
-function Layout({ children }: { children: React.ReactNode }) {
-  return (
-    <div className="flex min-h-dvh flex-col items-center justify-center gap-6 p-4">
-      <div className="flex items-center gap-2.5 font-semibold">
-        <span aria-hidden className="size-6 rounded-md bg-primary" />
-        LinSuite
-      </div>
-      <div className="w-full max-w-md">{children}</div>
-    </div>
+    </AuthLayout>
   )
 }
 
@@ -375,38 +363,6 @@ function TimezoneCombobox(props: { value: string; onChange: (value: string) => v
         </Command>
       </PopoverContent>
     </Popover>
-  )
-}
-
-function Form(props: { onSubmit: () => void; children: React.ReactNode }) {
-  const onSubmit = (e: FormEvent) => {
-    e.preventDefault()
-    props.onSubmit()
-  }
-  return (
-    <form noValidate={false} onSubmit={onSubmit} className="flex flex-col gap-5">
-      {props.children}
-    </form>
-  )
-}
-
-function Field(props: {
-  label: string
-  htmlFor: string
-  error?: string
-  hint?: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="flex flex-col gap-2">
-      <Label htmlFor={props.htmlFor}>{props.label}</Label>
-      {props.children}
-      {props.error ? (
-        <p className="text-xs text-destructive">{props.error}</p>
-      ) : props.hint ? (
-        <p className="text-xs text-muted-foreground">{props.hint}</p>
-      ) : null}
-    </div>
   )
 }
 
