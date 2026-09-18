@@ -6,6 +6,10 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
 
+# Every model module must be imported here, or its table is missing from the metadata
+# that autogenerate compares the database against.
+from auth import models as _auth_models  # noqa: F401
+from core import models as _core_models  # noqa: F401
 from core.config import get_settings
 from core.db import Base
 

@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     log_level: str = "INFO"
 
+    # First-run setup token (tech-stack §17): written 0600 here on every boot until setup
+    # completes. In compose this path is a volume, so it survives a container replacement.
+    setup_token_file: str = "/var/lib/linsuite/setup-token"
+
 
 @lru_cache
 def get_settings() -> Settings:

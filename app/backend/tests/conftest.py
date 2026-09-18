@@ -21,7 +21,7 @@ BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 @pytest.fixture(scope="session")
-def database() -> Iterator[dict[str, str]]:
+def database(tmp_path_factory) -> Iterator[dict[str, str]]:
     """Start Postgres, migrate it, and expose the three DSNs the app is configured with."""
     container = PostgresContainer("postgres:16-alpine", driver="asyncpg").with_env(
         "POSTGRES_HOST_AUTH_METHOD", "trust"
@@ -35,6 +35,8 @@ def database() -> Iterator[dict[str, str]]:
             "DATABASE_URL": f"postgresql+asyncpg://linsuite_app@{host}:{port}/{db}",
             "DATABASE_URL_PURGE": f"postgresql+asyncpg://linsuite_purge@{host}:{port}/{db}",
             "REDIS_URL": "redis://localhost:6379/15",
+            # The setup token file must not land in the real data dir during tests.
+            "SETUP_TOKEN_FILE": str(tmp_path_factory.mktemp("run") / "setup-token"),
         }
         os.environ.update(urls)
 

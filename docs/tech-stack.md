@@ -8,7 +8,7 @@ Decisions are final unless a documented trigger says otherwise. Each entry recor
 
 ### Authentication: self-rolled JWT
 
-* **Decision:** Build auth in-house — FastAPI dependencies for the session/permission layer, `passlib` for password hashing, a JWT library for token issue/verify. No third-party IdP (Auth0, Clerk), no auth framework (`fastapi-users`).
+* **Decision:** Build auth in-house — FastAPI dependencies for the session/permission layer, `argon2-cffi` for password hashing (passlib's last release predates Argon2id being the default, and it adds a wrapper over the same library), a JWT library for token issue/verify. No third-party IdP (Auth0, Clerk), no auth framework (`fastapi-users`).
 * **Why:** The PRD's dual-mode sliding-window session policy (Admin 15–30 min hard timeout, Staff long-lived, explicit context switching between them) is a custom state machine. Off-the-shelf providers and libraries model a single session lifecycle, so the policy would have to be bolted on around them — more work than writing it directly, and harder to reason about during a security review.
 
 ## 2. Frontend User Interface: **React + Vite + Tailwind CSS + shadcn/ui**

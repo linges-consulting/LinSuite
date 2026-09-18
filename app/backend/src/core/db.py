@@ -7,7 +7,9 @@ retention-expiry job. Nothing else may import it.
 
 from collections.abc import AsyncIterator
 from functools import lru_cache
+from typing import Annotated
 
+from fastapi import Depends
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -42,3 +44,11 @@ async def get_session() -> AsyncIterator[AsyncSession]:
     """FastAPI dependency: one application-role session per request."""
     async with _session_factory()() as session:
         yield session
+
+
+SessionDep = Annotated[AsyncSession, Depends(get_session)]
+
+
+def session_scope() -> AsyncSession:
+    """A session outside a request — application startup, Celery tasks. `async with` it."""
+    return _session_factory()()

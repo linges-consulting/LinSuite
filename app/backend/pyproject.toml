@@ -11,6 +11,8 @@ dependencies = [
     "alembic>=1.13",
     "pydantic-settings>=2.4",
     "celery[redis]>=5.4",
+    "argon2-cffi>=23.1",
+    "email-validator>=2.2",
 ]
 
 [dependency-groups]
@@ -41,6 +43,10 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert on files the app wrote; a blocking stat in a test body is not a hazard.
+"tests/*" = ["ASYNC230", "ASYNC240"]
 
 [tool.ruff.lint.isort]
 # The local `alembic/` scripts directory shadows the library name for import sorting.

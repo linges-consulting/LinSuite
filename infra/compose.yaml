@@ -35,6 +35,10 @@ services:
   app:
     <<: *backend
     command: sh -c "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port 8000"
+    volumes:
+      # Holds the 0600 first-run setup token; kept out of the image so a rebuild or a
+      # `docker compose down` without `-v` does not silently re-open setup.
+      - appdata:/var/lib/linsuite
     labels:
       traefik.enable: "true"
       # Longer rule = higher default priority, so /api wins over the frontend's catch-all.
@@ -76,6 +80,7 @@ services:
       - frontend
 
 volumes:
+  appdata:
   pgdata:
   redisdata:
   frontend_node_modules:

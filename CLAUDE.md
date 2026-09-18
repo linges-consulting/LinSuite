@@ -15,7 +15,9 @@ app/frontend/         # Vite + React + TS + Tailwind v4 + shadcn (src/components
 docs/                 # app_prd.md, tech-stack.md, DESIGN.md, adr/, agents/
 ```
 
-`core/` under `backend/src` is the only non-domain module — config, the two DB engines, logging, Celery app, and later security/JWT helpers and `store_document`/`fetch_document`.
+`core/` under `backend/src` is the only non-domain module — config, the two DB engines, logging, Celery app, password hashing (`security.py`), the single-row `Business` record (`models.py` — this deployment's own identity, which every domain reads), and later JWT helpers and `store_document`/`fetch_document`.
+
+Every model module must be imported in `alembic/env.py`, or autogenerate will not see its tables.
 
 ## Commands
 
@@ -45,7 +47,7 @@ Stack: `cp .env.example .env`, then `docker compose up` from the repo root. Trae
 Full rationale in `docs/tech-stack.md` — each decision records why, and what would justify revisiting it.
 
 - **Backend:** Python, FastAPI, SQLAlchemy 2.0 async + Alembic, PostgreSQL, Redis, Celery, WeasyPrint/ReportLab
-- **Auth:** self-rolled JWT (FastAPI DI + passlib) — no IdP, no `fastapi-users`; the dual-mode session policy is custom
+- **Auth:** self-rolled JWT (FastAPI DI + `argon2-cffi` for Argon2id in `core/security.py`) — no IdP, no `fastapi-users`; the dual-mode session policy is custom
 - **Frontend:** React + Vite + Tailwind + shadcn/ui (Radix), TanStack Table, TanStack Query for server state, Context for auth/mode. No Redux/Zustand
 - **Calendar:** custom grid — CSS Grid + dnd-kit + date-fns-tz + hand-written overlap packing. No calendar library (FullCalendar Premium rejected: $480/dev/yr + redistribution restrictions for on-prem)
 - **Notifications:** Resend (email, enabled); Twilio SMS admin-configurable and off by default, tenant supplies own credentials
