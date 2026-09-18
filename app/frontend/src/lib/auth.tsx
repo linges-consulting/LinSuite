@@ -58,7 +58,14 @@ export function useSwitchMode() {
     mutationFn: switchMode,
     // The answer is the same shape `/me` returns, so it replaces the session outright —
     // mode, countdown and all — without a round trip to confirm what we were just told.
-    onSuccess: (user: User) => queryClient.setQueryData(SESSION, user),
+    onSuccess: (user: User) => {
+      queryClient.setQueryData(SESSION, user)
+      // Changing mode changes what the server will answer. Anything fetched under the old
+      // mode is now the wrong answer — a screen that was refused in Staff Mode would go on
+      // showing that refusal after the window opened, which reads as the feature being
+      // broken rather than as data that was never re-asked for.
+      queryClient.invalidateQueries({ predicate: (query) => query.queryKey[0] !== SESSION[0] })
+    },
   })
 }
 
