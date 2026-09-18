@@ -27,7 +27,22 @@ const MIN_PASSWORD_LENGTH = 12 // matches core/security.py
 
 type Step = 'token' | 'business' | 'admin' | 'done'
 
-const STEPS: Step[] = ['token', 'business', 'admin']
+const STEPS = ['token', 'business', 'admin'] as const
+
+const COPY: Record<(typeof STEPS)[number], { title: string; description: string }> = {
+  token: {
+    title: 'Unlock setup',
+    description: 'This instance is unclaimed. Enter the setup token to continue.',
+  },
+  business: {
+    title: 'Your business',
+    description: 'The name and timezone everything else is scheduled against.',
+  },
+  admin: {
+    title: 'Administrator account',
+    description: `The first account. At least ${MIN_PASSWORD_LENGTH} characters, no other rules.`,
+  },
+}
 
 /**
  * First-run wizard. The token comes from the container logs; nothing here works without it,
@@ -111,16 +126,8 @@ export function SetupPage() {
           <p className="text-xs font-medium text-muted-foreground">
             Step {STEPS.indexOf(step) + 1} of {STEPS.length}
           </p>
-          <CardTitle>
-            {step === 'token' ? 'Unlock setup' : step === 'business' ? 'Your business' : 'Administrator account'}
-          </CardTitle>
-          <CardDescription>
-            {step === 'token'
-              ? 'This instance is unclaimed. Enter the setup token to continue.'
-              : step === 'business'
-                ? 'The name and timezone everything else is scheduled against.'
-                : `The first account. At least ${MIN_PASSWORD_LENGTH} characters, no other rules.`}
-          </CardDescription>
+          <CardTitle>{COPY[step].title}</CardTitle>
+          <CardDescription>{COPY[step].description}</CardDescription>
         </CardHeader>
         <CardContent>
           {step === 'token' && (

@@ -31,6 +31,8 @@ log = logging.getLogger(__name__)
 
 # This boot's token. Deliberately process-local and never persisted: a restart invalidates
 # it, and the operator reads the new one from the logs.
+# Ceiling: one app process. Under `uvicorn --workers N` each worker would mint its own and
+# only one would accept a given token; move it to a row in `businesses` if that day comes.
 _token: str | None = None
 
 
