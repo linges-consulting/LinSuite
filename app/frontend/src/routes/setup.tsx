@@ -16,10 +16,10 @@ import {
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
+  ApiError,
   completeSetup,
   fetchSetupStatus,
   fetchTimezones,
-  ApiError,
   type SetupPayload,
 } from '@/lib/api'
 
@@ -257,6 +257,9 @@ function AdminStep(props: {
 }) {
   const confirm = props.confirm
   const [error, setError] = useState<{ password?: string; confirm?: string }>({})
+  // The server's only complaint about this step is about the password — it is the one field
+  // it screens — so it belongs under that field, not under the confirmation.
+  const passwordError = error.password ?? props.error
 
   return (
     <Form
@@ -283,7 +286,7 @@ function AdminStep(props: {
       <Field
         label="Password"
         htmlFor="admin-password"
-        error={error.password}
+        error={passwordError}
         hint={`At least ${MIN_PASSWORD_LENGTH} characters. Length beats symbols — a short phrase works.`}
       >
         <Input
@@ -293,14 +296,10 @@ function AdminStep(props: {
           autoComplete="new-password"
           value={props.form.admin_password}
           onChange={(e) => props.onChange({ admin_password: e.target.value })}
-          aria-invalid={error.password ? true : undefined}
+          aria-invalid={passwordError ? true : undefined}
         />
       </Field>
-      <Field
-        label="Confirm password"
-        htmlFor="admin-password-confirm"
-        error={error.confirm ?? props.error}
-      >
+      <Field label="Confirm password" htmlFor="admin-password-confirm" error={error.confirm}>
         <Input
           id="admin-password-confirm"
           type="password"
