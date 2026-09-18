@@ -133,8 +133,13 @@ class ResetConfirm(BaseModel):
 @router.post("/password-reset/confirm", status_code=204)
 async def confirm_reset(payload: ResetConfirm, db: SessionDep) -> None:
     now = datetime.now(UTC)
+    # Locked for the rest of the transaction: "read used_at, then set it" is a read-modify-write
+    # on the one fact that makes the link single-use, and two requests arriving together would
+    # otherwise both find it unspent.
     row = await db.scalar(
-        select(PasswordResetToken).where(PasswordResetToken.token_hash == digest(payload.token))
+        select(PasswordResetToken)
+        .where(PasswordResetToken.token_hash == digest(payload.token))
+        .with_for_update()
     )
     if row is None or row.used_at is not None or row.expires_at <= now:
         log.warning("auth: rejected a password reset with an invalid, spent or expired link")
