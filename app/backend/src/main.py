@@ -1,6 +1,7 @@
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
@@ -14,12 +15,14 @@ from auth.passwords import router as passwords_router
 from auth.roles import router as roles_router
 from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
-from core.business import router as business_router
 from core.config import get_settings
 from core.db import SessionDep, get_engine, get_purge_engine, session_scope
 from core.errors import Forbidden
 from core.logging import configure_logging
 from core.redis import get_redis
+from settings.images import FAVICON_MAX_BYTES, LOGO_MAX_BYTES
+from settings.routes import public as branding_router
+from settings.routes import router as business_router
 
 log = logging.getLogger(__name__)
 
@@ -74,15 +77,53 @@ async def forbidden(_: Request, exc: Forbidden) -> JSONResponse:
 # A middleware rather than a per-route dependency, precisely so a future endpoint cannot
 # forget it. Every mutation the frontend makes goes through one `post()` helper that always
 # sets the header, including bodiless ones like logout.
+#
+# Two paths are exempt, named here and nowhere else: a file cannot be uploaded as JSON, and a
+# base64 field would mean holding the whole image in memory twice to save a header. In
+# exchange those two paths get the check JSON was standing in for — the `Origin` has to be
+# this deployment. `SameSite=Lax` already blocks a cross-site form POST; this is the belt to
+# its braces, and it is why the exemption is a fixed tuple rather than a prefix.
 _MUTATING = ("POST", "PUT", "PATCH", "DELETE")
+_UPLOADS: dict[str, int] = {
+    "/api/admin/business/logo": LOGO_MAX_BYTES,
+    "/api/admin/business/favicon": FAVICON_MAX_BYTES,
+}
+# Multipart headers, boundaries and the filename, generously. The real cap is applied to the
+# file itself in `settings/routes.py`; this one is here to refuse an oversized body before it
+# is read at all.
+_MULTIPART_OVERHEAD = 4096
 
 
 @app.middleware("http")
 async def require_json_body(request: Request, call_next):
+    if request.method not in _MUTATING:
+        return await call_next(request)
+    cap = _UPLOADS.get(request.url.path) if request.method == "POST" else None
+    if cap is not None:
+        if not _from_this_deployment(request):
+            return JSONResponse({"detail": "Upload from this application."}, status_code=403)
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > cap + _MULTIPART_OVERHEAD:
+            return JSONResponse({"detail": f"Keep it under {cap // 1024} KB."}, status_code=413)
+        return await call_next(request)
     content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
-    if request.method in _MUTATING and content_type != "application/json":
+    if content_type != "application/json":
         return JSONResponse({"detail": "Send application/json"}, status_code=415)
     return await call_next(request)
+
+
+def _from_this_deployment(request: Request) -> bool:
+    """`Origin`, or the `Referer` it is derived from when a browser withholds it."""
+    origin = request.headers.get("origin")
+    if origin is None:
+        referer = request.headers.get("referer")
+        origin = _origin_of(referer) if referer else None
+    return origin is not None and origin == _origin_of(get_settings().app_base_url)
+
+
+def _origin_of(url: str) -> str | None:
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else None
 
 
 @api.get("/health")
@@ -103,4 +144,5 @@ api.include_router(setup_router)
 api.include_router(roles_router)
 api.include_router(admin_users_router)
 api.include_router(business_router)
+api.include_router(branding_router)
 app.include_router(api)

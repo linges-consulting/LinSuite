@@ -144,13 +144,16 @@ async def test_status_says_setup_is_required_on_a_fresh_deployment(client):
     assert resp.json() == {"required": True}
 
 
-async def test_timezones_are_the_sorted_iana_list(client):
+async def test_timezones_are_the_sorted_canonical_iana_list(client):
+    """Canonical zones only — the wizard and the Business screen offer one list, and a
+    deprecated alias in it is a second spelling of a zone that is already there."""
     resp = await client.get("/api/setup/timezones")
 
     assert resp.status_code == 200
     zones = resp.json()["timezones"]
     assert zones == sorted(zones)
-    assert "America/Toronto" in zones and "UTC" in zones
+    assert "America/Toronto" in zones
+    assert "US/Eastern" not in zones and "UTC" not in zones
     assert len(zones) > 400
 
 

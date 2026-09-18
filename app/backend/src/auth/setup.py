@@ -18,8 +18,6 @@ import logging
 import os
 import secrets
 from datetime import UTC, datetime
-from functools import lru_cache
-from zoneinfo import available_timezones
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -34,6 +32,7 @@ from core.db import SessionDep
 from core.errors import INVALID_SETUP_TOKEN, Forbidden
 from core.models import Business
 from core.security import check_password_policy, hash_password
+from settings.timezones import canonical_timezones, is_canonical
 
 log = logging.getLogger(__name__)
 
@@ -132,11 +131,6 @@ def _write_token_file(token: str) -> None:
         log.warning("setup: could not write the token file at %s", path, exc_info=True)
 
 
-@lru_cache
-def _iana_timezones() -> list[str]:
-    return sorted(available_timezones())
-
-
 class SetupRequest(BaseModel):
     token: str = Field(min_length=1)
     business_name: str = Field(min_length=1, max_length=200)
@@ -150,8 +144,8 @@ class SetupRequest(BaseModel):
     @field_validator("timezone")
     @classmethod
     def _known_timezone(cls, value: str) -> str:
-        if value not in _iana_timezones():
-            raise ValueError("not an IANA timezone name")
+        if not is_canonical(value):
+            raise ValueError("not a current IANA timezone name")
         return value
 
 
@@ -172,8 +166,12 @@ async def setup_status(session: SessionDep) -> dict[str, bool]:
 
 @router.get("/timezones")
 async def setup_timezones() -> dict[str, list[str]]:
-    """Stays available after setup — changing the business timezone reuses this list."""
-    return {"timezones": _iana_timezones()}
+    """Stays available after setup — changing the business timezone reuses this list.
+
+    Canonical zones only (`settings/timezones.py`). The wizard and the Business screen offer
+    the same list, because a zone one of them would refuse has no business being in the other.
+    """
+    return {"timezones": list(canonical_timezones())}
 
 
 @router.post("", status_code=201, dependencies=[Depends(_setup_still_open)])

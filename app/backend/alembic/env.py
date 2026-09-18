@@ -12,6 +12,7 @@ from auth import models as _auth_models  # noqa: F401
 from core import models as _core_models  # noqa: F401
 from core.config import get_settings
 from core.db import Base
+from settings import models as _settings_models  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:

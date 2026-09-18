@@ -1,8 +1,12 @@
 """The business record and the audit log: the two tables that belong to no single domain.
 
 Single-tenant means exactly one business, so `id` is pinned to 1 by a CHECK constraint —
-the database, not the application, refuses a second business. Branding columns arrive with
-the branding task; only what the setup wizard collects lives here.
+the database, not the application, refuses a second business.
+
+The profile and brand colours live on this row because every domain reads them — a receipt
+needs the address and the currency symbol, the shell needs the colours. The two *images* do
+not: they are in `settings/models.py`, off this row, so a megabyte of PNG is not loaded by
+every request that only wanted the business name.
 """
 
 import uuid
@@ -17,6 +21,7 @@ from sqlalchemy import (
     Identity,
     Integer,
     String,
+    Text,
     Uuid,
     func,
     text,
@@ -53,6 +58,32 @@ class Business(Base):
     # same browser session an attacker already has — so a business opts into it knowingly.
     # It is available as the recovery fallback regardless; that is `auth/mfa.py`'s business.
     mfa_email_otp_allowed: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+
+    # --- the profile (PRD §1, §7; written by `settings/routes.py`) -------------------------
+    # The address is what the tax components will be derived from, so it is structured rather
+    # than one free-text block: `province` is the field a later rate table joins on.
+    address_line1: Mapped[str | None] = mapped_column(String(200))
+    address_line2: Mapped[str | None] = mapped_column(String(200))
+    city: Mapped[str | None] = mapped_column(String(100))
+    province: Mapped[str | None] = mapped_column(String(2))
+    postal_code: Mapped[str | None] = mapped_column(String(7))
+    # Fixed for now. A column rather than a constant because an address without a country is
+    # not an address, and the day a second one is supported this is where it is read from.
+    country: Mapped[str] = mapped_column(String(2), server_default=text("'CA'"))
+    phone: Mapped[str | None] = mapped_column(String(32))
+    email: Mapped[str | None] = mapped_column(String(320))
+    # Labelled free text, not a validated registration number. The formats differ per
+    # jurisdiction and change; a business that mistypes its own GST number notices on the
+    # first invoice, and a regex that refuses a valid one is unfixable from the screen.
+    gst_hst_number: Mapped[str | None] = mapped_column(String(64))
+    pst_qst_number: Mapped[str | None] = mapped_column(String(64))
+    currency_symbol: Mapped[str] = mapped_column(String(8), server_default=text("'$'"))
+    receipt_footer: Mapped[str | None] = mapped_column(Text)
+    # Six-digit hex, lowercase. The CHECK is in the migration: these end up as CSS variable
+    # values on `<html>`, so "is it really a colour" is worth asserting in two places.
+    brand_primary: Mapped[str] = mapped_column(String(7), server_default=text("'#1d4ed8'"))
+    brand_secondary: Mapped[str] = mapped_column(String(7), server_default=text("'#0f766e'"))
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
