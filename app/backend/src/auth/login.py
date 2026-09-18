@@ -12,7 +12,7 @@ its HTTP surface.
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -34,6 +34,7 @@ from auth.session import (
 )
 from core.audit import record_event
 from core.db import SessionDep
+from core.models import Business
 from core.security import verify_password
 
 log = logging.getLogger(__name__)
@@ -65,9 +66,19 @@ class UserOut(BaseModel):
     can_switch_modes: bool
     admin_grant_expires_at: datetime | None
     admin_hard_limit_at: datetime | None
+    # True and the frontend routes to the change-password screen and nowhere else. The
+    # session is real either way — this is a forced change, not a refused login, so the
+    # account can still be told what it has to do.
+    must_change_password: bool
 
     @classmethod
-    def of(cls, user: User, state: modes.ModeState | None = None) -> "UserOut":
+    def of(
+        cls,
+        user: User,
+        state: modes.ModeState | None = None,
+        *,
+        must_change_password: bool = False,
+    ) -> "UserOut":
         return cls(
             id=str(user.id),
             email=user.email,
@@ -76,7 +87,25 @@ class UserOut(BaseModel):
             can_switch_modes=modes.can_switch_modes(user),
             admin_grant_expires_at=state.grant_expires_at if state else None,
             admin_hard_limit_at=state.hard_limit_at if state else None,
+            must_change_password=must_change_password,
         )
+
+
+async def change_required(db: SessionDep, user: User) -> bool:
+    """Whether this account must set a new password before it can do anything else.
+
+    Two ways in: the flag an administrator or a suspected compromise sets (tech-stack §14),
+    and — only where a business has opted into rotation at all — a password older than the
+    configured interval. Rotation is evaluated here rather than written into the flag by a
+    nightly job, so turning the setting off takes effect at once instead of leaving the flag
+    set on accounts nobody has touched since.
+    """
+    if user.must_change_password:
+        return True
+    days = await db.scalar(select(Business.password_rotation_days).where(Business.id == 1))
+    if not days:
+        return False
+    return user.password_changed_at < datetime.now(UTC) - timedelta(days=days)
 
 
 @router.post("/login")
@@ -110,7 +139,7 @@ async def login(payload: LoginRequest, response: Response, db: SessionDep) -> Us
         metadata={"email": email, "jti": issued.jti},
     )
     await db.commit()
-    return UserOut.of(user)
+    return UserOut.of(user, must_change_password=await change_required(db, user))
 
 
 @router.post("/logout", status_code=204)
@@ -134,14 +163,18 @@ async def logout(request: Request, response: Response, db: SessionDep) -> None:
 
 
 @router.get("/me")
-async def me(user: CurrentUser, claims: ClaimsDep) -> UserOut:
+async def me(user: CurrentUser, claims: ClaimsDep, db: SessionDep) -> UserOut:
     """The protected endpoint. Anonymous, expired and logged-out requests all get a 401.
 
     Reading the mode deliberately does not slide the admin window: the frontend polls this
     to keep the countdown honest, and a poll that counted as activity would hold an idle
     browser tab in Admin Mode indefinitely.
     """
-    return UserOut.of(user, await modes.read_state(claims))
+    return UserOut.of(
+        user,
+        await modes.read_state(claims),
+        must_change_password=await change_required(db, user),
+    )
 
 
 class ModeRequest(BaseModel):
@@ -177,7 +210,11 @@ async def switch_mode(
         metadata={"mode": payload.mode},
     )
     await db.commit()
-    return UserOut.of(user, await modes.read_state(claims))
+    return UserOut.of(
+        user,
+        await modes.read_state(claims),
+        must_change_password=await change_required(db, user),
+    )
 
 
 _REAUTH_REQUIRED = HTTPException(

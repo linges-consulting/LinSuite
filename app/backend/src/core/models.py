@@ -38,6 +38,10 @@ class Business(Base):
     timezone: Mapped[str] = mapped_column(String(64))
     # Set once, when the setup wizard completes. Non-null permanently disables setup.
     setup_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Periodic password expiry. Null — the default — is off, which is the NIST position:
+    # rotation without evidence of compromise degrades password quality. Exposed only
+    # because some insurers and colleges require it (PRD §1, tech-stack §14).
+    password_rotation_days: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

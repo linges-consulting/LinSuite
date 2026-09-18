@@ -6,6 +6,11 @@ transport straight into the FastAPI app. The app connects as the `linsuite_app` 
 grant/revoke behaviour is exercised exactly as in production. No mocked database, ever.
 
 Seam S2 (pure functions) needs no fixtures.
+
+Seam S3: outbound messages. `NOTIFICATION_PROVIDER=recording` selects the fake in
+`tests/fake_notifications.py` — a real implementation of the provider protocol, not a
+patched HTTP client — and Celery runs eagerly so a handler's `delay()` lands in it before
+the response is returned.
 """
 
 import os
@@ -53,6 +58,9 @@ def database(tmp_path_factory, redis_server) -> Iterator[dict[str, str]]:
             # No outbound HTTP from the suite; the HIBP client is exercised with a
             # MockTransport in tests/test_password_policy.py instead.
             "BREACH_CHECK_ENABLED": "false",
+            # S3: the recording provider, registered by tests/fake_notifications.py.
+            "NOTIFICATION_PROVIDER": "recording",
+            "APP_BASE_URL": "http://test.linsuite.example",
         }
         os.environ.update(urls)
 
@@ -60,6 +68,26 @@ def database(tmp_path_factory, redis_server) -> Iterator[dict[str, str]]:
         cfg.set_main_option("script_location", os.path.join(BACKEND_DIR, "alembic"))
         command.upgrade(cfg, "head")
         yield urls
+
+
+@pytest.fixture(scope="session", autouse=True)
+def eager_celery(database) -> None:
+    """Run tasks in the calling process. The handler still goes through `delay()`, so the
+    path under test is the real one; only the broker hop is removed."""
+    import tests.fake_notifications  # noqa: F401 — registers the `recording` provider
+    from core.celery_app import celery_app
+
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = True
+
+
+@pytest.fixture
+def sent_emails(eager_celery) -> Iterator[list]:
+    from tests.fake_notifications import sent
+
+    sent.clear()
+    yield sent
+    sent.clear()
 
 
 @pytest.fixture

@@ -129,7 +129,10 @@ async def test_the_password_and_its_hash_never_appear_in_any_response(client):
 
     for resp in (ok, me):
         assert PASSWORD not in resp.text
-        assert "password" not in resp.text.lower()
+        # `must_change_password` is a legitimate field; what must never appear is the
+        # credential or anything derived from it.
+        assert "password_hash" not in resp.text.lower()
+        assert "current_password" not in resp.text.lower()
     ((stored,),) = await rows("SELECT password_hash FROM users")
     assert stored.startswith("$argon2id$")
     assert stored not in ok.text + me.text

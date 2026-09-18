@@ -51,7 +51,12 @@ def issue_token(user_id: uuid.UUID | str, *, ttl: timedelta | None = None) -> Is
     expires_at = now + ttl
     jti = uuid.uuid4().hex
     token = jwt.encode(
-        {"sub": str(user_id), "jti": jti, "iat": now, "exp": expires_at},
+        # `iat` is a float, not the whole second PyJWT would encode a datetime as. It is
+        # compared against `users.sessions_revoked_at` to decide whether this token survived
+        # a password change, and at one-second resolution the replacement cookie issued by
+        # `/auth/password/change` shares its second with the revocation that just happened —
+        # so either the new session is born dead or the old one outlives the change.
+        {"sub": str(user_id), "jti": jti, "iat": now.timestamp(), "exp": expires_at},
         get_settings().jwt_secret,
         algorithm=ALGORITHM,
     )
@@ -65,7 +70,7 @@ def decode_token(token: str) -> dict | None:
             token,
             get_settings().jwt_secret,
             algorithms=[ALGORITHM],
-            options={"require": ["exp", "sub", "jti"]},
+            options={"require": ["exp", "sub", "jti", "iat"]},
         )
     except jwt.InvalidTokenError:
         return None
@@ -103,14 +108,42 @@ def clear_session_cookie(response: Response) -> None:
 UNAUTHENTICATED = HTTPException(status_code=401, detail="Not authenticated")
 
 
-async def session_claims(request: Request) -> dict:
-    """The claims of a live session, or 401. Separate from `current_user` so logout can
-    revoke a token without a round trip to the database."""
+def revoke_all(user: User) -> None:
+    """End every session this user holds, including ones nobody is tracking.
+
+    The `jti` denylist can only refuse a token somebody names, and no list of a user's live
+    tokens exists — so the cut-off is an instant on the user instead, and `session_claims`
+    refuses anything issued before it. Staged, not committed: the caller's transaction is
+    what makes the revocation and the reason for it land together.
+    """
+    user.sessions_revoked_at = datetime.now(UTC)
+
+
+async def session_claims(request: Request, db: SessionDep) -> dict:
+    """The claims of a live session, or 401.
+
+    Three ways a signed, unexpired token is still not a session: its `jti` is denylisted
+    (logout), the account is gone (`current_user`), or it predates a password change. The
+    last one costs a lookup on every authenticated request, and is why this dependency now
+    touches the database at all — `logout` deliberately does not use it, so revoking a token
+    still needs no round trip.
+    """
     token = request.cookies.get(COOKIE_NAME)
     claims = decode_token(token) if token else None
     if claims is None or await is_revoked(claims["jti"]):
         raise UNAUTHENTICATED
+    if await _predates_a_revocation(claims, db):
+        raise UNAUTHENTICATED
     return claims
+
+
+async def _predates_a_revocation(claims: dict, db: SessionDep) -> bool:
+    try:
+        user_id = uuid.UUID(claims["sub"])
+    except (ValueError, TypeError):
+        raise UNAUTHENTICATED from None
+    cut_off = await db.scalar(select(User.sessions_revoked_at).where(User.id == user_id))
+    return cut_off is not None and claims["iat"] < cut_off.timestamp()
 
 
 ClaimsDep = Annotated[dict, Depends(session_claims)]

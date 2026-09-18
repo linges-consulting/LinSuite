@@ -33,6 +33,17 @@ class Settings(BaseSettings):
     # `Secure` on the session cookie. Off only for plain-HTTP local development.
     cookie_secure: bool = True
 
+    # How long a password-reset link stays usable. tech-stack §14 says 30–60 minutes: long
+    # enough to survive a slow mailbox, short enough that a link left in an inbox goes stale.
+    password_reset_minutes: int = 45
+
+    # --- Notifications (tech-stack §6) -----------------------------------------------------
+    # Which implementation of `notifications.providers.NotificationProvider` sends. `console`
+    # writes the whole message to the log, which is how a reset link is retrieved locally.
+    notification_provider: str = "console"
+    # Origin that links in outgoing messages point back at. No trailing slash.
+    app_base_url: str = "http://localhost"
+
     # Screen new passwords against HaveIBeenPwned (only a 5-character SHA-1 prefix leaves
     # the server). Off for air-gapped installs; the bundled list is then the only check.
     breach_check_enabled: bool = True

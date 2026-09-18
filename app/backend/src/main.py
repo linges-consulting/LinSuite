@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
 from auth.login import router as auth_router
+from auth.passwords import router as passwords_router
 from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
 from core.business import router as business_router
@@ -83,6 +84,7 @@ async def health(session: SessionDep) -> JSONResponse:
 
 
 api.include_router(auth_router)
+api.include_router(passwords_router)
 api.include_router(setup_router)
 api.include_router(business_router)
 app.include_router(api)

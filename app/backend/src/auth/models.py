@@ -8,7 +8,17 @@ least one administrator" guarantee.
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, Integer, String, func, text
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
@@ -26,6 +36,19 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320))
     password_hash: Mapped[str] = mapped_column(String(255))
     is_admin: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    # Set for administrator-created accounts and after suspected compromise (tech-stack §14).
+    # Login still succeeds; the session it opens can only reach the change-password screen.
+    must_change_password: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    # What `businesses.password_rotation_days` is measured against, when a business has opted
+    # into rotation at all. Not null: "never changed" and "changed at account creation" are
+    # the same fact here, and a null would make every comparison a special case.
+    password_changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # Every token issued before this instant is dead — one column instead of per-user `jti`
+    # bookkeeping in Redis, which would have to enumerate sessions nobody is tracking. Set by
+    # a completed reset and by a password change; Task 8 reuses it for MFA reset.
+    sessions_revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -44,4 +67,27 @@ class SetupToken(Base):
         Integer, primary_key=True, server_default="1", autoincrement=False
     )
     token_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PasswordResetToken(Base):
+    """A reset link, as a SHA-256 hex digest of the token that was emailed.
+
+    Only the digest is stored, for the same reason as `SetupToken`: a database dump, a backup
+    or a stray SELECT must not hand anybody a working link. The plaintext exists in the one
+    message that was sent and nowhere else.
+
+    Rows are kept after use rather than deleted — `used_at` is what makes a second attempt a
+    refusal instead of a lookup miss, and the distinction is worth having in the trail.
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
