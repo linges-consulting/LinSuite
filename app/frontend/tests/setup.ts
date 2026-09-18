@@ -1,6 +1,14 @@
 import '@testing-library/jest-dom/vitest'
 
-// jsdom has no matchMedia; the theme provider needs it.
+// jsdom has neither; cmdk observes its list, the theme provider reads the colour scheme.
+globalThis.ResizeObserver ??= class {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+Element.prototype.scrollIntoView ??= () => {}
+
+
 window.matchMedia ??= (query: string) =>
   ({
     matches: false,

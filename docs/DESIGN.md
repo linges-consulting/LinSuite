@@ -67,7 +67,8 @@ One primary action per screen. Destructive actions sit apart from primary ones a
 ## Components
 
 shadcn/ui (Radix, `radix-nova` preset) in `src/components/ui/` — vendored, edit freely but keep the API.
-Installed: button, input, label, card, dialog, dropdown-menu, table, sonner (toasts), tabs, badge, skeleton.
+Installed: button, input, label, card, dialog, dropdown-menu, table, sonner (toasts), tabs, badge, skeleton,
+popover, command (+ its input-group/textarea dependencies — the searchable-list half of a combobox).
 Add more with `npx shadcn@latest add <name>` from `app/frontend`.
 
 - `EmptyState` (`src/components/empty-state.tsx`) for every empty list/table: icon, title, one sentence, optional action.

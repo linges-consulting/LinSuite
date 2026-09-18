@@ -41,12 +41,13 @@ test('home shows a degraded database as unreachable', async () => {
   expect(screen.getByText('Online')).toBeInTheDocument()
 })
 
-test('shell exposes the four primary destinations', () => {
+test('shell exposes the four primary destinations', async () => {
   vi.stubGlobal('fetch', vi.fn(async () => Response.json({ status: 'ok', database: 'ok' })))
 
   renderApp('/clients')
 
-  const nav = screen.getByRole('navigation', { name: 'Primary' })
+  // Nothing renders until the setup-status check resolves, hence the await.
+  const nav = await screen.findByRole('navigation', { name: 'Primary' })
   for (const label of ['Schedule', 'Clients', 'Catalog', 'Settings']) {
     expect(nav).toHaveTextContent(label)
   }
