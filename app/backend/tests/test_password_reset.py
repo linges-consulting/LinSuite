@@ -240,6 +240,18 @@ async def test_changing_a_password_needs_the_current_one(client):
     assert (await login(client, password=NEW_PASSWORD)).status_code == 401
 
 
+async def test_a_failed_change_is_not_filed_as_a_failed_login(client):
+    """Task 6's lockout counts `login.failed`. A signed-in user fumbling their own current
+    password must not be able to lock their own login out."""
+    await login(client)
+
+    await change(client, current="not the password")
+
+    types = [e[0] for e in await audit()]
+    assert types.count("password.change_failed") == 1
+    assert "login.failed" not in types[types.index("login.succeeded") :]
+
+
 async def test_a_change_applies_the_password_policy(client):
     await login(client)
 
@@ -349,3 +361,72 @@ async def test_the_console_provider_writes_the_message_to_the_log(caplog):
 
     assert "someone@cedar.example" in caplog.text
     assert "http://x/reset?token=abc" in caplog.text
+
+
+# --- the server-side gate on a flagged session ----------------------------------------------
+
+
+async def enter_admin_mode(client, password=PASSWORD):
+    resp = await client.post("/api/auth/mode", json={"mode": "admin", "password": password})
+    assert resp.status_code == 200, resp.text
+
+
+async def test_a_flagged_session_is_refused_everywhere_but_the_three_ways_out(client):
+    """The flag is not advice to the frontend. A session owing a change is refused server-side
+    on every endpoint that is not one of the three it needs to stop owing it."""
+    await login(client)
+    await enter_admin_mode(client)
+    await set_flag("must_change_password", True)
+
+    # Blocked: an ordinary protected endpoint, and the mode switch. The detail is asserted
+    # because a live admin window answers 403 too — this has to be the gate refusing, not
+    # the mode guard.
+    for resp in (
+        await client.get("/api/admin/business"),
+        await client.post("/api/auth/mode", json={"mode": "staff"}),
+    ):
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "Set a new password before you continue."
+
+    # Reachable: the endpoint that reports the debt, and the one that settles it.
+    me = await client.get("/api/auth/me")
+    assert me.status_code == 200
+    assert me.json()["must_change_password"] is True
+    assert (await change(client)).status_code == 200
+
+
+async def test_the_gate_lifts_the_moment_the_password_is_changed(client):
+    await login(client)
+    await set_flag("must_change_password", True)
+    assert (await client.post("/api/auth/mode", json={"mode": "staff"})).status_code == 403
+
+    assert (await change(client)).status_code == 200
+
+    assert (await client.post("/api/auth/mode", json={"mode": "staff"})).status_code == 200
+    await enter_admin_mode(client, password=NEW_PASSWORD)
+    assert (await client.get("/api/admin/business")).status_code == 200
+
+
+async def test_logging_out_of_a_flagged_session_still_works(client):
+    """The third exemption. It takes no user at all, so it never reaches the gate — this is
+    what proves nobody is trapped in a session they cannot complete or leave."""
+    await login(client)
+    await set_flag("must_change_password", True)
+
+    assert (await client.post("/api/auth/logout", json={})).status_code == 204
+    assert (await client.get("/api/auth/me")).status_code == 401
+
+
+async def test_an_expired_rotation_closes_the_same_gate(client):
+    """The rotation setting is not a second, weaker rule — it reaches the same guard."""
+    async with session_scope() as db:
+        await db.execute(text("UPDATE businesses SET password_rotation_days = 90"))
+        await db.commit()
+    await login(client)
+    assert (await client.post("/api/auth/mode", json={"mode": "staff"})).status_code == 200
+
+    await set_flag("password_changed_at", datetime.now(UTC) - timedelta(days=91))
+
+    refused = await client.post("/api/auth/mode", json={"mode": "staff"})
+    assert refused.status_code == 403
+    assert refused.json()["detail"] == "Set a new password before you continue."

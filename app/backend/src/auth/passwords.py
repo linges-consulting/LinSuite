@@ -13,8 +13,17 @@ either path, so there is no Argon2 asymmetry to pad; the known-address path does
 more work (one INSERT, one enqueue), which is microseconds of Postgres and Redis against a
 network round trip.
 
-**Only the digest is stored.** The token itself exists in the message that was sent and
-nowhere else, so a database dump is not a set of working reset links.
+**Only the digest is stored.** The plaintext token is never in the database and never in a
+response, so neither a dump nor a proxy log is a set of working reset links.
+
+It is not nowhere, though, and a later reader should know where before choosing retention.
+A live link exists in exactly two other places: the Celery task's arguments, which sit as a
+JSON payload in the Redis broker list until a worker acks it — and `task_acks_late` is on, so
+a crashed worker puts it back on the queue rather than dropping it — and, under
+`NOTIFICATION_PROVIDER=console`, the application log, in full and on purpose, because that is
+the only way an unconfigured deployment can complete a reset. Task 12's real providers inherit
+both: whatever it logs, and whatever the broker keeps, is a window in which a link is readable
+by anyone who can read them.
 """
 
 import hashlib
@@ -31,7 +40,7 @@ from auth.login import UserOut
 from auth.models import PasswordResetToken, User
 from auth.session import (
     ClaimsDep,
-    CurrentUser,
+    UnrestrictedUser,
     issue_token,
     revoke,
     revoke_all,
@@ -191,7 +200,7 @@ class ChangeRequest(BaseModel):
 async def change_password(
     payload: ChangeRequest,
     response: Response,
-    user: CurrentUser,
+    user: UnrestrictedUser,
     claims: ClaimsDep,
     db: SessionDep,
 ) -> UserOut:
@@ -200,15 +209,21 @@ async def change_password(
     A 403 for a wrong current password, never a 401: the session is fine, and the frontend
     treats a 401 as "this session is gone, go to /login" — which is the wrong thing to do to
     someone who mistyped. The same rule as the Admin Mode re-authentication in `login.py`.
+
+    `UnrestrictedUser`, because this is one of the three endpoints a session owing a forced
+    change has to reach — it is how the debt gets paid.
     """
     if not await verify_password(user.password_hash, payload.current_password):
+        # Its own event type, not `login.failed`. This is not a login — the caller is already
+        # authenticated and named — and Task 6's lockout counts `login.failed` rows, so filing
+        # it there would let a signed-in user fumbling their own password lock out their login.
         record_event(
             db,
-            "login.failed",
+            "password.change_failed",
             target_type="user",
             target_id=str(user.id),
             actor_user_id=user.id,
-            metadata={"email": user.email, "reason": "password_change"},
+            metadata={"email": user.email},
         )
         await db.commit()
         log.warning("auth: failed password change for %s", user.email)

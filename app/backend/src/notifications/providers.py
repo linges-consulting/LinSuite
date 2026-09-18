@@ -7,8 +7,8 @@ HTTP library: it registers an implementation of this protocol and reads what cam
 
 `console` is the only provider until Task 12 adds Resend and SMTP behind the same protocol.
 It writes the whole message, links included, through the JSON logger — which is how a
-developer retrieves a reset link locally (`docker compose logs app`), the same retrieval
-path the first-run setup token already uses.
+developer retrieves a reset link locally — with `docker compose logs worker`, because delivery
+runs in the worker and never in the API process.
 
 SMS is deliberately absent. tech-stack §6 treats it as an adapter that stays unimplemented
 until a tenant asks and supplies credentials; adding a `send_sms` nobody implements would

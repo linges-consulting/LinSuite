@@ -37,7 +37,10 @@ class User(Base):
     password_hash: Mapped[str] = mapped_column(String(255))
     is_admin: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     # Set for administrator-created accounts and after suspected compromise (tech-stack §14).
-    # Login still succeeds; the session it opens can only reach the change-password screen.
+    # Login still succeeds, and the session it opens is refused (403) by `CurrentUser` on
+    # every endpoint but the three that let it pay the debt: `GET /auth/me`,
+    # `POST /auth/password/change` and logout. The gate is in `auth/session.py`, not in each
+    # route, so an endpoint written later inherits it without knowing this column exists.
     must_change_password: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     # What `businesses.password_rotation_days` is measured against, when a business has opted
     # into rotation at all. Not null: "never changed" and "changed at account creation" are

@@ -12,7 +12,7 @@ its HTTP surface.
 
 import logging
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Request, Response
@@ -25,6 +25,8 @@ from auth.session import (
     COOKIE_NAME,
     ClaimsDep,
     CurrentUser,
+    UnrestrictedUser,
+    change_required,
     clear_session_cookie,
     decode_token,
     is_revoked,
@@ -34,7 +36,6 @@ from auth.session import (
 )
 from core.audit import record_event
 from core.db import SessionDep
-from core.models import Business
 from core.security import verify_password
 
 log = logging.getLogger(__name__)
@@ -89,23 +90,6 @@ class UserOut(BaseModel):
             admin_hard_limit_at=state.hard_limit_at if state else None,
             must_change_password=must_change_password,
         )
-
-
-async def change_required(db: SessionDep, user: User) -> bool:
-    """Whether this account must set a new password before it can do anything else.
-
-    Two ways in: the flag an administrator or a suspected compromise sets (tech-stack §14),
-    and — only where a business has opted into rotation at all — a password older than the
-    configured interval. Rotation is evaluated here rather than written into the flag by a
-    nightly job, so turning the setting off takes effect at once instead of leaving the flag
-    set on accounts nobody has touched since.
-    """
-    if user.must_change_password:
-        return True
-    days = await db.scalar(select(Business.password_rotation_days).where(Business.id == 1))
-    if not days:
-        return False
-    return user.password_changed_at < datetime.now(UTC) - timedelta(days=days)
 
 
 @router.post("/login")
@@ -163,8 +147,11 @@ async def logout(request: Request, response: Response, db: SessionDep) -> None:
 
 
 @router.get("/me")
-async def me(user: CurrentUser, claims: ClaimsDep, db: SessionDep) -> UserOut:
+async def me(user: UnrestrictedUser, claims: ClaimsDep, db: SessionDep) -> UserOut:
     """The protected endpoint. Anonymous, expired and logged-out requests all get a 401.
+
+    One of the three endpoints a session owing a password change may still reach, and the
+    reason the other two are reachable: this is where the frontend learns it owes one.
 
     Reading the mode deliberately does not slide the admin window: the frontend polls this
     to keep the countdown honest, and a poll that counted as activity would hold an idle

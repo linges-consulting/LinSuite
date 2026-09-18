@@ -14,6 +14,12 @@ rather than growing forever. Password and MFA changes will revoke through the sa
 mode a session is being served in changes several times within one token's life and must be
 revocable on idle, so it lives in Redis against the `jti` (`auth/modes.py`) rather than in a
 signed statement nothing can retract.
+
+**Why the forced password change is enforced here.** `CurrentUser` is what every protected
+route already depends on, so putting the check inside it is the only placement a route added
+next year cannot forget. The three endpoints a flagged session must still reach ask for
+`UnrestrictedUser` instead, and having to name it is the point: exemption is a decision
+somebody writes down, not a default.
 """
 
 import uuid
@@ -28,6 +34,7 @@ from sqlalchemy import select
 from auth.models import User
 from core.config import get_settings
 from core.db import SessionDep
+from core.models import Business
 from core.redis import get_redis
 
 COOKIE_NAME = "linsuite_session"
@@ -149,9 +156,40 @@ async def _predates_a_revocation(claims: dict, db: SessionDep) -> bool:
 ClaimsDep = Annotated[dict, Depends(session_claims)]
 
 
-async def current_user(claims: ClaimsDep, db: SessionDep) -> User:
-    """The signed-in user. Every protected route depends on this, directly or through a
-    capability check layered on top of it."""
+PASSWORD_CHANGE_REQUIRED = HTTPException(
+    status_code=403, detail="Set a new password before you continue."
+)
+
+
+async def change_required(db: SessionDep, user: User) -> bool:
+    """Whether this account must set a new password before it can do anything else.
+
+    Two ways in: the flag an administrator or a suspected compromise sets (tech-stack §14),
+    and — only where a business has opted into rotation at all — a password older than the
+    configured interval. Rotation is evaluated per request rather than written into the flag
+    by a nightly job, so turning the setting off takes effect at once instead of leaving the
+    flag set on accounts nobody has touched since.
+
+    The flag is checked first so the common answer costs no query at all; the rotation
+    setting is a single-row lookup on a table that changes about never.
+    ponytail: re-read per request, cache it if a profile ever says this matters.
+    """
+    if user.must_change_password:
+        return True
+    days = await db.scalar(select(Business.password_rotation_days).where(Business.id == 1))
+    if not days:
+        return False
+    return user.password_changed_at < datetime.now(UTC) - timedelta(days=days)
+
+
+async def unrestricted_user(claims: ClaimsDep, db: SessionDep) -> User:
+    """The signed-in user, forced password change and all.
+
+    Only three endpoints may use this, and each is one a flagged session has to reach to
+    stop being flagged: `GET /auth/me` (which is how the frontend learns it must change),
+    `POST /auth/password/change`, and logout — which needs no user at all and so never
+    arrives here.
+    """
     try:
         user_id = uuid.UUID(claims["sub"])
     except (ValueError, TypeError):
@@ -160,6 +198,22 @@ async def current_user(claims: ClaimsDep, db: SessionDep) -> User:
     if user is None:
         # A deleted account's token is still signed and still unexpired. It is not a session.
         raise UNAUTHENTICATED
+    return user
+
+
+UnrestrictedUser = Annotated[User, Depends(unrestricted_user)]
+
+
+async def current_user(user: UnrestrictedUser, db: SessionDep) -> User:
+    """The signed-in user of a session that is allowed to do things. Every protected route
+    depends on this, directly or through a capability check layered on top of it.
+
+    403 and not 401 while a change is owed: the session is real and the credential was
+    correct. A 401 would send the frontend to `/login`, where signing in again would produce
+    another session owing the same change — a loop, for someone who has done nothing wrong.
+    """
+    if await change_required(db, user):
+        raise PASSWORD_CHANGE_REQUIRED
     return user
 
 
