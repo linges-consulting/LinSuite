@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { LockOpen, ShieldOff } from 'lucide-react'
+import { LockOpen, ShieldCheck, ShieldOff } from 'lucide-react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -52,7 +52,8 @@ export function UsersPanel() {
           <TableHead>Email</TableHead>
           <TableHead>Role</TableHead>
           <TableHead>Status</TableHead>
-          <TableHead className="text-right">Two-factor</TableHead>
+          <TableHead>Two-factor</TableHead>
+          <TableHead className="text-right">Actions</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -147,14 +148,25 @@ function AccountLine(props: { account: AccountRow; roles: { id: string; name: st
           <span className="text-muted-foreground">Active</span>
         )}
       </TableCell>
+      <TableCell>
+        {/* Never colour alone (DESIGN.md) — the badge carries the word. */}
+        <Badge variant={account.mfa_enrolled ? 'success' : 'secondary'}>
+          {account.mfa_enrolled ? <ShieldCheck aria-hidden /> : <ShieldOff aria-hidden />}
+          {account.mfa_enrolled ? 'On' : 'Off'}
+        </Badge>
+      </TableCell>
       <TableCell className="text-right">
         {/* Destructive and apart from the primary controls, and it confirms first
             (DESIGN.md): this takes a protection off somebody's account and signs them out
-            of every device, and there is no undo — the recovery codes are gone too. */}
+            of every device, and there is no undo — the recovery codes are gone too.
+            Disabled when there is nothing to reset: offered identically either way, it is a
+            button whose only effect on an unenrolled account is signing them out of every
+            device for no reason. */}
         <Button
           variant="outline"
           size="sm"
-          disabled={resetMfa.isPending}
+          title={account.mfa_enrolled ? undefined : 'This account has no second factor.'}
+          disabled={resetMfa.isPending || !account.mfa_enrolled}
           onClick={() => {
             if (
               confirm(

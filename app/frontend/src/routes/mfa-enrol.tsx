@@ -31,8 +31,13 @@ import { MFA } from '@/lib/query-keys'
 export function MfaEnrolPage({ gated = false }: { gated?: boolean }) {
   const { user } = useSession()
   const [codes, setCodes] = useState<string[] | null>(null)
+  // A current code, when there is a factor being replaced. The server requires one — this is
+  // the one thing behind the second factor that was not itself protected by it — so it is
+  // collected before the QR code rather than discovered as a 403 on a screen already drawn.
+  const [current, setCurrent] = useState<string | null>(null)
 
   if (codes) return <EnrolmentDone codes={codes} />
+  if (user?.mfa.enrolled && current === null) return <ConfirmCurrent onConfirmed={setCurrent} />
   return (
     <AuthLayout>
       <Card>
@@ -46,9 +51,9 @@ export function MfaEnrolPage({ gated = false }: { gated?: boolean }) {
         </CardHeader>
         <CardContent>
           {user?.mfa.email_otp_allowed ? (
-            <ChooseFactor onEnrolled={setCodes} gated={gated} />
+            <ChooseFactor onEnrolled={setCodes} gated={gated} current={current} />
           ) : (
-            <TotpEnrolment onEnrolled={setCodes} gated={gated} />
+            <TotpEnrolment onEnrolled={setCodes} gated={gated} current={current} />
           )}
         </CardContent>
       </Card>
@@ -56,8 +61,57 @@ export function MfaEnrolPage({ gated = false }: { gated?: boolean }) {
   )
 }
 
+type Step = { onEnrolled: (codes: string[]) => void; gated: boolean; current: string | null }
+
+/**
+ * Replacing a live factor: prove you still hold the current one first.
+ *
+ * Not a formality. Everything else this screen can reach is behind the second factor;
+ * changing the factor itself was the one place a hijacked live session — a stolen cookie, a
+ * machine left unlocked — could quietly move the account onto somebody else's phone and keep
+ * it. Having verified this session at some point is not the same as holding the device now.
+ *
+ * The code is not spent here: it is held and handed to the endpoint that starts the
+ * enrolment, which is what checks it. Two round trips would mean two codes, and the second
+ * one is thirty seconds away.
+ */
+function ConfirmCurrent({ onConfirmed }: { onConfirmed: (code: string) => void }) {
+  const [code, setCode] = useState('')
+  return (
+    <AuthLayout>
+      <Card>
+        <CardHeader className="border-b">
+          <CardTitle>Confirm it's you</CardTitle>
+          <CardDescription>
+            Replacing your second factor replaces the only thing standing between your
+            password and your account. Enter a current code first.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Form onSubmit={() => onConfirmed(code)}>
+            <CodeField
+              id="current-code"
+              label="Current code"
+              autoFocus
+              value={code}
+              onChange={setCode}
+              hint="A recovery code works here too."
+            />
+            <Button type="submit" className="w-full">
+              Continue
+            </Button>
+            <Button asChild type="button" variant="ghost" className="w-full">
+              <Link to="/security">Cancel</Link>
+            </Button>
+          </Form>
+        </CardContent>
+      </Card>
+    </AuthLayout>
+  )
+}
+
 /** Only shown where the business allows the weaker factor — otherwise there is no choice. */
-function ChooseFactor(props: { onEnrolled: (codes: string[]) => void; gated: boolean }) {
+function ChooseFactor(props: Step) {
   const [factor, setFactor] = useState<'totp' | 'email' | null>(null)
 
   if (factor === 'totp') return <TotpEnrolment {...props} />
@@ -79,13 +133,18 @@ function ChooseFactor(props: { onEnrolled: (codes: string[]) => void; gated: boo
   )
 }
 
-function TotpEnrolment(props: { onEnrolled: (codes: string[]) => void; gated: boolean }) {
+function TotpEnrolment(props: Step) {
   const [code, setCode] = useState('')
   const [manual, setManual] = useState(false)
 
-  // Started on mount rather than behind a button: the first step has nothing to decide, and
-  // a "Begin" click between arriving and seeing the QR code is ceremony.
-  const enrolment = useQuery({ queryKey: [...MFA, 'enrolment'], queryFn: startEnrolment, retry: false, staleTime: Infinity })
+  // Started on mount rather than behind a button: by this point there is nothing left to
+  // decide, and a "Begin" click between arriving and seeing the QR code is ceremony.
+  const enrolment = useQuery({
+    queryKey: [...MFA, 'enrolment'],
+    queryFn: () => startEnrolment(props.current ?? undefined),
+    retry: false,
+    staleTime: Infinity,
+  })
   const confirm = useMutation({ mutationFn: confirmEnrolment, onSuccess: props.onEnrolled })
 
   if (enrolment.isPending) return <Skeleton className="h-64 w-full" />
@@ -125,13 +184,13 @@ function TotpEnrolment(props: { onEnrolled: (codes: string[]) => void; gated: bo
   )
 }
 
-function EmailEnrolment(props: { onEnrolled: (codes: string[]) => void; gated: boolean }) {
+function EmailEnrolment(props: Step) {
   const [code, setCode] = useState('')
   const { user } = useSession()
   const sent = useQuery({
     queryKey: [...MFA, 'email-enrolment'],
     queryFn: async () => {
-      await startEmailEnrolment()
+      await startEmailEnrolment(props.current ?? undefined)
       return true
     },
     retry: false,

@@ -43,6 +43,10 @@ class UserOut(BaseModel):
     # rather than "locked: true", because the only useful thing to tell somebody waiting is
     # when it ends — and the lock always ends (PRD §1: never permanent).
     locked_until: datetime | None
+    # Whether there is a second factor to reset at all. Without it the table offers the same
+    # reset for an account that has one and an account that does not — and the second is a
+    # button whose only effect is signing somebody out of every device for no reason.
+    mfa_enrolled: bool
 
 
 async def _locks(emails: list[str]) -> dict[str, datetime]:
@@ -66,18 +70,20 @@ async def _locks(emails: list[str]) -> dict[str, datetime]:
 async def list_users(_: UsersManager, db: SessionDep) -> dict[str, list[UserOut]]:
     users = list(await db.scalars(select(User).order_by(User.email)))
     locked = await _locks([u.email for u in users])
-    return {
-        "users": [
-            UserOut(
-                id=str(u.id),
-                email=u.email,
-                role=u.role.name,
-                role_id=str(u.role_id),
-                locked_until=locked.get(u.email),
-            )
-            for u in users
-        ]
-    }
+    return {"users": [_row(u, locked.get(u.email)) for u in users]}
+
+
+def _row(user: User, locked_until: datetime | None) -> UserOut:
+    """One shape for every answer this module gives about an account, so the list and the
+    role change cannot drift into describing it differently."""
+    return UserOut(
+        id=str(user.id),
+        email=user.email,
+        role=user.role.name,
+        role_id=str(user.role_id),
+        locked_until=locked_until,
+        mfa_enrolled=user.mfa_method is not None,
+    )
 
 
 class RoleAssignment(BaseModel):
@@ -116,13 +122,7 @@ async def assign_role(
     )
     await db.commit()
     locked = await _locks([user.email])
-    return UserOut(
-        id=str(user.id),
-        email=user.email,
-        role=role.name,
-        role_id=str(role.id),
-        locked_until=locked.get(user.email),
-    )
+    return _row(user, locked.get(user.email))
 
 
 @router.post("/{user_id}/unlock", status_code=204)
@@ -153,9 +153,13 @@ async def unlock_account(user_id: uuid.UUID, admin: UsersManager, db: SessionDep
 async def reset_mfa(user_id: uuid.UUID, admin: UsersManager, db: SessionDep) -> None:
     """The lost-phone-and-lost-codes path, and the only one that does not need the account.
 
-    Everything goes: the secret, the method, and every recovery code live or spent — a set
-    that outlived the enrolment it belonged to would be a way back in that nobody is
-    tracking. `sessions_revoked_at` goes with it, because a session opened with the factor
+    Everything goes: the secret, the method, every recovery code live or spent, and the two
+    pieces of Redis state that belong to the enrolment — a half-finished candidate somebody
+    could still confirm, and the spent-step keys, which are keyed by the account rather than
+    by the secret and must not be inherited by the next one. A set that outlived the
+    enrolment it belonged to would be a way back in that nobody is tracking.
+
+    `sessions_revoked_at` goes with it, because a session opened with the factor
     being removed must not survive the removal (tech-stack §14); that is the same column a
     password change uses, so there is one revocation mechanism rather than two.
 
@@ -172,6 +176,8 @@ async def reset_mfa(user_id: uuid.UUID, admin: UsersManager, db: SessionDep) -> 
     user.mfa_method = None
     user.mfa_enrolled_at = None
     await mfa.forget_recovery_codes(db, user.id)
+    await mfa.forget_staged_secret(user)
+    await mfa.forget_used_steps(user.id)
     revoke_all(user)
     record_event(
         db,

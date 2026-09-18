@@ -131,6 +131,9 @@ export function stubApi({
   let verifiedAt = verifiedAgoMs === null ? null : Date.now() - verifiedAgoMs
   let liveRecoveryCodes = [RECOVERY_CODE]
   let emailedCode: string | null = null
+  // The server spends the TOTP step (RFC 6238 §5.2), so a code works once. The fake holds
+  // the same rule, or a test could pass here against a server that would refuse it.
+  let spentCode: string | null = null
 
   const granted = () => grantExpiresAt > Date.now()
   const account = () => ({
@@ -229,8 +232,12 @@ export function stubApi({
         )
       }
       if (url === '/api/auth/mfa/verify') {
+        if (body.code === TOTP_CODE && body.code === spentCode) {
+          return forbidden('invalid_mfa_code', 'That code has already been used.')
+        }
         if (body.code === TOTP_CODE || body.code === emailedCode) {
           if (body.code === emailedCode) emailedCode = null
+          else spentCode = body.code
           pending = false
           verifiedAt = Date.now()
           return Response.json(account())
@@ -251,6 +258,12 @@ export function stubApi({
         return Response.json({ status: 'sent' }, { status: 202 })
       }
       if (url === '/api/auth/mfa/enrol') {
+        // Replacing a live factor costs a current code; a first enrolment asks for nothing.
+        if (enrolled && body?.code !== TOTP_CODE && !liveRecoveryCodes.includes(body?.code)) {
+          return body?.code === undefined
+            ? forbidden('mfa_required', 'Enter the code from your authenticator.')
+            : forbidden('invalid_mfa_code', 'That code is not right.')
+        }
         return Response.json({
           secret: 'JBSWY3DPEHPK3PXP',
           provisioning_uri:
@@ -268,6 +281,9 @@ export function stubApi({
         return Response.json({ recovery_codes: FRESH_CODES })
       }
       if (url === '/api/auth/mfa/enrol/email') {
+        if (enrolled && body?.code === undefined) {
+          return forbidden('mfa_required', 'Enter the code from your authenticator.')
+        }
         if (!emailOtpAllowed) {
           return forbidden('mfa_email_otp_not_allowed', 'Emailed codes are not available.')
         }

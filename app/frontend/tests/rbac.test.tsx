@@ -84,8 +84,10 @@ function fakeServer() {
     },
   ]
   const users = [
-    { id: 'u1', email: 'owner@cedar.example', role: 'Administrator', role_id: 'r-admin', locked_until: null as string | null },
-    { id: 'u2', email: 'desk@cedar.example', role: 'Staff', role_id: 'r-staff', locked_until: '2026-01-05T14:30:00Z' as string | null },
+    // `mfa_enrolled` distinguishes the two rows on purpose: the Reset MFA action is
+    // disabled where there is nothing to reset, and one row of each proves both halves.
+    { id: 'u1', email: 'owner@cedar.example', role: 'Administrator', role_id: 'r-admin', locked_until: null as string | null, mfa_enrolled: true },
+    { id: 'u2', email: 'desk@cedar.example', role: 'Staff', role_id: 'r-staff', locked_until: '2026-01-05T14:30:00Z' as string | null, mfa_enrolled: false },
   ]
   const calls: { url: string; method: string; body?: any }[] = []
   /** Set by a test to make the next write refuse, the way the real guards do. */
@@ -128,6 +130,10 @@ function fakeServer() {
       }
       if (url.endsWith('/unlock')) {
         users.find((u) => u.id === url.split('/')[4])!.locked_until = null
+        return new Response(null, { status: 204 })
+      }
+      if (url.endsWith('/mfa/reset')) {
+        users.find((u) => u.id === url.split('/')[4])!.mfa_enrolled = false
         return new Response(null, { status: 204 })
       }
       return Response.json({}, { status: 404 })
@@ -263,6 +269,41 @@ describe('the People panel', () => {
       const patch = server.calls.find((c) => c.url === '/api/admin/users/u2/role')
       expect(patch?.body).toEqual({ role_id: 'r-desk' })
     })
+  })
+
+  it('offers Reset MFA only where there is a second factor to reset', async () => {
+    fakeServer()
+    const user = userEvent.setup()
+    renderSettings()
+
+    await user.click(await screen.findByRole('tab', { name: 'People' }))
+    const enrolled = (await screen.findByText('owner@cedar.example')).closest('tr')!
+    const notEnrolled = screen.getByText('desk@cedar.example').closest('tr')!
+
+    expect(within(enrolled).getByText('On')).toBeInTheDocument()
+    expect(within(enrolled).getByRole('button', { name: /Reset MFA/ })).toBeEnabled()
+    // Offered identically, this would sign somebody out of every device to remove a factor
+    // they do not have.
+    expect(within(notEnrolled).getByText('Off')).toBeInTheDocument()
+    expect(within(notEnrolled).getByRole('button', { name: /Reset MFA/ })).toBeDisabled()
+  })
+
+  it('resets a second factor and says what it cost', async () => {
+    const server = fakeServer()
+    const user = userEvent.setup()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    renderSettings()
+
+    await user.click(await screen.findByRole('tab', { name: 'People' }))
+    const row = (await screen.findByText('owner@cedar.example')).closest('tr')!
+    await user.click(within(row).getByRole('button', { name: /Reset MFA/ }))
+
+    await waitFor(() =>
+      expect(server.calls.some((c) => c.url === '/api/admin/users/u1/mfa/reset')).toBe(true),
+    )
+    expect(
+      await screen.findByText(/signed out everywhere and will be asked to set one up again/),
+    ).toBeInTheDocument()
   })
 
   it('surfaces the last-administrator refusal instead of predicting it', async () => {

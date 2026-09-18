@@ -48,6 +48,12 @@ class CodeRequest(BaseModel):
     code: str = Field(min_length=1, max_length=64)
 
 
+class StartEnrolmentRequest(BaseModel):
+    """Empty for a first enrolment; a current code when there is a factor to replace."""
+
+    code: str | None = None
+
+
 class RecoveryCodesOut(BaseModel):
     """Shown exactly once. Only digests are kept, so there is nothing to show a second time."""
 
@@ -95,7 +101,9 @@ class EnrolmentOut(BaseModel):
 
 
 @router.post("/enrol")
-async def start_enrolment(user: EnrollingUser, db: SessionDep) -> EnrolmentOut:
+async def start_enrolment(
+    payload: StartEnrolmentRequest, user: EnrollingUser, db: SessionDep
+) -> EnrolmentOut:
     """Mint a secret and hand back what an authenticator app needs to hold it.
 
     The candidate waits in Redis and the account is *not* enrolled: nothing on `users`
@@ -106,7 +114,15 @@ async def start_enrolment(user: EnrollingUser, db: SessionDep) -> EnrolmentOut:
 
     Called again, it replaces the candidate. That is the common case — the first code did
     not scan and the page was reloaded — not an attack.
+
+    **Replacing a factor that already exists costs a current code.** Everything else on this
+    page is protected by the second factor; swapping the factor itself was not, which made a
+    hijacked live session — a stolen cookie, a machine left unlocked — the one place an
+    attacker could quietly move the second factor onto their own phone and keep the account.
+    Having verified *this session at some point* is not the same as holding the device now.
     """
+    await _may_replace(db, user, payload.code)
+
     secret = mfa.new_secret()
     await mfa.stage_secret(user, secret)
     business = await db.scalar(select(Business).where(Business.id == 1))
@@ -124,7 +140,10 @@ async def confirm_enrolment(
 ) -> RecoveryCodesOut:
     """A valid code is what makes the enrolment real, and what earns the recovery codes."""
     secret = await mfa.staged_secret(user)
-    if secret is None or not mfa.check_totp(secret, payload.code):
+    # `spend_step`, not a bare check: this code is a code for the secret that becomes live on
+    # the next line, so leaving the step unspent would let it be replayed at the verify
+    # endpoint for the rest of its window.
+    if secret is None or not await mfa.spend_step(user.id, secret, payload.code):
         # Not counted against the lockout: this is somebody setting up their own account with
         # a code they can read off their own screen, and there is nothing here to guess at —
         # the secret was just handed to them.
@@ -133,11 +152,27 @@ async def confirm_enrolment(
     return await _complete_enrolment(db, claims, user, mfa.TOTP)
 
 
+async def _may_replace(db: SessionDep, user: User, code: str | None) -> None:
+    """A current code, when there is a factor being replaced. Nothing, when there is not.
+
+    A request carrying no code is refused before anything is checked and costs the lockout
+    counter nothing — the same rule as the Admin Mode re-authentication. It is the expected
+    first round trip for a client that did not know a code was needed, not a guess at one.
+    """
+    if user.mfa_method is None:
+        return
+    if not code:
+        raise mfa.TOTP_REQUIRED
+    await mfa.accept_code(db, user, code, reason="enrolment_replace")
+
+
 # --- enrolling with emailed codes -------------------------------------------------------------
 
 
 @router.post("/enrol/email", status_code=202)
-async def start_email_enrolment(user: EnrollingUser, db: SessionDep) -> dict[str, str]:
+async def start_email_enrolment(
+    payload: StartEnrolmentRequest, user: EnrollingUser, db: SessionDep
+) -> dict[str, str]:
     """The lower-assurance factor, for staff who will not install an authenticator app.
 
     Only where the business has said so. It is not a fallback here — it is the factor itself
@@ -146,6 +181,13 @@ async def start_email_enrolment(user: EnrollingUser, db: SessionDep) -> dict[str
     """
     if not (await mfa.read_policy(db)).email_otp_allowed:
         raise mfa.EMAIL_OTP_NOT_ALLOWED
+    # Moving onto the weaker factor is still moving the factor, so it costs a current code
+    # for the same reason the authenticator path does.
+    await _may_replace(db, user, payload.code)
+    # The same limiter and the same bucket as `/mfa/email-otp/request`. This endpoint sends
+    # mail too, and an unlimited one is a way to flood somebody's inbox from inside a
+    # session — the sign-in twin being limited and this one not is how that gets missed.
+    await throttle.guard_request(user.email, kind="mfaotp")
     await mfa.send_otp(db, user, purpose="enrolment")
     return {"status": "sent"}
 

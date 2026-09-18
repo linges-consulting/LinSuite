@@ -278,6 +278,9 @@ export type AccountRow = {
   role_id: string
   /** When the temporary lock lifts, or null when the account is not locked. ISO-8601. */
   locked_until: string | null
+  /** Whether there is a second factor to reset. False makes "Reset MFA" a no-op that would
+   *  still sign the person out of every device, so the button is disabled instead. */
+  mfa_enrolled: boolean
 }
 
 export async function fetchCapabilities(): Promise<Capability[]> {
@@ -348,8 +351,13 @@ export type MfaStatus = {
   required_for_admin: boolean
 }
 
-export async function startEnrolment(): Promise<Enrolment> {
-  const res = await post('/api/auth/mfa/enrol', {})
+/**
+ * Begin an enrolment. `code` is a current authenticator or recovery code, and the server
+ * requires one when there is already a factor being replaced — swapping the second factor is
+ * the one thing behind it that was not itself protected by it.
+ */
+export async function startEnrolment(code?: string): Promise<Enrolment> {
+  const res = await post('/api/auth/mfa/enrol', code ? { code } : {})
   if (!res.ok) throw await failure(res, 'Could not start the enrolment')
   return res.json()
 }
@@ -361,8 +369,8 @@ export async function confirmEnrolment(code: string): Promise<string[]> {
   return (await res.json()).recovery_codes
 }
 
-export async function startEmailEnrolment(): Promise<void> {
-  const res = await post('/api/auth/mfa/enrol/email', {})
+export async function startEmailEnrolment(code?: string): Promise<void> {
+  const res = await post('/api/auth/mfa/enrol/email', code ? { code } : {})
   if (!res.ok) throw await failure(res, 'Could not send the code')
 }
 

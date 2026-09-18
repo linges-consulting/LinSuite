@@ -76,6 +76,7 @@ TOTP_WINDOW = 1
 _SESSION_PREFIX = "session:mfa:"
 _OTP_PREFIX = "mfa:otp:"
 _ENROLMENT_PREFIX = "mfa:enrolling:"
+_USED_STEP_PREFIX = "mfa:used:"
 
 # How long a started enrolment waits for the code that confirms it. Long enough to find a
 # phone, short enough that an abandoned one is not sitting around tomorrow.
@@ -120,6 +121,29 @@ def decrypt_secret(sealed: str) -> str:
     return crypto.decrypt(sealed, get_settings().mfa_encryption_key)
 
 
+def unseal(sealed: str | None, email: str) -> str | None:
+    """`decrypt_secret`, for the callers that must not die when it cannot.
+
+    A wrong or rotated `MFA_ENCRYPTION_KEY` makes GCM refuse to authenticate the ciphertext,
+    and the raise lands in the middle of a sign-in. A 500 on every sign-in says nothing about
+    what is wrong; the refusal plus one log line naming the cause is the difference between
+    "the product is broken" and "restore the key or reset every enrolment", which is the
+    failure `.env.example` warns the key must be escrowed against.
+    """
+    if sealed is None:
+        return None
+    try:
+        return decrypt_secret(sealed)
+    except Exception:
+        log.exception(
+            "auth: cannot decrypt the stored TOTP secret for %s — MFA_ENCRYPTION_KEY is "
+            "wrong or has been rotated. Every enrolment is unreadable until the original is "
+            "restored; otherwise each user has to be reset by an administrator.",
+            email,
+        )
+        return None
+
+
 def provisioning_uri(secret: str, email: str, issuer: str) -> str:
     """What the QR code encodes. The issuer is the business, so somebody carrying two
     clinics on one phone can tell the two entries apart."""
@@ -128,10 +152,78 @@ def provisioning_uri(secret: str, email: str, issuer: str) -> str:
     )
 
 
-def check_totp(secret: str, code: str) -> bool:
-    return pyotp.TOTP(secret, interval=TOTP_INTERVAL_SECONDS).verify(
-        code.strip(), valid_window=TOTP_WINDOW
+def matching_step(secret: str, code: str) -> int | None:
+    """Which time step this code is the OTP for, or None.
+
+    `pyotp.verify` answers yes or no, and yes is not enough: RFC 6238 §5.2 requires a code to
+    be accepted once and not again, and "once" is per *step* — so the step has to be named
+    before it can be spent. The three candidates are walked by hand for that reason, with
+    `compare_digest` rather than `==` so the comparison does not leak how much of the code
+    was right through its timing.
+    """
+    totp = pyotp.TOTP(secret, interval=TOTP_INTERVAL_SECONDS)
+    now = datetime.now(UTC)
+    typed = code.strip()
+    for offset in range(-TOTP_WINDOW, TOTP_WINDOW + 1):
+        at = now + timedelta(seconds=offset * TOTP_INTERVAL_SECONDS)
+        if secrets.compare_digest(totp.at(at), typed):
+            return int(at.timestamp()) // TOTP_INTERVAL_SECONDS
+    return None
+
+
+def step_key(user_id: str | uuid.UUID, step: int) -> str:
+    return f"{_USED_STEP_PREFIX}{user_id}:{step}"
+
+
+async def spend_totp(user: User, code: str) -> bool:
+    """A valid code, and one this account has not already used.
+
+    **Why replay matters here and not in most TOTP implementations.** One code is good for a
+    ±1 window — ninety seconds — and this product checks second factors at two different
+    doors through one function. A code typed into the Admin Mode dialog, seen over a
+    shoulder or lifted from a proxy log, is otherwise still good at `POST /auth/mfa/verify`
+    on a *different* session for the rest of that window. Spending the step closes it.
+
+    `SET NX` is the whole mechanism: the first caller creates the key and is let through, and
+    every later one finds it there. The TTL is the width of the window the step can still be
+    offered in, so the keys expire rather than accumulating.
+    """
+    secret = unseal(user.mfa_secret, user.email)
+    if secret is None:
+        return False
+    return await spend_step(user.id, secret, code)
+
+
+async def spend_step(user_id: str | uuid.UUID, secret: str, code: str) -> bool:
+    """Accept this code once, against this account, for this step. `SET NX` is the whole
+    mechanism: the first caller creates the key and is let through, every later one finds it
+    already there. The TTL is the width of the window the step can still be offered in, so
+    the keys expire rather than accumulate.
+
+    Enrolment confirmation goes through here too, and has to: the code that confirms an
+    enrolment is a code for the secret that is live one line later, so a confirm code left
+    unspent would still open `POST /auth/mfa/verify` for the rest of its window.
+    """
+    step = matching_step(secret, code)
+    if step is None:
+        return False
+    return bool(
+        await get_redis().set(
+            step_key(user_id, step),
+            "1",
+            ex=TOTP_INTERVAL_SECONDS * (2 * TOTP_WINDOW + 1),
+            nx=True,
+        )
     )
+
+
+async def forget_used_steps(user_id: str | uuid.UUID) -> None:
+    """Drop the spent-step keys for an account whose enrolment is going away. They are keyed
+    by the user, not by the secret, and a new secret's steps must not inherit them."""
+    redis = get_redis()
+    keys = [key async for key in redis.scan_iter(match=f"{_USED_STEP_PREFIX}{user_id}:*")]
+    if keys:
+        await redis.delete(*keys)
 
 
 # --- an enrolment in progress -------------------------------------------------------------
@@ -154,8 +246,7 @@ async def stage_secret(user: User, secret: str) -> None:
 
 
 async def staged_secret(user: User) -> str | None:
-    sealed = await get_redis().get(enrolment_key(user.id))
-    return decrypt_secret(sealed) if sealed else None
+    return unseal(await get_redis().get(enrolment_key(user.id)), user.email)
 
 
 async def forget_staged_secret(user: User) -> None:
@@ -451,7 +542,10 @@ async def spend_otp(user: User, code: str) -> bool:
     """Single-use: the key goes the moment a code matches it."""
     redis = get_redis()
     stored = await redis.get(otp_key(user.id))
-    if stored is None or stored != digest(code.strip()):
+    # Both sides are hex digests of a fixed length, so there is nothing to leak by length —
+    # but a timing-safe comparison is the habit worth having on every credential, and the
+    # one place it is skipped is the one somebody will point at later.
+    if stored is None or not secrets.compare_digest(stored, digest(code.strip())):
         return False
     await redis.delete(otp_key(user.id))
     return True
@@ -519,12 +613,11 @@ async def check_any(db: SessionDep, user: User, code: str) -> Accepted | None:
     they are holding and the server can tell them apart by trying. The two six-digit kinds
     can collide in principle and it does not matter: either one is a factor this account is
     entitled to use, and only one of them is consumed.
+
+    All three are single-use. That is obvious for a recovery code and for an emailed one; it
+    is true of the TOTP too, and deliberately so — see `spend_totp`.
     """
-    if (
-        user.mfa_method == TOTP
-        and user.mfa_secret
-        and check_totp(decrypt_secret(user.mfa_secret), code)
-    ):
+    if user.mfa_method == TOTP and await spend_totp(user, code):
         return Accepted(TOTP)
     if await spend_otp(user, code):
         return Accepted(EMAIL)

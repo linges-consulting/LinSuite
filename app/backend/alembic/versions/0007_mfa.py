@@ -43,15 +43,21 @@ def upgrade() -> None:
             sa.ForeignKey("users.id", ondelete="CASCADE"),
             nullable=False,
         ),
-        sa.Column("code_hash", sa.String(64), nullable=False, unique=True),
+        sa.Column("code_hash", sa.String(64), nullable=False),
         sa.Column("used_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
     )
     # Every read is "the live codes for this user" — counting what is left, and spending one.
-    # Grants are not repeated here: 0001's ALTER DEFAULT PRIVILEGES already covers new tables.
-    op.create_index("ix_mfa_recovery_codes_user", "mfa_recovery_codes", ["user_id"])
+    # Unique per user, not globally. A global unique constraint on the digest means two
+    # people can never hold the same code — which is a 1-in-2^40 collision that nobody would
+    # ever see, except as an INSERT failing during somebody's enrolment for reasons no error
+    # message would explain. The uniqueness worth having is "one row per code per account",
+    # and this index is also the lookup the spend does.
+    op.create_unique_constraint(
+        "uq_mfa_recovery_codes_user_hash", "mfa_recovery_codes", ["user_id", "code_hash"]
+    )
 
     op.add_column(
         "businesses",
@@ -73,7 +79,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_column("businesses", "mfa_email_otp_allowed")
     op.drop_column("businesses", "mfa_required_for_admin")
-    op.drop_index("ix_mfa_recovery_codes_user", table_name="mfa_recovery_codes")
+    op.drop_constraint("uq_mfa_recovery_codes_user_hash", "mfa_recovery_codes", type_="unique")
     op.drop_table("mfa_recovery_codes")
     op.drop_constraint("ck_users_mfa_method", "users", type_="check")
     op.drop_column("users", "mfa_enrolled_at")

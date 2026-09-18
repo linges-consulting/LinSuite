@@ -10,6 +10,7 @@ The TOTP codes are computed with `pyotp` against the secret the enrolment endpoi
 """
 
 import hashlib
+import logging
 from datetime import UTC, datetime, timedelta
 
 import pyotp
@@ -18,6 +19,7 @@ from sqlalchemy import text
 
 from auth import mfa, throttle
 from auth import session as session_mod
+from core import crypto
 from core.config import Settings, get_settings
 from core.db import get_purge_engine, session_scope
 from core.redis import get_redis
@@ -106,15 +108,40 @@ async def me(client):
     return resp.json()
 
 
-async def enrol(client) -> tuple[str, list[str]]:
-    """Walk the whole enrolment: start, confirm with a real code, keep the recovery codes."""
-    started = await client.post("/api/auth/mfa/enrol", json={})
+def code(secret: str, step: int = 0) -> str:
+    """The code for now, or for `step` steps either side of it.
+
+    A test that needs a *second* code asks for the next step rather than the same one twice,
+    which is what a person does when the last code has been used: they wait for the display
+    to tick over. The replay rule that makes this necessary has its own tests below.
+    """
+    return pyotp.TOTP(secret).at(datetime.now(UTC) + timedelta(seconds=step * 30))
+
+
+async def forget_spent_steps(email=EMAIL):
+    """Forget which TOTP steps this account has spent — the effect of a minute passing,
+    without the minute. Reached into for the same reason the admin window is: the rule under
+    test is elsewhere, and only two steps either side of now are ever offerable."""
+    async with session_scope() as db:
+        uid = await db.scalar(text("SELECT id FROM users WHERE email = :e"), {"e": email})
+    await mfa.forget_used_steps(uid)
+
+
+async def enrol(client, replacing: str | None = None) -> tuple[str, list[str]]:
+    """Walk the whole enrolment: start, confirm with a real code, keep the recovery codes.
+
+    `replacing` is a current code, which the endpoint requires when there is already a factor
+    to replace. The spent steps are dropped at the end: confirming spends one, and a test
+    that goes on to sign in is a test about signing in — in life, minutes pass in between.
+    """
+    started = await client.post(
+        "/api/auth/mfa/enrol", json={"code": replacing} if replacing else {}
+    )
     assert started.status_code == 200, started.text
     secret = started.json()["secret"]
-    confirmed = await client.post(
-        "/api/auth/mfa/enrol/confirm", json={"code": pyotp.TOTP(secret).now()}
-    )
+    confirmed = await client.post("/api/auth/mfa/enrol/confirm", json={"code": code(secret)})
     assert confirmed.status_code == 200, confirmed.text
+    await forget_spent_steps()
     return secret, confirmed.json()["recovery_codes"]
 
 
@@ -182,9 +209,7 @@ async def test_enrolment_does_not_take_effect_until_a_code_proves_the_app_has_it
     assert wrong.json()["code"] == "invalid_mfa_code"
     assert (await me(client))["mfa"]["enrolled"] is False
 
-    right = await client.post(
-        "/api/auth/mfa/enrol/confirm", json={"code": pyotp.TOTP(secret).now()}
-    )
+    right = await client.post("/api/auth/mfa/enrol/confirm", json={"code": code(secret)})
     assert right.status_code == 200, right.text
     assert len(right.json()["recovery_codes"]) == get_settings().mfa_recovery_code_count
     assert (await me(client))["mfa"]["enrolled"] is True
@@ -201,11 +226,13 @@ async def test_starting_a_second_enrolment_leaves_the_live_one_working(client):
     await login(client)
     secret, _ = await enrol(client)
 
-    await client.post("/api/auth/mfa/enrol", json={})  # started, and then abandoned
+    # Started with a current code, and then abandoned.
+    started = await client.post("/api/auth/mfa/enrol", json={"code": code(secret)})
+    assert started.status_code == 200, started.text
 
     client.cookies.clear()
     await login(client)
-    assert (await verify(client, pyotp.TOTP(secret).now())).status_code == 200
+    assert (await verify(client, code(secret, 1))).status_code == 200
 
 
 async def test_the_secret_is_encrypted_at_rest_and_round_trips(client):
@@ -265,7 +292,7 @@ async def test_a_pending_session_reaches_only_verify_me_and_logout(client):
 
     # The three that must stay open, or the session could never stop being pending.
     assert (await client.get("/api/auth/me")).status_code == 200
-    assert (await verify(client, pyotp.TOTP(secret).now())).status_code == 200
+    assert (await verify(client, code(secret))).status_code == 200
     assert (await client.post("/api/auth/logout", json={})).status_code == 204
 
 
@@ -275,7 +302,7 @@ async def test_a_valid_code_clears_pending_and_records_when(client):
     client.cookies.clear()
     await login(client)
 
-    verified = await verify(client, pyotp.TOTP(secret).now())
+    verified = await verify(client, code(secret))
 
     assert verified.status_code == 200, verified.text
     assert verified.json()["mfa"]["pending"] is False
@@ -291,7 +318,7 @@ async def test_a_code_from_the_previous_step_is_still_accepted(client):
     client.cookies.clear()
     await login(client)
 
-    previous = pyotp.TOTP(secret).at(datetime.now(UTC) - timedelta(seconds=30))
+    previous = code(secret, -1)
 
     assert (await verify(client, previous)).status_code == 200
 
@@ -302,11 +329,90 @@ async def test_a_code_two_windows_old_is_not(client):
     client.cookies.clear()
     await login(client)
 
-    stale = pyotp.TOTP(secret).at(datetime.now(UTC) - timedelta(seconds=120))
+    stale = code(secret, -4)
 
     refused = await verify(client, stale)
     assert refused.status_code == 403, refused.text
     assert refused.json()["code"] == "invalid_mfa_code"
+
+
+# --- one code, once (RFC 6238 §5.2) ---------------------------------------------------------
+
+
+async def test_a_code_is_accepted_once_and_never_again(client):
+    """A code is good for ninety seconds, and this product checks second factors at two
+    different doors. Without spending the step, a code seen over a shoulder at the Admin Mode
+    dialog is still good at the verify endpoint, on somebody else's session, for the rest of
+    its window."""
+    await login(client)
+    secret, _ = await enrol(client)
+    client.cookies.clear()
+    await login(client)
+    used = code(secret)
+
+    assert (await verify(client, used)).status_code == 200
+
+    # The same session, immediately.
+    await get_redis().delete(throttle.delay_key(EMAIL))
+    again = await verify(client, used)
+    assert again.status_code == 403, again.text
+    assert again.json()["code"] == "invalid_mfa_code"
+
+
+async def test_a_spent_code_is_refused_on_a_different_session_too(client):
+    """The step belongs to the account, not to the session that spent it — which is the whole
+    point, since the replay would arrive on a session the attacker controls."""
+    await login(client)
+    secret, _ = await enrol(client)
+    client.cookies.clear()
+    await login(client)
+    used = code(secret)
+    assert (await verify(client, used)).status_code == 200
+
+    # A second sign-in, as the attacker holding the code they watched being typed.
+    client.cookies.clear()
+    await login(client)
+    await get_redis().delete(throttle.delay_key(EMAIL))
+
+    replayed = await verify(client, used)
+
+    assert replayed.status_code == 403, replayed.text
+    assert replayed.json()["code"] == "invalid_mfa_code"
+    # Refused like any other bad code, so it costs the attacker the lockout counter.
+    assert "mfa.failed" in await event_types()
+    assert await get_redis().exists(throttle.fail_key(EMAIL))
+
+
+async def test_the_next_code_still_works_after_one_is_spent(client):
+    """Spending a step must not lock the account out of the next one — the display ticks
+    over and the person types what it now says."""
+    await login(client)
+    secret, _ = await enrol(client)
+    client.cookies.clear()
+    await login(client)
+    assert (await verify(client, code(secret))).status_code == 200
+
+    client.cookies.clear()
+    await login(client)
+
+    assert (await verify(client, code(secret, 1))).status_code == 200
+
+
+async def test_the_code_that_confirmed_an_enrolment_cannot_then_sign_in(client):
+    """The confirming code is a code for the secret that goes live one line later."""
+    await login(client)
+    started = await client.post("/api/auth/mfa/enrol", json={})
+    secret = started.json()["secret"]
+    confirming = code(secret)
+    assert (
+        await client.post("/api/auth/mfa/enrol/confirm", json={"code": confirming})
+    ).status_code == 200
+    client.cookies.clear()
+    await login(client)
+
+    replayed = await verify(client, confirming)
+
+    assert replayed.status_code == 403, replayed.text
 
 
 # --- a failed second factor is a failed authentication ----------------------------------------
@@ -355,7 +461,7 @@ async def test_a_verified_code_clears_the_failure_run(client):
     await verify(client, "000000")
     await get_redis().delete(throttle.delay_key(EMAIL))
 
-    assert (await verify(client, pyotp.TOTP(secret).now())).status_code == 200
+    assert (await verify(client, code(secret))).status_code == 200
     assert not await get_redis().exists(throttle.fail_key(EMAIL))
 
 
@@ -366,9 +472,65 @@ async def test_a_locked_account_is_refused_before_the_code_is_checked(client):
     await login(client)
     await get_redis().set(throttle.lock_key(EMAIL), "1", ex=900)
 
-    refused = await verify(client, pyotp.TOTP(secret).now())
+    refused = await verify(client, code(secret))
 
     assert refused.status_code == 429, refused.text
+
+
+# --- replacing a factor that already exists ---------------------------------------------------
+
+
+async def test_replacing_a_live_factor_costs_a_current_code(client):
+    """Everything else behind the second factor is protected by it; swapping the factor
+    itself was the one place a hijacked live session could quietly move the account onto
+    somebody else's phone. Having verified this session at some point is not the same as
+    holding the device now."""
+    await login(client)
+    secret, _ = await enrol(client)
+
+    without = await client.post("/api/auth/mfa/enrol", json={})
+    assert without.status_code == 403, without.text
+    assert without.json()["code"] == "mfa_required"
+
+    wrong = await client.post("/api/auth/mfa/enrol", json={"code": "000000"})
+    assert wrong.status_code == 403, wrong.text
+    assert wrong.json()["code"] == "invalid_mfa_code"
+
+    await get_redis().delete(throttle.delay_key(EMAIL))
+    with_code = await client.post("/api/auth/mfa/enrol", json={"code": code(secret)})
+    assert with_code.status_code == 200, with_code.text
+
+
+async def test_a_recovery_code_is_enough_to_replace_a_lost_authenticator(client):
+    """The phone is the thing that is gone, so the code it produces cannot be the only way
+    to replace it."""
+    await login(client)
+    _, codes = await enrol(client)
+
+    replaced = await client.post("/api/auth/mfa/enrol", json={"code": codes[0]})
+
+    assert replaced.status_code == 200, replaced.text
+
+
+async def test_a_first_enrolment_asks_for_nothing(client):
+    await login(client)
+
+    started = await client.post("/api/auth/mfa/enrol", json={})
+
+    assert started.status_code == 200, started.text
+
+
+async def test_moving_onto_emailed_codes_costs_a_current_code_too(client):
+    await set_policy(email_otp_allowed=True)
+    await login(client)
+    secret, _ = await enrol(client)
+
+    without = await client.post("/api/auth/mfa/enrol/email", json={})
+    assert without.status_code == 403, without.text
+    assert without.json()["code"] == "mfa_required"
+
+    with_code = await client.post("/api/auth/mfa/enrol/email", json={"code": code(secret)})
+    assert with_code.status_code == 202, with_code.text
 
 
 # --- recovery codes ---------------------------------------------------------------------------
@@ -450,7 +612,7 @@ async def test_admin_mode_needs_no_code_right_after_the_login_challenge(client):
     secret, _ = await enrol(client)
     client.cookies.clear()
     await login(client)
-    await verify(client, pyotp.TOTP(secret).now())
+    await verify(client, code(secret))
 
     entered = await client.post("/api/auth/mode", json={"mode": "admin", "password": PASSWORD})
 
@@ -463,7 +625,7 @@ async def test_switching_back_and_forth_never_asks_again(client):
     secret, _ = await enrol(client)
     client.cookies.clear()
     await login(client)
-    await verify(client, pyotp.TOTP(secret).now())
+    await verify(client, code(secret))
     await client.post("/api/auth/mode", json={"mode": "admin", "password": PASSWORD})
 
     await client.post("/api/auth/mode", json={"mode": "staff"})
@@ -478,7 +640,7 @@ async def test_admin_mode_demands_a_code_once_the_twelve_hours_have_passed(clien
     secret, _ = await enrol(client)
     client.cookies.clear()
     await login(client)
-    await verify(client, pyotp.TOTP(secret).now())
+    await verify(client, code(secret))
     # Reach in and age the verification, rather than waiting twelve hours for it.
     await mfa.age_verification(
         jti(client),
@@ -492,7 +654,7 @@ async def test_admin_mode_demands_a_code_once_the_twelve_hours_have_passed(clien
     await get_redis().delete(throttle.delay_key(EMAIL))
     with_code = await client.post(
         "/api/auth/mode",
-        json={"mode": "admin", "password": PASSWORD, "totp": pyotp.TOTP(secret).now()},
+        json={"mode": "admin", "password": PASSWORD, "totp": code(secret, 1)},
     )
     assert with_code.status_code == 200, with_code.text
     assert with_code.json()["mode"] == "admin"
@@ -503,7 +665,7 @@ async def test_a_wrong_code_on_the_mode_switch_is_refused_and_counted(client):
     secret, _ = await enrol(client)
     client.cookies.clear()
     await login(client)
-    await verify(client, pyotp.TOTP(secret).now())
+    await verify(client, code(secret))
     await mfa.age_verification(jti(client), datetime.now(UTC) - timedelta(hours=24))
 
     refused = await client.post(
@@ -696,6 +858,36 @@ async def test_a_business_that_allows_it_can_enrol_email_as_the_second_factor(cl
     assert status["enrolled"] is True
 
 
+async def test_the_enrolment_send_is_limited_like_the_sign_in_one(client):
+    """It sends mail from inside a session, so it needs the limiter its sign-in twin has —
+    the two being written a hundred lines apart is exactly how one of them ends up without
+    it."""
+    await set_policy(email_otp_allowed=True)
+    await login(client)
+
+    for _ in range(get_settings().reset_request_limit):
+        assert (await client.post("/api/auth/mfa/enrol/email", json={})).status_code == 202
+    refused = await client.post("/api/auth/mfa/enrol/email", json={})
+
+    assert refused.status_code == 429, refused.text
+    assert not await get_redis().exists(throttle.lock_key(EMAIL))
+
+
+async def test_the_two_kinds_of_send_share_one_bucket_and_not_the_reset_one(client):
+    """One bucket for the codes, because they are the same message from one address's point
+    of view — and a separate one from password reset, so a forgotten password cannot use up
+    the codes somebody needs to get back into an account whose authenticator is gone."""
+    await set_policy(email_otp_allowed=True)
+    await login(client)
+    for _ in range(get_settings().reset_request_limit):
+        await client.post("/api/auth/mfa/enrol/email", json={})
+
+    assert (await client.post("/api/auth/mfa/enrol/email", json={})).status_code == 429
+    # The reset form still answers, because it counts separately.
+    asked = await client.post("/api/auth/password-reset/request", json={"email": EMAIL})
+    assert asked.status_code == 202, asked.text
+
+
 async def test_email_enrolment_is_refused_where_the_business_has_not_allowed_it(client):
     await login(client)
 
@@ -722,7 +914,7 @@ async def test_an_administrator_reset_clears_enrolment_and_ends_every_session(cl
     secret, codes = await enrol(client)
     client.cookies.clear()
     await login(client)
-    await verify(client, pyotp.TOTP(secret).now())
+    await verify(client, code(secret))
     await client.post("/api/auth/mode", json={"mode": "admin", "password": PASSWORD})
     target = await user_id()
 
@@ -751,6 +943,43 @@ async def test_an_administrator_reset_clears_enrolment_and_ends_every_session(cl
     assert (await me(client))["mfa"]["enrolled"] is False
 
 
+async def test_the_reset_takes_the_redis_state_with_it(client):
+    """A staged candidate outliving a reset would be an enrolment somebody could still
+    confirm on an account an administrator has just taken the factor off."""
+    await login(client)
+    secret, _ = await enrol(client)
+    target = await user_id()
+    started = await client.post("/api/auth/mfa/enrol", json={"code": code(secret)})
+    assert started.status_code == 200, started.text
+    assert await get_redis().exists(mfa.enrolment_key(target))
+    await client.post("/api/auth/mode", json={"mode": "admin", "password": PASSWORD})
+
+    await client.post(f"/api/admin/users/{target}/mfa/reset", json={})
+
+    assert not await get_redis().exists(mfa.enrolment_key(target))
+    assert [key async for key in get_redis().scan_iter(match=f"mfa:used:{target}:*")] == []
+
+
+async def test_two_accounts_may_hold_the_same_recovery_code_digest(client):
+    """Unique per account, not globally. A global constraint turns a 1-in-2^40 collision
+    into an INSERT that fails in the middle of somebody's enrolment for no stated reason."""
+    await add_staff_user()
+    async with session_scope() as db:
+        ids = list(await db.scalars(text("SELECT id FROM users ORDER BY email")))
+        for user in ids:
+            await db.execute(
+                text(
+                    "INSERT INTO mfa_recovery_codes (user_id, code_hash) "
+                    "VALUES (:u, 'the same digest')"
+                ),
+                {"u": user},
+            )
+        await db.commit()
+
+    async with session_scope() as db:
+        assert await db.scalar(text("SELECT count(*) FROM mfa_recovery_codes")) == len(ids)
+
+
 async def test_the_reset_names_the_administrator_who_did_it_and_tells_the_owner(
     client, sent_emails
 ):
@@ -763,7 +992,7 @@ async def test_the_reset_names_the_administrator_who_did_it_and_tells_the_owner(
         )
     client.cookies.clear()
     await login(client)
-    await verify(client, pyotp.TOTP(admin_secret).now())
+    await verify(client, code(admin_secret))
     await client.post("/api/auth/mode", json={"mode": "admin", "password": PASSWORD})
     sent_emails.clear()
 
@@ -802,20 +1031,21 @@ async def test_every_403_this_feature_emits_names_its_kind(client):
     bad_enrolment_code = await client.post("/api/auth/mfa/enrol/confirm", json={"code": "000000"})
     email_not_allowed = await client.post("/api/auth/mfa/enrol/email", json={})
 
-    await client.post("/api/auth/mfa/enrol/confirm", json={"code": pyotp.TOTP(secret).now()})
+    await client.post("/api/auth/mfa/enrol/confirm", json={"code": code(secret)})
+    await forget_spent_steps()
     client.cookies.clear()
     await login(client)
     pending_gate = await client.get(ADMIN_ENDPOINT)
     await get_redis().delete(throttle.delay_key(EMAIL))
     bad_verify = await verify(client, "000000")
     await get_redis().delete(throttle.delay_key(EMAIL))
-    await verify(client, pyotp.TOTP(secret).now())
+    await verify(client, code(secret))
     await mfa.age_verification(jti(client), datetime.now(UTC) - timedelta(hours=24))
     totp_demanded = await client.post(
         "/api/auth/mode", json={"mode": "admin", "password": PASSWORD}
     )
 
-    for resp, code in (
+    for resp, expected in (
         (enrolment_gate, "mfa_enrolment_required"),
         (bad_enrolment_code, "invalid_mfa_code"),
         (email_not_allowed, "mfa_email_otp_not_allowed"),
@@ -824,7 +1054,7 @@ async def test_every_403_this_feature_emits_names_its_kind(client):
         (totp_demanded, "mfa_required"),
     ):
         assert resp.status_code == 403, resp.text
-        assert resp.json()["code"] == code, resp.text
+        assert resp.json()["code"] == expected, resp.text
         assert isinstance(resp.json()["detail"], str)
 
 
@@ -846,3 +1076,31 @@ async def test_there_is_no_sms_path_anywhere_in_the_product(client):
     assert named(Settings.model_fields) == []
     for factory in PROVIDERS.values():
         assert named(dir(factory)) == []
+
+
+async def test_an_unreadable_secret_is_refused_rather_than_raised(client, caplog):
+    """The escrow failure, made diagnosable.
+
+    A wrong or rotated `MFA_ENCRYPTION_KEY` means GCM will not authenticate the stored
+    ciphertext. Raising there is a 500 on every sign-in that says nothing about the cause;
+    the refusal plus a log line naming it is what tells an administrator to restore the key
+    or reset every enrolment.
+    """
+    await login(client)
+    secret, _ = await enrol(client)
+    client.cookies.clear()
+    await login(client)
+    # The column, rewritten under a key this deployment does not have.
+    async with session_scope() as db:
+        await db.execute(
+            text("UPDATE users SET mfa_secret = :s WHERE email = :e"),
+            {"s": crypto.encrypt(secret, "ab" * 32), "e": EMAIL},
+        )
+        await db.commit()
+
+    with caplog.at_level(logging.ERROR):
+        refused = await verify(client, code(secret))
+
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["code"] == "invalid_mfa_code"
+    assert "MFA_ENCRYPTION_KEY" in caplog.text

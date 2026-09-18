@@ -23,6 +23,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    UniqueConstraint,
     func,
     text,
 )
@@ -152,12 +153,18 @@ class MfaRecoveryCode(Base):
     """
 
     __tablename__ = "mfa_recovery_codes"
+    # Per account, not globally: two people holding the same code is a collision nobody will
+    # ever see, and a global constraint would surface it as an INSERT failing in the middle
+    # of somebody's enrolment. This is also the index the spend looks the row up by.
+    __table_args__ = (
+        UniqueConstraint("user_id", "code_hash", name="uq_mfa_recovery_codes_user_hash"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True, server_default=text("gen_random_uuid()")
     )
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    code_hash: Mapped[str] = mapped_column(String(64))
     used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
