@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 from auth.admin_users import router as admin_users_router
 from auth.login import router as auth_router
+from auth.mfa_routes import router as mfa_router
 from auth.passwords import router as passwords_router
 from auth.roles import router as roles_router
 from auth.setup import bootstrap_setup_token
@@ -96,6 +97,7 @@ async def health(session: SessionDep) -> JSONResponse:
 
 
 api.include_router(auth_router)
+api.include_router(mfa_router)
 api.include_router(passwords_router)
 api.include_router(setup_router)
 api.include_router(roles_router)

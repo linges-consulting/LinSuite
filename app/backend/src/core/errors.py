@@ -28,6 +28,18 @@ PASSWORD_CHANGE_REQUIRED = "password_change_required"
 # none of these — the form that collected the password is the only thing that should react.
 INVALID_PASSWORD = "invalid_password"
 INVALID_SETUP_TOKEN = "invalid_setup_token"
+# A code was wrong, spent or expired — whichever it was, the answer is the same one.
+INVALID_MFA_CODE = "invalid_mfa_code"
+# The session is real but owes a second factor: route to the verify screen, not to /login.
+MFA_VERIFICATION_REQUIRED = "mfa_verification_required"
+# The business requires a second factor on accounts that can administer, and this one has
+# none: route to enrolment and nowhere else.
+MFA_ENROLMENT_REQUIRED = "mfa_enrolment_required"
+# Entering Admin Mode needs a code this time round (once per `ADMIN_MFA_INTERVAL_HOURS`).
+# The re-authentication dialog grows a second field; nothing about the session changed.
+MFA_REQUIRED = "mfa_required"
+# An emailed code was asked for where this account may not use one.
+MFA_EMAIL_OTP_NOT_ALLOWED = "mfa_email_otp_not_allowed"
 
 
 class Forbidden(HTTPException):

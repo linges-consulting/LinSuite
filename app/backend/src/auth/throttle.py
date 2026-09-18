@@ -28,6 +28,7 @@ shut a clinic's front desk down mid-shift (PRD §1), which is the attack, not th
 | `auth:lock:<digest>` | which tier locked it | the lock, and so the auto-unlock |
 | `auth:tier:<digest>` | lockouts so far | the decay window, pushed out by each lockout |
 | `auth:reset:<digest>` | reset links asked for | the reset-request window |
+| `auth:mfaotp:<digest>` | emailed sign-in codes asked for | the same window, its own bucket |
 """
 
 import hashlib
@@ -66,8 +67,8 @@ def tier_key(email: str) -> str:
     return "auth:tier:" + _digest(email)
 
 
-def _reset_key(email: str) -> str:
-    return "auth:reset:" + _digest(email)
+def _request_key(email: str, kind: str) -> str:
+    return f"auth:{kind}:" + _digest(email)
 
 
 def _too_many(seconds: int, detail: str, *, locked: bool) -> HTTPException:
@@ -253,24 +254,30 @@ def notify_password_changed(email: str) -> None:
     send_email.delay(email, PASSWORD_CHANGED_SUBJECT, PASSWORD_CHANGED_MESSAGE)
 
 
-async def guard_reset_request(email: str) -> None:
-    """A separate, simpler limit: how many links one address may ask for.
+async def guard_request(email: str, *, kind: str = "reset") -> None:
+    """A separate, simpler limit: how many messages one address may ask us to send it.
 
-    Not part of the failure counter, and it must never be — asking for a reset link is not a
-    guess at a password, and feeding it into the lockout would let anybody lock any account
-    whose address they know.
+    Not part of the failure counter, and it must never be — asking for a reset link or a
+    sign-in code is not a guess at a password, and feeding it into the lockout would let
+    anybody lock any account whose address they know.
+
+    `kind` keeps the two buckets apart. Sharing one would mean a forgotten password used up
+    the emailed codes somebody needs to get back into an account whose authenticator is
+    gone, which is the one moment both paths are wanted at once.
     """
     settings = get_settings()
     redis = get_redis()
-    asked = await redis.incr(_reset_key(email))
+    key = _request_key(email, kind)
+    asked = await redis.incr(key)
     # `nx` matters more than it looks: without it a counter whose `expire` was lost — a crash
     # between the two calls — would keep its value forever, and this address could never ask
     # for a link again. Nothing here is allowed to be permanent.
-    await redis.expire(_reset_key(email), settings.reset_request_window_minutes * 60, nx=True)
+    await redis.expire(key, settings.reset_request_window_minutes * 60, nx=True)
     if asked > settings.reset_request_limit:
-        ttl = await redis.ttl(_reset_key(email))
+        ttl = await redis.ttl(key)
         raise _too_many(
             max(1, ttl),
-            "Too many reset links have been requested for this address. Try again later.",
+            "Too many messages have been requested for this address. Try again later.",
             locked=False,
         )
+

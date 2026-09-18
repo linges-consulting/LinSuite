@@ -11,6 +11,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     Identity,
@@ -42,6 +43,16 @@ class Business(Base):
     # rotation without evidence of compromise degrades password quality. Exposed only
     # because some insurers and colleges require it (PRD §1, tech-stack §14).
     password_rotation_days: Mapped[int | None] = mapped_column(Integer)
+    # On by default (PRD §1, tech-stack §14): an account that can administer the business is
+    # the one worth a second factor. Disableable, because a solo operator with one device is
+    # otherwise one lost phone away from being locked out of their own business — which is
+    # why this is a setting rather than a rule.
+    mfa_required_for_admin: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    # Email as a *primary* second factor, off by default. It is lower assurance — NIST does
+    # not recognise email as an out-of-band channel, since the inbox usually lives in the
+    # same browser session an attacker already has — so a business opts into it knowingly.
+    # It is available as the recovery fallback regardless; that is `auth/mfa.py`'s business.
+    mfa_email_otp_allowed: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

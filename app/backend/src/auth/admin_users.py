@@ -18,10 +18,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from auth import throttle
+from auth import mfa, throttle
 from auth.capabilities import Requires
 from auth.models import Role, User
 from auth.roles import assert_an_administrator_remains
+from auth.session import revoke_all
 from core.audit import record_event
 from core.db import SessionDep
 from core.redis import get_redis
@@ -146,3 +147,40 @@ async def unlock_account(user_id: uuid.UUID, admin: UsersManager, db: SessionDep
     )
     await db.commit()
     log.info("auth: %s unlocked the account %s", admin.email, user.email)
+
+
+@router.post("/{user_id}/mfa/reset", status_code=204)
+async def reset_mfa(user_id: uuid.UUID, admin: UsersManager, db: SessionDep) -> None:
+    """The lost-phone-and-lost-codes path, and the only one that does not need the account.
+
+    Everything goes: the secret, the method, and every recovery code live or spent — a set
+    that outlived the enrolment it belonged to would be a way back in that nobody is
+    tracking. `sessions_revoked_at` goes with it, because a session opened with the factor
+    being removed must not survive the removal (tech-stack §14); that is the same column a
+    password change uses, so there is one revocation mechanism rather than two.
+
+    Not undoable and not gentle, which is why it is audited with the administrator's name
+    and the owner is told: this is a protection being taken off somebody's account, and
+    "which administrator, when" is the question asked afterwards.
+    """
+    user = await db.scalar(select(User).where(User.id == user_id))
+    if user is None:
+        raise HTTPException(status_code=404, detail="No such user.")
+
+    was = user.mfa_method
+    user.mfa_secret = None
+    user.mfa_method = None
+    user.mfa_enrolled_at = None
+    await mfa.forget_recovery_codes(db, user.id)
+    revoke_all(user)
+    record_event(
+        db,
+        "mfa.reset",
+        target_type="user",
+        target_id=str(user.id),
+        actor_user_id=admin.id,
+        metadata={"email": user.email, "method": was},
+    )
+    await db.commit()
+    mfa.notify(user.email, mfa.RESET_SUBJECT, mfa.RESET_MESSAGE)
+    log.info("auth: %s reset the second factor on %s", admin.email, user.email)

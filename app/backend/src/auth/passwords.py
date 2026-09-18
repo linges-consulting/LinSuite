@@ -35,7 +35,7 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select, update
 
-from auth import modes, throttle
+from auth import mfa, modes, throttle
 from auth.login import UserOut
 from auth.models import PasswordResetToken, User
 from auth.session import (
@@ -91,7 +91,7 @@ async def request_reset(payload: ResetRequest, db: SessionDep) -> dict[str, str]
     # used to flood a mailbox and the refusal says nothing about who has an account. It is not
     # the failed-password counter: asking for a link is not a guess, and letting it lock an
     # account would hand anybody a way to lock any address they know.
-    await throttle.guard_reset_request(email)
+    await throttle.guard_request(email)
     user = await db.scalar(select(User).where(func.lower(User.email) == email))
     if user is None:
         # Nothing is recorded. An audit row naming an address with no account would store a
@@ -225,8 +225,13 @@ async def change_password(
     someone who mistyped. The same rule as the Admin Mode re-authentication in `login.py`.
 
     `UnrestrictedUser`, because this is one of the three endpoints a session owing a forced
-    change has to reach — it is how the debt gets paid.
+    change has to reach — it is how the debt gets paid. The second factor is the one gate it
+    does not get an exemption from: a session that has presented only a password must not be
+    able to rewrite that password, or a stolen credential defeats the factor meant to
+    survive it.
     """
+    await mfa.assert_verified(claims)
+
     # The same throttle as `/auth/login` and the Admin Mode re-authentication, on the same
     # counter: this is a third door onto one credential, and an attacker who found it
     # unthrottled would push on this one.
@@ -277,10 +282,16 @@ async def change_password(
     # can name and an Admin Mode window must not survive a credential change.
     await revoke(claims)
     await modes.forget(claims["jti"])
+    await mfa.forget(claims["jti"])
 
     # Issued after the commit, so its `iat` is later than the cut-off that was just written.
     issued = issue_token(user.id)
     set_session_cookie(response, issued)
     throttle.notify_password_changed(user.email)
     log.info("auth: password changed for %s", user.email)
-    return UserOut.of(user, await modes.read_state(claims), must_change_password=False)
+    return UserOut.of(
+        user,
+        await modes.read_state(claims),
+        must_change_password=False,
+        mfa=await mfa.snapshot(claims, db, user),
+    )

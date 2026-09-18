@@ -51,6 +51,9 @@ def database(tmp_path_factory, redis_server) -> Iterator[dict[str, str]]:
             # The setup token file must not land in the real data dir during tests.
             "SETUP_TOKEN_FILE": str(tmp_path_factory.mktemp("run") / "setup-token"),
             "JWT_SECRET": "0" * 64,
+            # The AES-256 key the TOTP secrets are sealed with. Fixed, so a test can decrypt
+            # what the app wrote and prove the column holds a ciphertext and not the secret.
+            "MFA_ENCRYPTION_KEY": "11" * 32,
             # The ASGI harness speaks http://, and a `Secure` cookie is never sent over it.
             # Production leaves this on; `test_the_session_cookie_is_secure_when_configured`
             # is what proves the flag is wired up.

@@ -27,7 +27,7 @@ re-login, and no window in which a revoked permission is still honoured.
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from auth.models import User
+from auth.models import ADMIN_CAPABILITY, User
 from auth.modes import AdminUser
 from auth.session import CurrentUser
 from core.errors import CAPABILITY_REQUIRED, Forbidden
@@ -88,7 +88,7 @@ CAPABILITIES: tuple[Capability, ...] = (
 BY_KEY: dict[str, Capability] = {c.key: c for c in CAPABILITIES}
 ALL_KEYS: frozenset[str] = frozenset(BY_KEY)
 
-ADMIN = "admin"
+ADMIN = ADMIN_CAPABILITY
 
 
 def unknown(keys: list[str]) -> list[str]:

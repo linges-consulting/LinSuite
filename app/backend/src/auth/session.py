@@ -20,6 +20,10 @@ route already depends on, so putting the check inside it is the only placement a
 next year cannot forget. The three endpoints a flagged session must still reach ask for
 `UnrestrictedUser` instead, and having to name it is the point: exemption is a decision
 somebody writes down, not a default.
+
+The two multi-factor gates (`auth/mfa.py`) sit in the same place for the same reason: a
+session that has not presented its second factor, and an account the business requires to
+enrol, are both refused by `CurrentUser` rather than by each route in turn.
 """
 
 import uuid
@@ -31,6 +35,7 @@ import jwt
 from fastapi import Depends, HTTPException, Request, Response
 from sqlalchemy import select
 
+from auth import mfa
 from auth.models import User
 from core.config import get_settings
 from core.db import SessionDep
@@ -206,16 +211,23 @@ async def unrestricted_user(claims: ClaimsDep, db: SessionDep) -> User:
 UnrestrictedUser = Annotated[User, Depends(unrestricted_user)]
 
 
-async def current_user(user: UnrestrictedUser, db: SessionDep) -> User:
+async def current_user(user: UnrestrictedUser, claims: ClaimsDep, db: SessionDep) -> User:
     """The signed-in user of a session that is allowed to do things. Every protected route
     depends on this, directly or through a capability check layered on top of it.
 
     403 and not 401 while a change is owed: the session is real and the credential was
     correct. A 401 would send the frontend to `/login`, where signing in again would produce
     another session owing the same change — a loop, for someone who has done nothing wrong.
+
+    Three debts, in the order they have to be paid. A password change comes first because a
+    session that owes one owes it whatever else is true; then the second factor this session
+    has not presented; then the enrolment the business requires and this account has not
+    done. Each has its own small set of endpoints that ask for `UnrestrictedUser` instead —
+    and having to name it is the point: exemption is written down, never inherited.
     """
     if await change_required(db, user):
         raise PASSWORD_CHANGE_REQUIRED
+    await mfa.assert_cleared(claims, db, user)
     return user
 
 

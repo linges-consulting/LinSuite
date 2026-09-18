@@ -20,6 +20,7 @@ from pydantic import BaseModel, EmailStr
 from sqlalchemy import func, select
 
 from auth import capabilities, modes, throttle
+from auth import mfa as mfa_mod
 from auth.models import User
 from auth.session import (
     COOKIE_NAME,
@@ -76,6 +77,10 @@ class UserOut(BaseModel):
     # session is real either way — this is a forced change, not a refused login, so the
     # account can still be told what it has to do.
     must_change_password: bool
+    # The second factor, as this session stands: whether the account has one, whether this
+    # session still owes a code, and whether the business is asking for an enrolment. The
+    # same shape of fact as `must_change_password`, and routed on the same way (`App.tsx`).
+    mfa: mfa_mod.MfaOut
 
     @classmethod
     def of(
@@ -84,8 +89,10 @@ class UserOut(BaseModel):
         state: modes.ModeState | None = None,
         *,
         must_change_password: bool = False,
+        mfa: mfa_mod.MfaOut,
     ) -> "UserOut":
         return cls(
+            mfa=mfa,
             id=str(user.id),
             email=user.email,
             role=user.role.name,
@@ -128,16 +135,25 @@ async def login(payload: LoginRequest, response: Response, db: SessionDep) -> Us
     await throttle.clear(email)
     issued = issue_token(user.id)
     set_session_cookie(response, issued)
+    claims = decode_token(issued.token)
+    # An enrolled account's session is born owing a code, and `CurrentUser` refuses it
+    # everywhere until one is presented. The password alone is not a session.
+    if user.mfa_method is not None:
+        await mfa_mod.begin_pending(claims)
     record_event(
         db,
         "login.succeeded",
         target_type="user",
         target_id=str(user.id),
         actor_user_id=user.id,
-        metadata={"email": email, "jti": issued.jti},
+        metadata={"email": email, "jti": issued.jti, "mfa_pending": user.mfa_method is not None},
     )
     await db.commit()
-    return UserOut.of(user, must_change_password=await change_required(db, user))
+    return UserOut.of(
+        user,
+        must_change_password=await change_required(db, user),
+        mfa=await mfa_mod.snapshot(claims, db, user),
+    )
 
 
 @router.post("/logout", status_code=204)
@@ -148,6 +164,7 @@ async def logout(request: Request, response: Response, db: SessionDep) -> None:
     if claims and not await is_revoked(claims["jti"]):
         await revoke(claims)
         await modes.forget(claims["jti"])
+        await mfa_mod.forget(claims["jti"])
         record_event(
             db,
             "logout",
@@ -175,6 +192,7 @@ async def me(user: UnrestrictedUser, claims: ClaimsDep, db: SessionDep) -> UserO
         user,
         await modes.read_state(claims),
         must_change_password=await change_required(db, user),
+        mfa=await mfa_mod.snapshot(claims, db, user),
     )
 
 
@@ -183,6 +201,10 @@ class ModeRequest(BaseModel):
     # Required to *open* an admin window, and only then. Switching back and forth inside a
     # live window is free (PRD §1), and returning to Staff Mode never needs it.
     password: str | None = None
+    # Required once per `ADMIN_MFA_INTERVAL_HOURS` for an enrolled account, independently of
+    # the password: a live window does not excuse a verification that has gone stale, and a
+    # fresh verification does not excuse a window that has lapsed.
+    totp: str | None = None
 
 
 @router.post("/mode")
@@ -200,6 +222,10 @@ async def switch_mode(
         # switcher off the screen, enforced here for anyone calling the endpoint directly.
         if not capabilities.can_switch_modes(user):
             raise modes.ADMIN_MODE_REQUIRED
+        # Both are checked before either is honoured, so a correct password never opens a
+        # window that a missing code should have refused.
+        if await mfa_mod.admin_challenge_due(claims, user):
+            await _verify_second_factor(payload.totp, user, claims, db)
         if (await modes.read_state(claims)).grant_expires_at is None:
             await _reauthenticate(payload.password, user, claims, db)
 
@@ -217,11 +243,40 @@ async def switch_mode(
         user,
         await modes.read_state(claims),
         must_change_password=await change_required(db, user),
+        mfa=await mfa_mod.snapshot(claims, db, user),
     )
 
 
 # Genuinely the Admin Mode kind: there is no live window, and the way out is to open one.
 _REAUTH_REQUIRED = Forbidden(ADMIN_MODE_REQUIRED, "Enter your password to switch to Admin Mode.")
+
+
+async def _verify_second_factor(code: str | None, user: User, claims: dict, db: SessionDep) -> None:
+    """The twelve-hourly challenge on the way into Admin Mode (PRD §1).
+
+    A request carrying no code is refused before anything is checked, like a request
+    carrying no password: the frontend cannot know the interval has elapsed until the server
+    says so, and treating that first refusal as a failed attempt would charge somebody the
+    lockout counter for a round trip they could not have avoided.
+
+    Verifying writes `verified_at` even though the window may still be refused afterwards
+    for a wrong password. That is the honest record — this session did present a valid
+    second factor at this instant — and it is the harmless way round: possession was proved,
+    and the password is a separate debt.
+    """
+    if code is None:
+        raise mfa_mod.TOTP_REQUIRED
+    await mfa_mod.accept_code(db, user, code, reason="admin_mode")
+    await mfa_mod.mark_verified(claims)
+    record_event(
+        db,
+        "admin.mfa_verified",
+        target_type="session",
+        target_id=claims["jti"],
+        actor_user_id=user.id,
+        metadata={"email": user.email},
+    )
+    await db.commit()
 
 
 async def _reauthenticate(password: str | None, user: User, claims: dict, db: SessionDep) -> None:

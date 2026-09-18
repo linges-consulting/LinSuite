@@ -53,6 +53,13 @@ async def claimed_instance(client):
         token = await setup.bootstrap_setup_token(db)
     resp = await client.post("/api/setup", json={**SETUP, "token": token})
     assert resp.status_code == 201, resp.text
+    # These suites predate the second factor and are about other rules, so the instance they
+    # set up has the MFA policy off. Task 8 defaults it on, which would otherwise put every
+    # administrator here behind the enrolment gate before the rule under test is reached;
+    # `tests/test_mfa.py` is where the policy itself is exercised.
+    async with session_scope() as db:
+        await db.execute(text("UPDATE businesses SET mfa_required_for_admin = false"))
+        await db.commit()
     client.cookies.clear()
     yield
 

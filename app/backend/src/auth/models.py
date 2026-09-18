@@ -30,6 +30,16 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.db import Base
 
+ADMIN_CAPABILITY = "admin"
+"""The one capability key spelled outside `auth/capabilities.py`.
+
+The registry is the authority and re-exports this, but two things below the registry in the
+import graph have to ask "may this account administer?" — the session gate in
+`auth/session.py` and the MFA policy in `auth/mfa.py`, both of which `capabilities.py`
+itself depends on. One constant on the model they already import beats the same string
+written twice.
+"""
+
 
 class Role(Base):
     """A named set of capabilities.
@@ -108,12 +118,50 @@ class User(Base):
     # bookkeeping in Redis, which would have to enumerate sessions nobody is tracking. Set by
     # a completed reset and by a password change; Task 8 reuses it for MFA reset.
     sessions_revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The TOTP secret, AES-256-GCM sealed (`core/crypto.py`). Written when enrolment *starts*
+    # and kept while `mfa_method` is still null — a secret an authenticator has not proved it
+    # holds is not an enrolment, and storing it anywhere else would mean a second place for
+    # half-finished enrolments to be forgotten in. Null for the email factor, which has none.
+    mfa_secret: Mapped[str | None] = mapped_column(String(255))
+    # `totp`, `email`, or null for an account with no second factor. This column — not the
+    # secret — is what "enrolled" means, which is what makes the confirmation step real.
+    mfa_method: Mapped[str | None] = mapped_column(String(16))
+    mfa_enrolled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    recovery_codes: Mapped[list["MfaRecoveryCode"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
     @property
     def capabilities(self) -> set[str]:
         """What this account may do, as of the request that loaded it."""
         return self.role.capability_keys
+
+
+class MfaRecoveryCode(Base):
+    """One single-use code, as a SHA-256 digest of what was shown to the user.
+
+    Digests for the same reason reset links are digests: a dump must not be a set of working
+    second factors. There is nothing to compare in constant time here — the lookup is by
+    digest, so a wrong code is a miss rather than a comparison.
+
+    Spent rows are kept rather than deleted. `used_at` is what makes a second use a refusal
+    instead of a lookup miss, and "this code was already used" is a fact somebody
+    investigating a stolen device needs to be able to see.
+    """
+
+    __tablename__ = "mfa_recovery_codes"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    user: Mapped[User] = relationship(back_populates="recovery_codes")
 
 
 class SetupToken(Base):

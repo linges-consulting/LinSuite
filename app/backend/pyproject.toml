@@ -17,6 +17,8 @@ dependencies = [
     "redis>=5",
     # The HaveIBeenPwned k-anonymity client (core/security.py) runs in request handlers.
     "httpx>=0.27",
+    "pyotp>=2.9",
+    "cryptography>=43",
 ]
 
 [dependency-groups]

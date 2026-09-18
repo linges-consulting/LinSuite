@@ -37,6 +37,20 @@ class Settings(BaseSettings):
     # enough to survive a slow mailbox, short enough that a link left in an inbox goes stale.
     password_reset_minutes: int = 45
 
+    # --- Multi-factor authentication (tech-stack §14, `auth/mfa.py`) -----------------------
+    # AES-256-GCM key for the TOTP secrets at rest, 32 bytes as hex. A TOTP secret cannot be
+    # hashed — the server needs it in the clear to verify — so this is what stands between a
+    # database dump and a working authenticator for every enrolled account. No default, and
+    # escrowed like `JWT_SECRET`: losing it makes every enrolment unreadable.
+    mfa_encryption_key: str
+    # How long a verified second factor lets an administrator open Admin Mode windows before
+    # being asked again. PRD §1: once per twelve hours, never on every mode switch.
+    admin_mfa_interval_hours: int = 12
+    # Recovery codes issued at enrolment, and re-issued as one set when regenerated.
+    mfa_recovery_code_count: int = 10
+    # How long an emailed one-time code stays usable. Short: it is the lower-assurance path.
+    mfa_email_otp_minutes: int = 10
+
     # --- Brute-force throttling (tech-stack §14, `auth/throttle.py`) -----------------------
     # Consecutive failed password checks that lock the account. Everything below it is a
     # progressive delay, and the delay is what makes reaching this number expensive.
