@@ -33,6 +33,8 @@ HIBP_RANGE_URL = "https://api.pwnedpasswords.com/range"
 _HIBP_TIMEOUT = 3.0
 
 _COMMON_PASSWORDS_FILE = Path(__file__).with_name("common_passwords.txt")
+# Everything after this line in that file is a password, `#` included.
+ENTRIES_MARKER = "# --- entries below: every line from here is a password ---\n"
 
 _hasher = PasswordHasher()
 
@@ -105,10 +107,18 @@ async def _ask_hibp(password: str, client: httpx.AsyncClient | None) -> bool | N
 @functools.lru_cache
 def _common_passwords() -> frozenset[str]:
     """The offline fallback. Only entries of at least the minimum length earn their place —
-    anything shorter is already refused on length."""
-    lines = _COMMON_PASSWORDS_FILE.read_text(encoding="utf-8").splitlines()
+    anything shorter is already refused on length.
+
+    The header ends at an explicit marker rather than at "the last line starting with `#`":
+    `#1qaz2wsx3edc` is a password people really use, and a `#`-means-comment rule would
+    silently drop exactly the entries an attacker would try next.
+    """
+    text = _COMMON_PASSWORDS_FILE.read_text(encoding="utf-8")
+    _, marker, body = text.partition(ENTRIES_MARKER)
+    if not marker:
+        raise ValueError(f"{_COMMON_PASSWORDS_FILE.name} is missing its {ENTRIES_MARKER!r} line")
     return frozenset(
-        line.strip().casefold()
-        for line in lines
-        if line.strip() and not line.startswith("#") and len(line.strip()) >= MIN_PASSWORD_LENGTH
+        entry.casefold()
+        for entry in (line.strip() for line in body.splitlines())
+        if len(entry) >= MIN_PASSWORD_LENGTH
     )

@@ -11,7 +11,18 @@ import httpx
 import pytest
 
 from core.config import get_settings
-from core.security import check_password_policy
+from core.security import (
+    _COMMON_PASSWORDS_FILE,
+    ENTRIES_MARKER,
+    _common_passwords,
+    check_password_policy,
+)
+
+
+def _list_header() -> str:
+    text = _COMMON_PASSWORDS_FILE.read_text(encoding="utf-8")
+    return "\n".join(line for line in text.splitlines() if line.startswith("#"))
+
 
 PASSPHRASE = "correct horse battery staple"
 BREACHED = "passwordpassword"
@@ -134,3 +145,41 @@ async def test_an_erroring_hibp_falls_back_to_the_bundled_list():
     async with hibp(BREACHED, status=503) as client:
         assert await check_password_policy(BREACHED, client=client) is not None
         assert await check_password_policy(PASSPHRASE, client=client) is None
+
+
+def test_the_bundled_list_is_a_real_corpus_and_says_where_it_came_from():
+    # For an air-gapped install this file is the *only* screening there is, so it has to be
+    # a real breach corpus and has to say which one, at which rank cut.
+    header, entries = _list_header(), _common_passwords()
+
+    assert "SecLists" in header and "PROVENANCE" in header and "REGENERATE" in header
+    assert "Pwdb_top-1000000.txt" in header  # the exact file, not just the project
+    assert len(entries) > 5_000
+    assert _COMMON_PASSWORDS_FILE.stat().st_size < 150_000  # stays cheap to load and to ship
+    assert all(len(e) >= 12 and e == e.casefold() for e in entries)
+
+
+def test_a_password_that_starts_with_a_hash_is_an_entry_and_not_a_comment(tmp_path, monkeypatch):
+    # A `#`-means-comment rule would silently drop `#1qaz2wsx3edc` and its neighbours —
+    # precisely the entries someone picks to get around a rule about symbols.
+    listing = tmp_path / "common_passwords.txt"
+    listing.write_text(f"# header\n{ENTRIES_MARKER}#1qaz2wsx3edc\nnot a comment here\nshort\n")
+    monkeypatch.setattr("core.security._COMMON_PASSWORDS_FILE", listing)
+    _common_passwords.cache_clear()
+
+    assert _common_passwords() == frozenset({"#1qaz2wsx3edc", "not a comment here"})
+
+    _common_passwords.cache_clear()  # the real file again for every other test
+
+
+def test_a_list_file_with_no_marker_is_an_error_and_not_an_empty_allowlist(tmp_path, monkeypatch):
+    # Silently loading nothing would turn the air-gapped screen off without a word.
+    listing = tmp_path / "common_passwords.txt"
+    listing.write_text("# header only\npasswordpassword\n")
+    monkeypatch.setattr("core.security._COMMON_PASSWORDS_FILE", listing)
+    _common_passwords.cache_clear()
+
+    with pytest.raises(ValueError, match="marker|entries below"):
+        _common_passwords()
+
+    _common_passwords.cache_clear()

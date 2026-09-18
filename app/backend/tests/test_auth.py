@@ -63,6 +63,12 @@ async def login(client, **overrides):
     )
 
 
+async def logout(client):
+    # `json={}` so the request carries `Content-Type: application/json`, exactly as the
+    # frontend's one `post()` helper does. A bodiless POST is refused by design.
+    return await client.post("/api/auth/logout", json={})
+
+
 # --- login ------------------------------------------------------------------------------
 
 
@@ -137,6 +143,28 @@ async def test_a_form_encoded_login_is_refused(client):
     assert COOKIE not in client.cookies
 
 
+async def test_a_mutation_with_no_content_type_at_all_is_refused(client):
+    await login(client)
+
+    # The case a denylist of form encodings misses: `fetch(url, {method: 'POST',
+    # credentials: 'include'})` with no body sends no Content-Type, needs no preflight, and
+    # carries the session cookie. Requiring application/json is what stops it.
+    resp = await client.post("/api/auth/logout", headers={})
+
+    assert resp.status_code == 415
+    assert (await client.get("/api/auth/me")).status_code == 200  # the session survived
+
+
+async def test_a_mutation_with_a_charset_on_the_json_content_type_is_accepted(client):
+    await login(client)
+
+    resp = await client.post(
+        "/api/auth/logout", headers={"Content-Type": "application/json; charset=utf-8"}
+    )
+
+    assert resp.status_code == 204
+
+
 # --- the protected endpoint -------------------------------------------------------------
 
 
@@ -181,7 +209,7 @@ async def test_logout_ends_the_session_for_good(client):
     await login(client)
     token = client.cookies[COOKIE]
 
-    resp = await client.post("/api/auth/logout")
+    resp = await logout(client)
 
     assert resp.status_code == 204
     assert client.cookies.get(COOKIE) in (None, "")
@@ -192,8 +220,8 @@ async def test_logout_ends_the_session_for_good(client):
 
 async def test_logging_out_twice_is_not_an_error(client):
     await login(client)
-    assert (await client.post("/api/auth/logout")).status_code == 204
-    assert (await client.post("/api/auth/logout")).status_code == 204
+    assert (await logout(client)).status_code == 204
+    assert (await logout(client)).status_code == 204
 
 
 async def test_logout_leaves_another_session_alone(client):
@@ -202,7 +230,7 @@ async def test_logout_leaves_another_session_alone(client):
     client.cookies.clear()
     await login(client)
 
-    await client.post("/api/auth/logout")
+    await logout(client)
 
     client.cookies.set(COOKIE, first)
     assert (await client.get("/api/auth/me")).status_code == 200
@@ -239,7 +267,7 @@ async def test_a_failed_login_never_records_the_attempted_password(client):
 
 async def test_a_successful_login_and_the_logout_that_ends_it_are_logged(client):
     await login(client)
-    await client.post("/api/auth/logout")
+    await logout(client)
 
     assert [(e, has_actor) for e, _, _, has_actor in await audit()] == [
         ("login.succeeded", True),

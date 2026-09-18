@@ -47,19 +47,25 @@ async def validation_error(_: Request, exc: RequestValidationError) -> JSONRespo
     return JSONResponse({"detail": detail}, status_code=422)
 
 
-# Half of the CSRF defence for the session cookie; `SameSite=Lax` is the other half. An
-# HTML form can only send these three content types, so refusing them means a cross-origin
-# page cannot forge a state-changing request without a preflight it will not survive. This
-# is a middleware rather than a per-route dependency precisely so a future endpoint cannot
-# forget it.
-_FORM_CONTENT_TYPES = ("application/x-www-form-urlencoded", "multipart/form-data", "text/plain")
+# Half of the CSRF defence for the session cookie; `SameSite=Lax` is the other half.
+#
+# An allowlist, not a denylist. `application/json` is the one content type a cross-origin
+# page cannot send without a CORS preflight it will not survive — so requiring it is the
+# defence. Refusing only the three form encodings would let through the case that matters
+# most: `fetch(url, {method: 'POST', credentials: 'include'})` with no body sends no
+# `Content-Type` at all, is a CORS simple request, and would sail past a denylist, leaving
+# `SameSite=Lax` as the single point of failure this is here to remove.
+#
+# A middleware rather than a per-route dependency, precisely so a future endpoint cannot
+# forget it. Every mutation the frontend makes goes through one `post()` helper that always
+# sets the header, including bodiless ones like logout.
 _MUTATING = ("POST", "PUT", "PATCH", "DELETE")
 
 
 @app.middleware("http")
 async def require_json_body(request: Request, call_next):
     content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
-    if request.method in _MUTATING and content_type in _FORM_CONTENT_TYPES:
+    if request.method in _MUTATING and content_type != "application/json":
         return JSONResponse({"detail": "Send application/json"}, status_code=415)
     return await call_next(request)
 
