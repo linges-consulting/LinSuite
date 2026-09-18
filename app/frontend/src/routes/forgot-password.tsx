@@ -1,11 +1,12 @@
 import { useMutation } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link } from 'react-router'
-import { AuthLayout, Field, Form } from '@/components/form'
+import { AuthLayout, Field, Form, FormError } from '@/components/form'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { requestPasswordReset } from '@/lib/api'
+import { useThrottle } from '@/lib/throttle'
 
 /**
  * Ask for a reset link.
@@ -18,6 +19,9 @@ import { requestPasswordReset } from '@/lib/api'
 export function ForgotPasswordPage() {
   const [email, setEmail] = useState('')
   const submit = useMutation({ mutationFn: requestPasswordReset })
+  // The address is limited to a few links per quarter of an hour, so this form cannot be
+  // used to flood somebody's mailbox. Being refused says nothing about who has an account.
+  const throttle = useThrottle(submit.error)
 
   return (
     <AuthLayout>
@@ -37,7 +41,11 @@ export function ForgotPasswordPage() {
             </Button>
           ) : (
             <Form onSubmit={() => submit.mutate(email)}>
-              <Field label="Email" htmlFor="email" error={submit.error?.message}>
+              <Field
+                label="Email"
+                htmlFor="email"
+                error={throttle.blocked ? undefined : submit.error?.message}
+              >
                 <Input
                   id="email"
                   type="email"
@@ -49,7 +57,12 @@ export function ForgotPasswordPage() {
                   aria-invalid={submit.error ? true : undefined}
                 />
               </Field>
-              <Button type="submit" className="w-full" disabled={submit.isPending}>
+              {throttle.message && <FormError>{throttle.message}</FormError>}
+              <Button
+                type="submit"
+                className="w-full"
+                disabled={submit.isPending || throttle.blocked}
+              >
                 {submit.isPending ? 'Sending…' : 'Send reset link'}
               </Button>
               <Link

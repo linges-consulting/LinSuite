@@ -25,16 +25,34 @@ export async function fetchTimezones(): Promise<string[]> {
 
 export class ApiError extends Error {
   status: number
+  /**
+   * When the server will accept another attempt, as a local clock instant — absolute rather
+   * than a duration, so a screen that renders it a second later still counts down honestly.
+   * Null unless the answer was a 429 carrying `Retry-After`.
+   */
+  retryAt: number | null
+  /** A 429 because the account is locked, rather than because the last attempt was too soon. */
+  locked: boolean
 
-  constructor(message: string, status: number) {
+  constructor(message: string, res: Response) {
     super(message)
-    this.status = status
+    this.status = res.status
+    const retryAfter = Number(res.headers.get('Retry-After'))
+    this.retryAt = retryAfter > 0 ? Date.now() + retryAfter * 1000 : null
+    // A header rather than an inference from the size of `Retry-After`: the delay ceiling and
+    // the shortest lock are both configurable, and an inference would break when one changed.
+    this.locked = res.headers.get('X-Account-Locked') === '1'
   }
+}
+
+/** The refusal to throw, with everything the server said about it attached. */
+async function failure(res: Response, fallback: string): Promise<ApiError> {
+  return new ApiError(await problem(res, fallback), res)
 }
 
 export async function completeSetup(payload: SetupPayload): Promise<void> {
   const res = await post('/api/setup', payload)
-  if (!res.ok) throw new ApiError(await problem(res, 'Setup failed'), res.status)
+  if (!res.ok) throw await failure(res, 'Setup failed')
 }
 
 export type Mode = 'staff' | 'admin'
@@ -70,7 +88,7 @@ export type User = {
  */
 export async function requestPasswordReset(email: string): Promise<void> {
   const res = await post('/api/auth/password-reset/request', { email })
-  if (!res.ok) throw new ApiError(await problem(res, 'Could not send the link'), res.status)
+  if (!res.ok) throw await failure(res, 'Could not send the link')
 }
 
 /** Spend the link. A 400 means it expired or was already used; ask for another. */
@@ -79,7 +97,7 @@ export async function confirmPasswordReset(request: {
   new_password: string
 }): Promise<void> {
   const res = await post('/api/auth/password-reset/confirm', request)
-  if (!res.ok) throw new ApiError(await problem(res, 'Could not set the password'), res.status)
+  if (!res.ok) throw await failure(res, 'Could not set the password')
 }
 
 /**
@@ -91,7 +109,7 @@ export async function changePassword(request: {
   new_password: string
 }): Promise<User> {
   const res = await post('/api/auth/password/change', request)
-  if (!res.ok) throw new ApiError(await problem(res, 'Could not change the password'), res.status)
+  if (!res.ok) throw await failure(res, 'Could not change the password')
   return res.json()
 }
 
@@ -116,7 +134,7 @@ export async function fetchMe(): Promise<User | null> {
  */
 export async function switchMode(request: { mode: Mode; password?: string }): Promise<User> {
   const res = await post('/api/auth/mode', request)
-  if (!res.ok) throw new ApiError(await problem(res, 'Mode switch failed'), res.status)
+  if (!res.ok) throw await failure(res, 'Mode switch failed')
   return res.json()
 }
 
@@ -129,19 +147,19 @@ export type BusinessProfile = {
 /** Admin Mode only. A 403 means the window lapsed — see `createQueryClient`. */
 export async function fetchAdminBusiness(): Promise<BusinessProfile> {
   const res = await fetch('/api/admin/business')
-  if (!res.ok) throw new ApiError(await problem(res, 'Could not load the business'), res.status)
+  if (!res.ok) throw await failure(res, 'Could not load the business')
   return res.json()
 }
 
 export async function login(credentials: { email: string; password: string }): Promise<User> {
   const res = await post('/api/auth/login', credentials)
-  if (!res.ok) throw new ApiError(await problem(res, 'Sign in failed'), res.status)
+  if (!res.ok) throw await failure(res, 'Sign in failed')
   return res.json()
 }
 
 export async function logout(): Promise<void> {
   const res = await post('/api/auth/logout', {})
-  if (!res.ok) throw new ApiError(await problem(res, 'Sign out failed'), res.status)
+  if (!res.ok) throw await failure(res, 'Sign out failed')
 }
 
 /**

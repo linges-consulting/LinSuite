@@ -26,6 +26,26 @@ type Api = {
   adminWindowMs?: number
   /** The forced-change flag, as `/me` and `/login` report it. */
   mustChangePassword?: boolean
+  /**
+   * An answer the test chooses, consulted before the fake's own behaviour. It exists for the
+   * refusals the fake has no state for — being throttled is the server's business, and the
+   * browser only ever sees the 429 it sends back.
+   */
+  respond?: (url: string, body: any) => Response | undefined
+}
+
+/** A throttled or locked-out refusal, shaped exactly as `auth/throttle.py` sends it. */
+export function tooManyRequests(seconds: number, { locked = false } = {}): Response {
+  const headers: Record<string, string> = { 'Retry-After': String(seconds) }
+  if (locked) headers['X-Account-Locked'] = '1'
+  return Response.json(
+    {
+      detail: locked
+        ? 'This account is temporarily locked after too many failed attempts.'
+        : `Too many attempts. Try again in ${seconds} seconds.`,
+    },
+    { status: 429, headers },
+  )
 }
 
 export type FakeServer = {
@@ -50,6 +70,7 @@ export function stubApi({
   dualRole = true,
   adminWindowMs = 0,
   mustChangePassword = false,
+  respond,
 }: Api = {}) {
   const calls: Call[] = []
   let session = signedIn
@@ -86,6 +107,8 @@ export function stubApi({
       const headers = (init?.headers ?? {}) as Record<string, string>
       const body = init?.body ? JSON.parse(init.body as string) : undefined
       calls.push({ url, method: init?.method ?? 'GET', body, contentType: headers['Content-Type'] })
+      const chosen = respond?.(url, body)
+      if (chosen) return chosen
       if (url === '/api/setup/status') return Response.json({ required: setupRequired })
       // Both reset endpoints are anonymous, so they sit above the session check below.
       if (url === '/api/auth/password-reset/request') {

@@ -30,6 +30,18 @@ export function Form(props: { onSubmit: () => void; children: React.ReactNode })
   )
 }
 
+/**
+ * An error about the whole form rather than about one field — being throttled, or locked out.
+ * It sits where the next thing to read is, immediately above the button it just disabled.
+ */
+export function FormError({ children }: { children: React.ReactNode }) {
+  return (
+    <p role="alert" className="text-sm text-destructive">
+      {children}
+    </p>
+  )
+}
+
 /** Label above, control, then one line below it — the error if there is one, else the hint. */
 export function Field(props: {
   label: string

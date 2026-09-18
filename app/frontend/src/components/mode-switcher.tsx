@@ -1,7 +1,7 @@
 import { useQueryClient } from '@tanstack/react-query'
 import { Briefcase, Check, ShieldCheck } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { Field, Form } from '@/components/form'
+import { Field, Form, FormError } from '@/components/form'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -23,6 +23,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { ApiError, type Mode } from '@/lib/api'
 import { SESSION, useSession, useSwitchMode } from '@/lib/auth'
+import { clockTime, useThrottle } from '@/lib/throttle'
 
 /**
  * The context switcher (PRD §1).
@@ -111,6 +112,7 @@ export function ModeSwitcher() {
         onOpenChange={setAskingPassword}
         pending={switchMode.isPending}
         error={switchMode.error?.message}
+        throttleError={switchMode.error}
         onSubmit={(password) =>
           switchMode.mutate(
             { mode: 'admin', password },
@@ -181,16 +183,13 @@ function formatRemaining(seconds: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 }
 
-function clockTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-}
-
 function ReauthDialog(props: {
   open: boolean
   onOpenChange: (open: boolean) => void
   onSubmit: (password: string) => void
   pending: boolean
   error?: string
+  throttleError: unknown
 }) {
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
@@ -215,12 +214,19 @@ function ReauthForm(props: {
   onSubmit: (password: string) => void
   pending: boolean
   error?: string
+  throttleError: unknown
 }) {
   const [password, setPassword] = useState('')
+  // The same per-account counter a login feeds: mistyping it here is mistyping it anywhere.
+  const throttle = useThrottle(props.throttleError)
 
   return (
     <Form onSubmit={() => props.onSubmit(password)}>
-      <Field label="Password" htmlFor="reauth-password" error={props.error}>
+      <Field
+        label="Password"
+        htmlFor="reauth-password"
+        error={throttle.blocked ? undefined : props.error}
+      >
         <Input
           id="reauth-password"
           type="password"
@@ -232,11 +238,12 @@ function ReauthForm(props: {
           aria-invalid={props.error ? true : undefined}
         />
       </Field>
+      {throttle.message && <FormError>{throttle.message}</FormError>}
       <DialogFooter>
         <Button type="button" variant="ghost" onClick={() => props.onOpenChange(false)}>
           Cancel
         </Button>
-        <Button type="submit" disabled={props.pending}>
+        <Button type="submit" disabled={props.pending || throttle.blocked}>
           {props.pending ? 'Confirming…' : 'Enter Admin Mode'}
         </Button>
       </DialogFooter>

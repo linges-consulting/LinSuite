@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { AuthLayout, Field, Form } from '@/components/form'
+import { AuthLayout, Field, Form, FormError } from '@/components/form'
 import { NewPasswordFields } from '@/components/new-password-fields'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input'
 import { ApiError } from '@/lib/api'
 import { useChangePassword, useLogout, useSession } from '@/lib/auth'
 import { localPasswordProblem } from '@/lib/password'
+import { useThrottle } from '@/lib/throttle'
 
 /**
  * The forced password change — the whole application while `must_change_password` is set.
@@ -27,6 +28,10 @@ export function ChangePasswordPage() {
   const submit = useChangePassword()
   const signOut = useLogout()
   const { user } = useSession()
+
+  // The current password is checked by the same throttle as a login: this is the third door
+  // onto one credential, and fumbling it repeatedly costs the same wait.
+  const throttle = useThrottle(submit.error)
 
   // A 403 is the current password being wrong; anything else is about the new one.
   const currentError =
@@ -79,10 +84,18 @@ export function ChangePasswordPage() {
               confirm={confirm}
               onPassword={setPassword}
               onConfirm={setConfirm}
-              error={local.error ?? (currentError ? undefined : submit.error?.message)}
+              error={
+                local.error ??
+                (currentError || throttle.blocked ? undefined : submit.error?.message)
+              }
               confirmError={local.confirmError}
             />
-            <Button type="submit" className="w-full" disabled={submit.isPending}>
+            {throttle.message && <FormError>{throttle.message}</FormError>}
+            <Button
+              type="submit"
+              className="w-full"
+              disabled={submit.isPending || throttle.blocked}
+            >
               {submit.isPending ? 'Saving…' : 'Save new password'}
             </Button>
             <Button
