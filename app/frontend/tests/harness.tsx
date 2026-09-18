@@ -10,6 +10,8 @@ export type Call = { url: string; method: string; body?: unknown; contentType?: 
 
 export const PASSWORD = 'correct horse battery'
 export const ADMIN_WINDOW_MS = 15 * 60_000
+/** The one reset token this fake accepts; anything else is expired or spent. */
+export const LIVE_RESET_TOKEN = 'a-live-reset-token'
 
 type Api = {
   signedIn?: boolean
@@ -22,6 +24,8 @@ type Api = {
    * session that has one starts in Admin Mode, the way it would after a switch.
    */
   adminWindowMs?: number
+  /** The forced-change flag, as `/me` and `/login` report it. */
+  mustChangePassword?: boolean
 }
 
 export type FakeServer = {
@@ -45,9 +49,12 @@ export function stubApi({
   loginResponse,
   dualRole = true,
   adminWindowMs = 0,
+  mustChangePassword = false,
 }: Api = {}) {
   const calls: Call[] = []
   let session = signedIn
+  let mustChange = mustChangePassword
+  let password = PASSWORD
   let mode = adminWindowMs > 0 ? 'admin' : 'staff'
   let grantExpiresAt = adminWindowMs > 0 ? Date.now() + adminWindowMs : 0
 
@@ -60,6 +67,7 @@ export function stubApi({
     can_switch_modes: dualRole,
     admin_grant_expires_at: granted() ? new Date(grantExpiresAt).toISOString() : null,
     admin_hard_limit_at: granted() ? new Date(grantExpiresAt + ADMIN_WINDOW_MS).toISOString() : null,
+    must_change_password: mustChange,
   })
 
   const server: FakeServer = {
@@ -79,6 +87,20 @@ export function stubApi({
       const body = init?.body ? JSON.parse(init.body as string) : undefined
       calls.push({ url, method: init?.method ?? 'GET', body, contentType: headers['Content-Type'] })
       if (url === '/api/setup/status') return Response.json({ required: setupRequired })
+      // Both reset endpoints are anonymous, so they sit above the session check below.
+      if (url === '/api/auth/password-reset/request') {
+        // 202 whatever the address — the fake withholds the same answer the server does.
+        return Response.json({ status: 'accepted' }, { status: 202 })
+      }
+      if (url === '/api/auth/password-reset/confirm') {
+        if (body.token !== LIVE_RESET_TOKEN) {
+          return Response.json(
+            { detail: 'This reset link has expired or has already been used.' },
+            { status: 400 },
+          )
+        }
+        return new Response(null, { status: 204 })
+      }
       if (url === '/api/auth/login') {
         const rejection = loginResponse?.()
         if (rejection) return rejection
@@ -94,6 +116,21 @@ export function stubApi({
         return Response.json({ detail: 'Not authenticated' }, { status: 401 })
       }
       if (url === '/api/auth/me') return Response.json(account())
+      if (url === '/api/auth/password/change') {
+        if (body.current_password !== password) {
+          return Response.json({ detail: 'Incorrect password' }, { status: 403 })
+        }
+        if (body.new_password.length < 12) {
+          return Response.json(
+            { detail: [{ type: 'value_error', loc: ['body', 'new_password'], msg: 'Use at least 12 characters.' }] },
+            { status: 422 },
+          )
+        }
+        // The real endpoint replaces the cookie in this response, so the tab stays signed in.
+        password = body.new_password
+        mustChange = false
+        return Response.json(account())
+      }
       if (url === '/api/auth/mode') {
         if (body.mode === 'admin') {
           if (!dualRole) {

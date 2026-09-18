@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { fetchMe, login, logout, switchMode, type User } from '@/lib/api'
+import { toast } from 'sonner'
+import { changePassword, fetchMe, login, logout, switchMode, type User } from '@/lib/api'
 
 /**
  * The session, as server state.
@@ -58,5 +59,20 @@ export function useSwitchMode() {
     // The answer is the same shape `/me` returns, so it replaces the session outright —
     // mode, countdown and all — without a round trip to confirm what we were just told.
     onSuccess: (user: User) => queryClient.setQueryData(SESSION, user),
+  })
+}
+
+export function useChangePassword() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: changePassword,
+    // The response replaced the session cookie, and its body is the same shape `/me`
+    // returns — including `must_change_password: false`, which is what routes out of the
+    // forced-change screen without a round trip to confirm what we were just told. The
+    // toast lives here rather than in the screen because the screen unmounts on success.
+    onSuccess: (user: User) => {
+      queryClient.setQueryData(SESSION, user)
+      toast.success('Password changed', { description: 'Every other device has been signed out.' })
+    },
   })
 }

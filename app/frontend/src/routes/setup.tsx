@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/command'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { MIN_PASSWORD_LENGTH } from '@/lib/password'
 import {
   ApiError,
   completeSetup,
@@ -23,7 +24,6 @@ import {
   type SetupPayload,
 } from '@/lib/api'
 
-const MIN_PASSWORD_LENGTH = 12 // matches core/security.py
 
 type Step = 'token' | 'business' | 'admin' | 'done'
 

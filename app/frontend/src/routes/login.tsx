@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Link } from 'react-router'
 import { AuthLayout, Field, Form } from '@/components/form'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -49,6 +50,12 @@ export function LoginPage() {
             <Button type="submit" className="w-full" disabled={submit.isPending}>
               {submit.isPending ? 'Signing in…' : 'Sign in'}
             </Button>
+            <Link
+              to="/forgot-password"
+              className="text-center text-xs text-muted-foreground hover:text-foreground"
+            >
+              Forgot password?
+            </Link>
           </Form>
         </CardContent>
       </Card>

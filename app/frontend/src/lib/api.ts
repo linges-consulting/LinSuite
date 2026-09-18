@@ -55,6 +55,44 @@ export type User = {
   admin_grant_expires_at: string | null
   /** The ceiling that window never slides past. ISO-8601, or null. */
   admin_hard_limit_at: string | null
+  /**
+   * The session is real, but nothing except the change-password screen is reachable until a
+   * new password is set — the flag an administrator sets, or a business's rotation interval
+   * having elapsed. Routing, not this flag, is what enforces it (`App.tsx`).
+   */
+  must_change_password: boolean
+}
+
+/**
+ * Ask for a reset link. Always resolves: the server answers 202 for an address it has never
+ * seen as readily as for one it knows, and this screen must not undo that by reporting the
+ * difference. The only honest success message is "if that address has an account".
+ */
+export async function requestPasswordReset(email: string): Promise<void> {
+  const res = await post('/api/auth/password-reset/request', { email })
+  if (!res.ok) throw new ApiError(await problem(res, 'Could not send the link'), res.status)
+}
+
+/** Spend the link. A 400 means it expired or was already used; ask for another. */
+export async function confirmPasswordReset(request: {
+  token: string
+  new_password: string
+}): Promise<void> {
+  const res = await post('/api/auth/password-reset/confirm', request)
+  if (!res.ok) throw new ApiError(await problem(res, 'Could not set the password'), res.status)
+}
+
+/**
+ * Change it while signed in. The response carries a replacement session cookie, so this tab
+ * survives the revocation that ends every other session the account holds.
+ */
+export async function changePassword(request: {
+  current_password: string
+  new_password: string
+}): Promise<User> {
+  const res = await post('/api/auth/password/change', request)
+  if (!res.ok) throw new ApiError(await problem(res, 'Could not change the password'), res.status)
+  return res.json()
 }
 
 /**
