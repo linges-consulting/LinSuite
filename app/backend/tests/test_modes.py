@@ -67,11 +67,14 @@ async def login(client, email=EMAIL, password=PASSWORD):
 
 
 async def add_staff_user(email=STAFF_EMAIL):
-    """A user without the admin capability — staff-only until RBAC lands in Task 5."""
+    """A user on the seeded `Staff` role, which does not hold the `admin` capability."""
     digest = await hash_password(PASSWORD)
     async with session_scope() as db:
         await db.execute(
-            text("INSERT INTO users (email, password_hash, is_admin) VALUES (:e, :h, false)"),
+            text(
+                "INSERT INTO users (email, password_hash, role_id) "
+                "VALUES (:e, :h, (SELECT id FROM roles WHERE name = 'Staff'))"
+            ),
             {"e": email, "h": digest},
         )
         await db.commit()
@@ -130,7 +133,7 @@ async def test_a_new_session_starts_in_staff_mode_with_no_admin_window(client):
     assert body["admin_hard_limit_at"] is None
 
 
-async def test_a_user_with_both_capabilities_may_switch(client):
+async def test_a_user_whose_role_holds_the_admin_capability_may_switch(client):
     await login(client)
 
     assert (await me(client))["can_switch_modes"] is True
@@ -142,7 +145,8 @@ async def test_a_staff_only_user_may_not_switch(client):
     await login(client, email=STAFF_EMAIL)
 
     body = await me(client)
-    assert body["is_admin"] is False
+    assert body["role"] == "Staff"
+    assert "admin" not in body["capabilities"]
     assert body["can_switch_modes"] is False
 
 

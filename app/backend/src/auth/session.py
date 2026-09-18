@@ -34,6 +34,8 @@ from sqlalchemy import select
 from auth.models import User
 from core.config import get_settings
 from core.db import SessionDep
+from core.errors import PASSWORD_CHANGE_REQUIRED as PASSWORD_CHANGE_REQUIRED_CODE
+from core.errors import Forbidden
 from core.models import Business
 from core.redis import get_redis
 
@@ -156,8 +158,8 @@ async def _predates_a_revocation(claims: dict, db: SessionDep) -> bool:
 ClaimsDep = Annotated[dict, Depends(session_claims)]
 
 
-PASSWORD_CHANGE_REQUIRED = HTTPException(
-    status_code=403, detail="Set a new password before you continue."
+PASSWORD_CHANGE_REQUIRED = Forbidden(
+    PASSWORD_CHANGE_REQUIRED_CODE, "Set a new password before you continue."
 )
 
 

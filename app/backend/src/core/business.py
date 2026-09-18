@@ -10,11 +10,11 @@ Read-only for now. Task 9 turns this into the settings surface that also writes.
 
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from auth.modes import AdminUser
+from auth.capabilities import Requires
 from core.db import SessionDep
 from core.models import Business
 
@@ -27,10 +27,11 @@ class BusinessOut(BaseModel):
     setup_completed_at: datetime | None
 
 
-@router.get("/business")
-async def read_business(_: AdminUser, db: SessionDep) -> BusinessOut:
-    """Admin Mode only — `AdminUser` is the whole of the guard, and it answers 403 to a
-    session being served in Staff Mode however administrative the account is."""
+@router.get("/business", dependencies=[Depends(Requires("admin"))])
+async def read_business(db: SessionDep) -> BusinessOut:
+    """The `admin` capability, which the registry marks administrative — so this answers 403
+    to a role that does not hold it *and* to a session being served in Staff Mode, however
+    administrative the account is."""
     business = await db.scalar(select(Business).where(Business.id == 1))
     if business is None:
         # Unreachable through the UI: an unclaimed instance has no accounts to sign in with.

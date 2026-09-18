@@ -7,14 +7,16 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from auth.admin_users import router as admin_users_router
 from auth.login import router as auth_router
 from auth.passwords import router as passwords_router
+from auth.roles import router as roles_router
 from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
-from auth.throttle import router as throttle_router
 from core.business import router as business_router
 from core.config import get_settings
 from core.db import SessionDep, get_engine, get_purge_engine, session_scope
+from core.errors import Forbidden
 from core.logging import configure_logging
 from core.redis import get_redis
 
@@ -48,6 +50,15 @@ _SAFE_ERROR_KEYS = ("type", "loc", "msg")
 async def validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
     detail = [{k: e[k] for k in _SAFE_ERROR_KEYS if k in e} for e in exc.errors()]
     return JSONResponse({"detail": detail}, status_code=422)
+
+
+# Three different things answer 403 — a lapsed Admin Mode window, a capability the role does
+# not hold, and a password change owed — and the browser has to respond to each differently.
+# `code` is what it switches on; `detail` stays the sentence a person reads. Starlette walks
+# the exception's MRO, so this handler wins over the generic `HTTPException` one.
+@app.exception_handler(Forbidden)
+async def forbidden(_: Request, exc: Forbidden) -> JSONResponse:
+    return JSONResponse({"detail": exc.detail, "code": exc.code}, status_code=403)
 
 
 # Half of the CSRF defence for the session cookie; `SameSite=Lax` is the other half.
@@ -87,6 +98,7 @@ async def health(session: SessionDep) -> JSONResponse:
 api.include_router(auth_router)
 api.include_router(passwords_router)
 api.include_router(setup_router)
-api.include_router(throttle_router)
+api.include_router(roles_router)
+api.include_router(admin_users_router)
 api.include_router(business_router)
 app.include_router(api)

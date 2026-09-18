@@ -28,11 +28,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends
 
 from auth.models import User
 from auth.session import ClaimsDep, CurrentUser
 from core.config import get_settings
+from core.errors import ADMIN_MODE_REQUIRED as _ADMIN_MODE_REQUIRED_CODE
+from core.errors import Forbidden
 from core.redis import get_redis
 
 STAFF_MODE = "staff"
@@ -42,7 +44,7 @@ MODES = (STAFF_MODE, ADMIN_MODE)
 _MODE_PREFIX = "session:mode:"
 _GRANT_PREFIX = "session:admin:"
 
-ADMIN_MODE_REQUIRED = HTTPException(status_code=403, detail="Switch to Admin Mode to do this.")
+ADMIN_MODE_REQUIRED = Forbidden(_ADMIN_MODE_REQUIRED_CODE, "Switch to Admin Mode to do this.")
 
 
 def grant_key(jti: str) -> str:
@@ -124,12 +126,6 @@ async def slide(claims: dict, hard_limit_at: datetime) -> None:
     ttl = min(get_settings().admin_idle_minutes * 60, remaining, _session_seconds(claims))
     if ttl > 0:
         await get_redis().expire(grant_key(claims["jti"]), ttl)
-
-
-def can_switch_modes(user: User) -> bool:
-    """Holding both capabilities is what puts the switcher on screen. Until RBAC (Task 5),
-    `is_admin` is the whole of the admin capability, and every account is staff."""
-    return user.is_admin
 
 
 async def require_admin_mode(claims: ClaimsDep, user: CurrentUser) -> User:

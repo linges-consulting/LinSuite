@@ -32,14 +32,11 @@ shut a clinic's front desk down mid-shift (PRD §1), which is the attack, not th
 
 import hashlib
 import logging
-import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, HTTPException
-from sqlalchemy import select
+from fastapi import HTTPException
 
 from auth.models import User
-from auth.modes import AdminUser
 from core.audit import record_event
 from core.config import get_settings
 from core.db import SessionDep
@@ -125,9 +122,9 @@ async def clear(email: str) -> None:
 async def unlock(email: str) -> None:
     """Everything this address has against it, gone — lock, tier, count and delay.
 
-    Two callers, and both have *more* than a password: an administrator in Admin Mode, and a
-    completed reset, which proved control of the mailbox and then rewrote the credential the
-    lock existed to protect.
+    Two callers, and both have *more* than a password: an administrator holding
+    `users.manage` in Admin Mode (`auth/admin_users.py`), and a completed reset, which proved
+    control of the mailbox and then rewrote the credential the lock existed to protect.
 
     The reset path is not a convenience. Without it a locked account's only early exit is the
     admin endpoint, which needs an Admin Mode window, which needs a re-authentication that
@@ -277,32 +274,3 @@ async def guard_reset_request(email: str) -> None:
             "Too many reset links have been requested for this address. Try again later.",
             locked=False,
         )
-
-
-# --- the administrator's early unlock --------------------------------------------------------
-
-router = APIRouter(prefix="/admin/users", tags=["admin"])
-
-
-@router.post("/{user_id}/unlock", status_code=204)
-async def unlock_account(user_id: uuid.UUID, admin: AdminUser, db: SessionDep) -> None:
-    """Reopen an account before its lock expires. Admin Mode only.
-
-    The offence tier goes with it. Leaving it would mean the next lockout of an account an
-    administrator just forgave opened at the escalated tier, which is half a forgiveness.
-    """
-    user = await db.scalar(select(User).where(User.id == user_id))
-    if user is None:
-        raise HTTPException(status_code=404, detail="No such user.")
-
-    await unlock(user.email)
-    record_event(
-        db,
-        "account.unlocked",
-        target_type="user",
-        target_id=str(user.id),
-        actor_user_id=admin.id,
-        metadata={"email": user.email},
-    )
-    await db.commit()
-    log.info("auth: %s unlocked the account %s", admin.email, user.email)

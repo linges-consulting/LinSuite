@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import func, select
 
-from auth import modes, throttle
+from auth import capabilities, modes, throttle
 from auth.models import User
 from auth.session import (
     COOKIE_NAME,
@@ -62,7 +62,11 @@ class UserOut(BaseModel):
 
     id: str
     email: str
-    is_admin: bool
+    # The role's name, for display, and the capability keys, so the interface can leave out
+    # what this account cannot use. Neither is the authority: the server re-reads the role on
+    # every request, and a frontend that has these is still refused without them.
+    role: str
+    capabilities: list[str]
     mode: str
     can_switch_modes: bool
     admin_grant_expires_at: datetime | None
@@ -83,9 +87,10 @@ class UserOut(BaseModel):
         return cls(
             id=str(user.id),
             email=user.email,
-            is_admin=user.is_admin,
+            role=user.role.name,
+            capabilities=sorted(user.capabilities),
             mode=state.mode if state else modes.STAFF_MODE,
-            can_switch_modes=modes.can_switch_modes(user),
+            can_switch_modes=capabilities.can_switch_modes(user),
             admin_grant_expires_at=state.grant_expires_at if state else None,
             admin_hard_limit_at=state.hard_limit_at if state else None,
             must_change_password=must_change_password,
@@ -190,7 +195,9 @@ async def switch_mode(
     which is precisely the wrong thing to do to someone who just mistyped a password.
     """
     if payload.mode == modes.ADMIN_MODE:
-        if not modes.can_switch_modes(user):
+        # No `admin` capability, no second mode to be in — the same rule that keeps the
+        # switcher off the screen, enforced here for anyone calling the endpoint directly.
+        if not capabilities.can_switch_modes(user):
             raise modes.ADMIN_MODE_REQUIRED
         if (await modes.read_state(claims)).grant_expires_at is None:
             await _reauthenticate(payload.password, user, claims, db)

@@ -121,8 +121,8 @@ async def add_staff_user(email=STAFF_EMAIL) -> str:
     async with session_scope() as db:
         row = await db.execute(
             text(
-                "INSERT INTO users (email, password_hash, is_admin) "
-                "VALUES (:e, :h, false) RETURNING id"
+                "INSERT INTO users (email, password_hash, role_id) "
+                "VALUES (:e, :h, (SELECT id FROM roles WHERE name = 'Staff')) RETURNING id"
             ),
             {"e": email, "h": digest},
         )

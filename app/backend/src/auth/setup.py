@@ -28,7 +28,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.models import SetupToken, User
+from auth.models import Role, SetupToken, User
 from core.config import get_settings
 from core.db import SessionDep
 from core.models import Business
@@ -199,11 +199,14 @@ async def complete_setup(payload: SetupRequest, session: SessionDep) -> dict[str
             setup_completed_at=datetime.now(UTC),
         )
     )
+    # The Administrator role is seeded by migration 0006, so it exists before any instance
+    # boots. Looked up by name rather than pinned to an id: the id is generated per database.
+    administrator = await session.scalar(select(Role.id).where(Role.name == "Administrator"))
     session.add(
         User(
             email=payload.admin_email.lower(),
             password_hash=await hash_password(payload.admin_password),
-            is_admin=True,
+            role_id=administrator,
         )
     )
     # The token dies with the request that used it, in the same transaction as the business.

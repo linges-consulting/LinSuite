@@ -269,13 +269,14 @@ async def test_completion_creates_the_business_and_the_first_administrator(clien
     assert await rows("SELECT name, timezone, setup_completed_at IS NOT NULL FROM businesses") == [
         ("Cedar Lane Clinic", "America/Toronto", True)
     ]
-    ((email, password_hash, is_admin),) = await rows(
-        "SELECT email, password_hash, is_admin FROM users"
+    # `is_admin` is gone (0006); the wizard's account is authorised by its role instead.
+    ((email, password_hash, role),) = await rows(
+        "SELECT u.email, u.password_hash, r.name FROM users u JOIN roles r ON r.id = u.role_id"
     )
     assert email == "owner@cedar.example"  # stored lowercase; the index is on lower(email)
     assert password_hash.startswith("$argon2id$")
     assert PAYLOAD["admin_password"] not in password_hash
-    assert is_admin is True
+    assert role == "Administrator"
 
 
 async def test_completion_destroys_the_token_file_and_its_stored_digest(client):

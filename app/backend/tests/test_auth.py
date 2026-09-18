@@ -81,7 +81,8 @@ async def test_correct_credentials_return_a_working_session(client):
 
     assert resp.status_code == 200
     assert resp.json()["email"] == EMAIL
-    assert resp.json()["is_admin"] is True
+    # The setup wizard's first account, on the role migration 0006 seeds for it.
+    assert resp.json()["role"] == "Administrator"
     assert client.cookies[COOKIE]
 
     me = await client.get("/api/auth/me")
