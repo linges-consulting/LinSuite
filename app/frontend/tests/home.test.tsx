@@ -11,7 +11,7 @@ function stubApi(health: Response) {
     vi.fn(async (url: string) => {
       if (url === '/api/setup/status') return Response.json({ required: false })
       if (url === '/api/auth/me')
-        return Response.json({ id: 'u1', email: 'owner@cedar.example', is_admin: true })
+        return Response.json({ id: 'u1', email: 'owner@cedar.example', role: 'Administrator' })
       return health.clone()
     }),
   )

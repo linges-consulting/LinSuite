@@ -16,7 +16,7 @@ function stubApi({ claimed = false, signedIn = false, post }: Api = {}) {
       calls.push({ url, body: init?.body ? JSON.parse(init.body as string) : undefined })
       if (url === '/api/auth/me') {
         if (!signedIn) return Response.json({ detail: 'Not authenticated' }, { status: 401 })
-        return Response.json({ id: 'u1', email: 'owner@cedar.example', is_admin: true })
+        return Response.json({ id: 'u1', email: 'owner@cedar.example', role: 'Administrator' })
       }
       // status and timezones answer either way; only POST closes once the instance is claimed.
       if (url === '/api/setup/status') return Response.json({ required: !claimed })
