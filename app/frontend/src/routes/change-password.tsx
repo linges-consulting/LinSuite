@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { ApiError } from '@/lib/api'
-import { useChangePassword, useLogout } from '@/lib/auth'
+import { useChangePassword, useLogout, useSession } from '@/lib/auth'
 import { localPasswordProblem } from '@/lib/password'
 
 /**
@@ -26,6 +26,7 @@ export function ChangePasswordPage() {
   const [local, setLocal] = useState<{ error?: string; confirmError?: string }>({})
   const submit = useChangePassword()
   const signOut = useLogout()
+  const { user } = useSession()
 
   // A 403 is the current password being wrong; anything else is about the new one.
   const currentError =
@@ -51,11 +52,17 @@ export function ChangePasswordPage() {
               if (!problem) submit.mutate({ current_password: current, new_password: password })
             }}
           >
-            <Field
-              label="Current password"
-              htmlFor="current-password"
-              error={currentError}
-            >
+            {/* Hidden, but present: a password manager cannot file a new password without
+                knowing which account it belongs to, and Chrome warns about its absence. */}
+            <input
+              type="text"
+              name="username"
+              autoComplete="username"
+              value={user?.email ?? ''}
+              readOnly
+              hidden
+            />
+            <Field label="Current password" htmlFor="current-password" error={currentError}>
               <Input
                 id="current-password"
                 type="password"
