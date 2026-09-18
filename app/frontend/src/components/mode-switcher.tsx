@@ -153,10 +153,16 @@ function Countdown({ until }: { until: string }) {
     const tick = () => {
       const left = secondsUntil(until)
       setSeconds(left)
-      if (left <= 0) queryClient.invalidateQueries({ queryKey: SESSION })
+      if (left <= 0) {
+        // Stop at zero rather than re-asking every second. A browser clock running ahead of
+        // the server's would otherwise sit at 0:00 and poll forever; one ask is enough,
+        // and the answer brings a new `until` that restarts this.
+        clearInterval(id)
+        queryClient.invalidateQueries({ queryKey: SESSION })
+      }
     }
-    tick()
     const id = setInterval(tick, 1000)
+    tick()
     return () => clearInterval(id)
   }, [until, queryClient])
 
