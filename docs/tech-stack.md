@@ -15,7 +15,7 @@ Decisions are final unless a documented trigger says otherwise. Each entry recor
 
 * **Component library — shadcn/ui (Radix primitives + Tailwind), not Ant Design.** White-label branding is the product's core premise: with Tailwind CSS variables, swapping a business's primary/secondary HEX is a single token set. Ant Design ships its own `ConfigProvider` token system, which would mean maintaining two theming systems in sync across every branded surface. Neither library provides a resource-scheduling calendar, so Ant Design's "batteries included" advantage largely disappears on the hardest screen.
 * **Data grids:** TanStack Table (inventory grids, customer lists, reports).
-* **Scheduling calendar:** a dedicated calendar library is required for color-coded multi-staff schedules. **Not yet selected** — see the open question in "Unresolved" below.
+* **Scheduling calendar:** a custom grid (CSS Grid + dnd-kit + date-fns-tz + hand-written overlap packing) — see §13 for the decision and the binding grid specification. No calendar library.
 * **Server state:** TanStack Query. Almost all state in this app is server state (appointments, customers, stock, form status), and TanStack Query already provides caching, background refetch and optimistic updates. No Redux or Zustand — a global store would mostly re-implement a worse cache.
 * **Client state:** React Context for the auth session and the Admin/Staff mode switch. Nothing more.
 
