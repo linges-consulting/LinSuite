@@ -280,4 +280,3 @@ async def guard_request(email: str, *, kind: str = "reset") -> None:
             "Too many messages have been requested for this address. Try again later.",
             locked=False,
         )
-

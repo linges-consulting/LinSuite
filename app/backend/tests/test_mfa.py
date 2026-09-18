@@ -191,6 +191,23 @@ async def test_enrolment_does_not_take_effect_until_a_code_proves_the_app_has_it
     assert "mfa.enrolled" in await event_types()
 
 
+async def test_starting_a_second_enrolment_leaves_the_live_one_working(client):
+    """The candidate secret waits in Redis, so abandoning an enrolment costs nothing.
+
+    Writing it straight to `users.mfa_secret` would overwrite the secret the authenticator
+    on somebody's phone is using — and a person who opened the enrolment screen, thought
+    better of it and closed the tab would be locked out of their own account.
+    """
+    await login(client)
+    secret, _ = await enrol(client)
+
+    await client.post("/api/auth/mfa/enrol", json={})  # started, and then abandoned
+
+    client.cookies.clear()
+    await login(client)
+    assert (await verify(client, pyotp.TOTP(secret).now())).status_code == 200
+
+
 async def test_the_secret_is_encrypted_at_rest_and_round_trips(client):
     await login(client)
     secret, _ = await enrol(client)
@@ -738,7 +755,7 @@ async def test_the_reset_names_the_administrator_who_did_it_and_tells_the_owner(
     client, sent_emails
 ):
     await login(client)
-    await enrol(client)
+    admin_secret, _ = await enrol(client)
     await add_staff_user()
     async with session_scope() as db:
         target = str(
@@ -746,8 +763,7 @@ async def test_the_reset_names_the_administrator_who_did_it_and_tells_the_owner(
         )
     client.cookies.clear()
     await login(client)
-    secret = mfa.decrypt_secret(await stored_secret())
-    await verify(client, pyotp.TOTP(secret).now())
+    await verify(client, pyotp.TOTP(admin_secret).now())
     await client.post("/api/auth/mode", json={"mode": "admin", "password": PASSWORD})
     sent_emails.clear()
 
@@ -780,12 +796,12 @@ async def test_every_403_this_feature_emits_names_its_kind(client):
     await login(client)
 
     enrolment_gate = await client.get(ADMIN_ENDPOINT)
-    bad_enrolment_code = await client.post("/api/auth/mfa/enrol", json={})
-    assert bad_enrolment_code.status_code == 200
+    started = await client.post("/api/auth/mfa/enrol", json={})
+    assert started.status_code == 200
+    secret = started.json()["secret"]
     bad_enrolment_code = await client.post("/api/auth/mfa/enrol/confirm", json={"code": "000000"})
     email_not_allowed = await client.post("/api/auth/mfa/enrol/email", json={})
 
-    secret = mfa.decrypt_secret(await stored_secret())
     await client.post("/api/auth/mfa/enrol/confirm", json={"code": pyotp.TOTP(secret).now()})
     client.cookies.clear()
     await login(client)

@@ -1,6 +1,7 @@
-import { useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Briefcase, Check, ShieldCheck } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { toast } from 'sonner'
 import { Field, Form, FormError } from '@/components/form'
 import { CodeField } from '@/components/mfa'
 import { Badge } from '@/components/ui/badge'
@@ -22,7 +23,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
-import { ApiError, type Mode } from '@/lib/api'
+import { ApiError, requestEmailOtp, type Mode } from '@/lib/api'
 import { SESSION, useSession, useSwitchMode } from '@/lib/auth'
 import { clockTime, useThrottle } from '@/lib/throttle'
 
@@ -125,6 +126,7 @@ export function ModeSwitcher() {
         error={switchMode.error?.message}
         throttleError={switchMode.error}
         needsCode={needsCode}
+        emailFactor={user.mfa.method === 'email'}
         onSubmit={(password, totp) =>
           switchMode.mutate(
             { mode: 'admin', password, totp },
@@ -211,6 +213,7 @@ function ReauthDialog(props: {
   error?: string
   throttleError: unknown
   needsCode: boolean
+  emailFactor: boolean
 }) {
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
@@ -239,6 +242,7 @@ function ReauthForm(props: {
   error?: string
   throttleError: unknown
   needsCode: boolean
+  emailFactor: boolean
 }) {
   const [password, setPassword] = useState('')
   const [totp, setTotp] = useState('')
@@ -246,13 +250,19 @@ function ReauthForm(props: {
   // it anywhere, and a wrong code costs exactly what a wrong password does.
   const throttle = useThrottle(props.throttleError)
 
+  // Which field the refusal belongs under, from the server's `code` rather than from which
+  // field happens to be on screen. Both credentials are collected here, and putting "enter
+  // the code from your authenticator" under the password — marking it invalid — tells
+  // somebody who typed it correctly that they did not.
+  const code = props.throttleError instanceof ApiError ? props.throttleError.code : null
+  const aboutTheCode = code === 'mfa_required' || code === 'invalid_mfa_code'
+  const message = throttle.is429 ? undefined : props.error
+  const passwordError = aboutTheCode ? undefined : message
+  const codeError = aboutTheCode ? message : undefined
+
   return (
     <Form onSubmit={() => props.onSubmit(password, props.needsCode ? totp : undefined)}>
-      <Field
-        label="Password"
-        htmlFor="reauth-password"
-        error={throttle.is429 ? undefined : props.error}
-      >
+      <Field label="Password" htmlFor="reauth-password" error={passwordError}>
         <Input
           id="reauth-password"
           type="password"
@@ -261,17 +271,24 @@ function ReauthForm(props: {
           autoComplete="current-password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          aria-invalid={props.error && !throttle.is429 ? true : undefined}
+          aria-invalid={passwordError ? true : undefined}
         />
       </Field>
       {props.needsCode && (
-        <CodeField
-          id="reauth-totp"
-          label="Code from your authenticator"
-          value={totp}
-          onChange={setTotp}
-          hint="A recovery code works here too."
-        />
+        <>
+          <CodeField
+            id="reauth-totp"
+            label={props.emailFactor ? 'Code from your email' : 'Code from your authenticator'}
+            value={totp}
+            onChange={setTotp}
+            error={codeError}
+            hint="A recovery code works here too."
+          />
+          {/* Without this an account whose factor *is* email has no way to obtain the code
+              this dialog is asking for, and is shut out of Admin Mode for good twelve hours
+              after signing in. */}
+          {props.emailFactor && <SendEmailCode />}
+        </>
       )}
       {throttle.message && <FormError>{throttle.message}</FormError>}
       <DialogFooter>
@@ -283,5 +300,24 @@ function ReauthForm(props: {
         </Button>
       </DialogFooter>
     </Form>
+  )
+}
+
+
+function SendEmailCode() {
+  const send = useMutation({
+    mutationFn: requestEmailOtp,
+    onError: (error) => toast.error(error.message),
+  })
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="sm"
+      disabled={send.isPending || send.isSuccess}
+      onClick={() => send.mutate()}
+    >
+      {send.isSuccess ? 'Code sent — check your email' : 'Email me a code'}
+    </Button>
   )
 }

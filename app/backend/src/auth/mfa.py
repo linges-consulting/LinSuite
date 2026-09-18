@@ -75,6 +75,11 @@ TOTP_WINDOW = 1
 
 _SESSION_PREFIX = "session:mfa:"
 _OTP_PREFIX = "mfa:otp:"
+_ENROLMENT_PREFIX = "mfa:enrolling:"
+
+# How long a started enrolment waits for the code that confirms it. Long enough to find a
+# phone, short enough that an abandoned one is not sitting around tomorrow.
+ENROLMENT_MINUTES = 15
 
 PENDING_FIELD = "pending"
 VERIFIED_FIELD = "verified_at"
@@ -127,6 +132,34 @@ def check_totp(secret: str, code: str) -> bool:
     return pyotp.TOTP(secret, interval=TOTP_INTERVAL_SECONDS).verify(
         code.strip(), valid_window=TOTP_WINDOW
     )
+
+
+# --- an enrolment in progress -------------------------------------------------------------
+#
+# The candidate secret waits in Redis rather than in `users.mfa_secret`, and that is not a
+# storage preference: writing it to the column would destroy the secret the account is
+# *currently* authenticating with, so somebody who started a second enrolment and then closed
+# the tab would find their working authenticator dead and their account unreachable. The
+# column is only written by a code that proved the app has it.
+#
+# Sealed in Redis too. It is the same secret wherever it is sitting.
+
+
+def enrolment_key(user_id: str | uuid.UUID) -> str:
+    return _ENROLMENT_PREFIX + str(user_id)
+
+
+async def stage_secret(user: User, secret: str) -> None:
+    await get_redis().set(enrolment_key(user.id), encrypt_secret(secret), ex=ENROLMENT_MINUTES * 60)
+
+
+async def staged_secret(user: User) -> str | None:
+    sealed = await get_redis().get(enrolment_key(user.id))
+    return decrypt_secret(sealed) if sealed else None
+
+
+async def forget_staged_secret(user: User) -> None:
+    await get_redis().delete(enrolment_key(user.id))
 
 
 # --- this session's MFA state -------------------------------------------------------------------

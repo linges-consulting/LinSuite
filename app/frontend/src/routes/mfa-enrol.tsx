@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { useNavigate } from 'react-router'
+import { Link, Navigate } from 'react-router'
 import { AuthLayout, Form, FormError } from '@/components/form'
 import { CodeField, EMAIL_OTP_WARNING, RecoveryCodes } from '@/components/mfa'
 import { QrCode } from '@/components/qr-code'
@@ -32,7 +32,7 @@ export function MfaEnrolPage({ gated = false }: { gated?: boolean }) {
   const { user } = useSession()
   const [codes, setCodes] = useState<string[] | null>(null)
 
-  if (codes) return <EnrolmentDone codes={codes} gated={gated} />
+  if (codes) return <EnrolmentDone codes={codes} />
   return (
     <AuthLayout>
       <Card>
@@ -168,9 +168,16 @@ function EmailEnrolment(props: { onEnrolled: (codes: string[]) => void; gated: b
  * deliberate and explicit — a redirect the moment enrolment succeeded would close the one
  * window in which they can be written down.
  */
-function EnrolmentDone({ codes, gated }: { codes: string[]; gated: boolean }) {
+function EnrolmentDone({ codes }: { codes: string[] }) {
   const queryClient = useQueryClient()
-  const navigate = useNavigate()
+  const [left, setLeft] = useState(false)
+
+  // A rendered redirect rather than an imperative `navigate()` in the click handler. Both
+  // the re-read session and this flag land in the same React pass, so the gate in `App.tsx`
+  // is evaluating the answer that cleared it — an imperative navigate can run one render
+  // ahead of the cache update, and the gate then sends the browser straight back here with
+  // the codes gone.
+  if (left) return <Navigate to="/security" replace />
 
   return (
     <AuthLayout>
@@ -192,7 +199,7 @@ function EnrolmentDone({ codes, gated }: { codes: string[]; gated: boolean }) {
               // the stale one would bounce straight back here and start the enrolment over.
               queryClient.invalidateQueries({ queryKey: MFA })
               await queryClient.refetchQueries({ queryKey: SESSION })
-              navigate(gated ? '/' : '/security')
+              setLeft(true)
             }}
           >
             I have saved them
@@ -203,16 +210,19 @@ function EnrolmentDone({ codes, gated }: { codes: string[]; gated: boolean }) {
   )
 }
 
+/**
+ * A gated session has nowhere to go back to, so it is offered the only other way off this
+ * screen. An ungated one came from Security and can simply return.
+ */
 function SignOut({ gated }: { gated: boolean }) {
   const signOut = useLogout()
-  const navigate = useNavigate()
   return gated ? (
     <Button type="button" variant="ghost" className="w-full" onClick={() => signOut.mutate()}>
       Sign out
     </Button>
   ) : (
-    <Button type="button" variant="ghost" className="w-full" onClick={() => navigate('/security')}>
-      Cancel
+    <Button asChild type="button" variant="ghost" className="w-full">
+      <Link to="/security">Cancel</Link>
     </Button>
   )
 }

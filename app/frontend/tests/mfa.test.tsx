@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {
   EMAILED_CODE,
@@ -136,10 +136,12 @@ test('enrolment shows a QR code, a typeable key, and the codes exactly once', as
   for (const code of FRESH_CODES) expect(within(codes).getByText(code)).toBeInTheDocument()
 
   // Leaving is deliberate: a redirect on success would close the one window they exist in.
+  // It waits on a re-read of the session before navigating — two round trips, hence the
+  // longer window here than the default second.
   await user.click(screen.getByRole('button', { name: 'I have saved them' }))
-  await waitFor(() =>
-    expect(screen.getByRole('navigation', { name: 'Primary' })).toBeInTheDocument(),
-  )
+  expect(
+    await screen.findByRole('navigation', { name: 'Primary' }, { timeout: 3000 }),
+  ).toBeInTheDocument()
   expect(screen.queryByRole('list', { name: 'Recovery codes' })).not.toBeInTheDocument()
 })
 

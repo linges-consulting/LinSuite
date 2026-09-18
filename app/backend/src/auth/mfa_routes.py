@@ -98,16 +98,17 @@ class EnrolmentOut(BaseModel):
 async def start_enrolment(user: EnrollingUser, db: SessionDep) -> EnrolmentOut:
     """Mint a secret and hand back what an authenticator app needs to hold it.
 
-    The secret is stored sealed right away but the account is *not* enrolled: `mfa_method`
-    stays null until a code proves the app actually has it. Enrolling on the strength of this
-    call would lock somebody out of their own account over a QR code that did not scan.
+    The candidate waits in Redis and the account is *not* enrolled: nothing on `users`
+    changes until a code proves the app actually has the secret. Writing it to the column
+    here would be worse than useless for somebody already enrolled — it would overwrite the
+    secret their authenticator is using, so abandoning a second enrolment would leave them
+    locked out of their own account by a QR code they never scanned.
 
-    Called again, it replaces an unconfirmed secret — the user scanned the first one badly
-    and reloaded the page, which is the common case, not an attack.
+    Called again, it replaces the candidate. That is the common case — the first code did
+    not scan and the page was reloaded — not an attack.
     """
     secret = mfa.new_secret()
-    user.mfa_secret = mfa.encrypt_secret(secret)
-    await db.commit()
+    await mfa.stage_secret(user, secret)
     business = await db.scalar(select(Business).where(Business.id == 1))
     return EnrolmentOut(
         secret=secret,
@@ -122,13 +123,13 @@ async def confirm_enrolment(
     payload: CodeRequest, user: EnrollingUser, claims: ClaimsDep, db: SessionDep
 ) -> RecoveryCodesOut:
     """A valid code is what makes the enrolment real, and what earns the recovery codes."""
-    if user.mfa_secret is None or not mfa.check_totp(
-        mfa.decrypt_secret(user.mfa_secret), payload.code
-    ):
+    secret = await mfa.staged_secret(user)
+    if secret is None or not mfa.check_totp(secret, payload.code):
         # Not counted against the lockout: this is somebody setting up their own account with
         # a code they can read off their own screen, and there is nothing here to guess at —
         # the secret was just handed to them.
         raise mfa.BAD_CODE
+    user.mfa_secret = mfa.encrypt_secret(secret)
     return await _complete_enrolment(db, claims, user, mfa.TOTP)
 
 
@@ -184,6 +185,7 @@ async def _complete_enrolment(
         metadata={"email": user.email, "method": method},
     )
     await db.commit()
+    await mfa.forget_staged_secret(user)
     await mfa.mark_verified(claims)
     mfa.notify(user.email, mfa.ENROLLED_SUBJECT, mfa.ENROLLED_MESSAGE)
     log.info("auth: %s enrolled a second factor (%s)", user.email, method)

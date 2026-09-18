@@ -29,9 +29,7 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.add_column("users", sa.Column("mfa_secret", sa.String(255), nullable=True))
     op.add_column("users", sa.Column("mfa_method", sa.String(16), nullable=True))
-    op.add_column(
-        "users", sa.Column("mfa_enrolled_at", sa.DateTime(timezone=True), nullable=True)
-    )
+    op.add_column("users", sa.Column("mfa_enrolled_at", sa.DateTime(timezone=True), nullable=True))
     op.create_check_constraint(
         "ck_users_mfa_method", "users", "mfa_method IS NULL OR mfa_method IN ('totp', 'email')"
     )
