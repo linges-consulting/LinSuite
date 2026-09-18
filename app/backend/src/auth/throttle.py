@@ -131,6 +131,10 @@ async def record_failure(db: SessionDep, email: str, user: User | None) -> HTTPE
     """
     settings = get_settings()
     redis = get_redis()
+    # ponytail: INCR is atomic, the read-and-branch below is not, so two failures landing in
+    # the same millisecond can both cross the threshold and lock twice — one extra audit row,
+    # one extra notice, one tier skipped. Move the whole sequence into a Lua script if a real
+    # deployment ever shows it happening; a scripted attacker gains nothing from it.
     failures = await redis.incr(fail_key(email))
     await redis.expire(fail_key(email), settings.lockout_failure_window_minutes * 60)
 
@@ -228,8 +232,10 @@ async def guard_reset_request(email: str) -> None:
     settings = get_settings()
     redis = get_redis()
     asked = await redis.incr(_reset_key(email))
-    if asked == 1:
-        await redis.expire(_reset_key(email), settings.reset_request_window_minutes * 60)
+    # `nx` matters more than it looks: without it a counter whose `expire` was lost — a crash
+    # between the two calls — would keep its value forever, and this address could never ask
+    # for a link again. Nothing here is allowed to be permanent.
+    await redis.expire(_reset_key(email), settings.reset_request_window_minutes * 60, nx=True)
     if asked > settings.reset_request_limit:
         ttl = await redis.ttl(_reset_key(email))
         raise _too_many(
