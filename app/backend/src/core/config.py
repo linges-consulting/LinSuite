@@ -37,6 +37,26 @@ class Settings(BaseSettings):
     # enough to survive a slow mailbox, short enough that a link left in an inbox goes stale.
     password_reset_minutes: int = 45
 
+    # --- Brute-force throttling (tech-stack §14, `auth/throttle.py`) -----------------------
+    # Consecutive failed password checks that lock the account. Everything below it is a
+    # progressive delay, and the delay is what makes reaching this number expensive.
+    lockout_threshold: int = 10
+    # Ceiling on the doubling delay (1, 2, 4 … seconds). Past it every further failure waits
+    # the same time, until the threshold arrives.
+    lockout_delay_cap_seconds: int = 128
+    # How long an unbroken run of failures stays unbroken. Nothing older counts.
+    lockout_failure_window_minutes: int = 15
+    # Lock durations for a first, second, third … lockout of the same account. The last entry
+    # is the cap — 24 hours — never "forever": a permanent lock is a denial-of-service weapon
+    # handed to anyone who knows a username.
+    lockout_tier_minutes: list[int] = [15, 30, 60, 1440]
+    # How long an account is remembered as a repeat offender. A day clean and it starts over.
+    lockout_tier_decay_hours: int = 24
+    # Reset links one address may ask for per window, so the form cannot be used to flood
+    # somebody's mailbox. Independent of the failure counter: asking is not guessing.
+    reset_request_limit: int = 3
+    reset_request_window_minutes: int = 15
+
     # --- Notifications (tech-stack §6) -----------------------------------------------------
     # Which implementation of `notifications.providers.NotificationProvider` sends. `console`
     # writes the whole message to the log, which is how a reset link is retrieved locally.

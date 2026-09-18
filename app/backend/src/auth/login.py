@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import func, select
 
-from auth import modes
+from auth import modes, throttle
 from auth.models import User
 from auth.session import (
     COOKIE_NAME,
@@ -95,6 +95,10 @@ class UserOut(BaseModel):
 @router.post("/login")
 async def login(payload: LoginRequest, response: Response, db: SessionDep) -> UserOut:
     email = payload.email.lower()
+    # Before the lookup and before the hash: a throttled attempt costs this server nothing,
+    # and is keyed by what was typed rather than by an account, so being refused early says
+    # nothing about whether the address exists.
+    await throttle.guard(email)
     user = await db.scalar(select(User).where(func.lower(User.email) == email))
 
     # `None` verifies against a dummy hash: an unknown address costs the same milliseconds
@@ -108,10 +112,12 @@ async def login(payload: LoginRequest, response: Response, db: SessionDep) -> Us
             actor_user_id=user.id if user else None,
             metadata={"email": email, "reason": "bad_password" if user else "unknown_email"},
         )
+        locked = await throttle.record_failure(db, email, user)
         await db.commit()
         log.warning("auth: failed login for %s", email)
-        raise _REFUSED
+        raise locked or _REFUSED
 
+    await throttle.clear(email)
     issued = issue_token(user.id)
     set_session_cookie(response, issued)
     record_event(
@@ -226,6 +232,10 @@ async def _reauthenticate(password: str | None, user: User, claims: dict, db: Se
     if password is None:
         raise _REAUTH_REQUIRED
 
+    # Only now — a request carrying no password never reached the counter, so it must not be
+    # refused by it either.
+    await throttle.guard(user.email)
+
     if not await verify_password(user.password_hash, password):
         record_event(
             db,
@@ -235,9 +245,12 @@ async def _reauthenticate(password: str | None, user: User, claims: dict, db: Se
             actor_user_id=user.id,
             metadata={"email": user.email, "reason": "reauth"},
         )
+        locked = await throttle.record_failure(db, user.email, user)
         await db.commit()
         log.warning("auth: failed Admin Mode re-authentication for %s", user.email)
-        raise HTTPException(status_code=403, detail="Incorrect password")
+        raise locked or HTTPException(status_code=403, detail="Incorrect password")
+
+    await throttle.clear(user.email)
 
     # Audited, and committed, before the window opens. If Redis then refuses, the log says an
     # administrator re-authenticated and no window exists — which is the harmless way round.

@@ -35,7 +35,7 @@ from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select, update
 
-from auth import modes
+from auth import modes, throttle
 from auth.login import UserOut
 from auth.models import PasswordResetToken, User
 from auth.session import (
@@ -86,6 +86,11 @@ class ResetRequest(BaseModel):
 @router.post("/password-reset/request", status_code=202)
 async def request_reset(payload: ResetRequest, db: SessionDep) -> dict[str, str]:
     email = payload.email.lower()
+    # Its own limit, keyed by the address and applied before the lookup, so the form cannot be
+    # used to flood a mailbox and the refusal says nothing about who has an account. It is not
+    # the failed-password counter: asking for a link is not a guess, and letting it lock an
+    # account would hand anybody a way to lock any address they know.
+    await throttle.guard_reset_request(email)
     user = await db.scalar(select(User).where(func.lower(User.email) == email))
     if user is None:
         # Nothing is recorded. An audit row naming an address with no account would store a
@@ -185,6 +190,11 @@ async def confirm_reset(payload: ResetConfirm, db: SessionDep) -> None:
         metadata={"email": user.email},
     )
     await db.commit()
+    # A reset is exactly the event somebody whose mailbox was taken over needs to hear about,
+    # and the one they did not initiate. Enqueued after the commit, like the link itself.
+    throttle.notify_password_changed(user.email)
+    # The link proved the mailbox; whatever failed attempts preceded it are not this person's.
+    await throttle.clear(user.email)
     log.info("auth: password reset completed for %s", user.email)
 
 
@@ -213,10 +223,16 @@ async def change_password(
     `UnrestrictedUser`, because this is one of the three endpoints a session owing a forced
     change has to reach — it is how the debt gets paid.
     """
+    # The same throttle as `/auth/login` and the Admin Mode re-authentication, on the same
+    # counter: this is a third door onto one credential, and an attacker who found it
+    # unthrottled would push on this one.
+    await throttle.guard(user.email)
+
     if not await verify_password(user.password_hash, payload.current_password):
         # Its own event type, not `login.failed`. This is not a login — the caller is already
-        # authenticated and named — and Task 6's lockout counts `login.failed` rows, so filing
-        # it there would let a signed-in user fumbling their own password lock out their login.
+        # authenticated and named — and an administrator reading the trail should see which
+        # door was tried. The lockout counter is separate state, not a scan of these rows, so
+        # the event type has no bearing on what this failure costs.
         record_event(
             db,
             "password.change_failed",
@@ -225,9 +241,12 @@ async def change_password(
             actor_user_id=user.id,
             metadata={"email": user.email},
         )
+        locked = await throttle.record_failure(db, user.email, user)
         await db.commit()
         log.warning("auth: failed password change for %s", user.email)
-        raise HTTPException(status_code=403, detail="Incorrect password")
+        raise locked or HTTPException(status_code=403, detail="Incorrect password")
+
+    await throttle.clear(user.email)
 
     rejected = await check_password_policy(payload.new_password)
     if rejected:
@@ -256,5 +275,6 @@ async def change_password(
     # Issued after the commit, so its `iat` is later than the cut-off that was just written.
     issued = issue_token(user.id)
     set_session_cookie(response, issued)
+    throttle.notify_password_changed(user.email)
     log.info("auth: password changed for %s", user.email)
     return UserOut.of(user, await modes.read_state(claims), must_change_password=False)

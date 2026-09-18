@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import text
 
+from auth import throttle
 from core.db import get_purge_engine, session_scope
 from core.redis import get_redis
 from core.security import verify_password
@@ -237,12 +238,16 @@ async def test_changing_a_password_needs_the_current_one(client):
     resp = await change(client, current="not the password")
 
     assert resp.status_code == 403
+    # That failure started the progressive delay (`tests/test_lockout.py`), so this is the
+    # user coming back after it: the point here is that the new password never took.
+    await get_redis().delete(throttle.delay_key(EMAIL))
     assert (await login(client, password=NEW_PASSWORD)).status_code == 401
 
 
 async def test_a_failed_change_is_not_filed_as_a_failed_login(client):
-    """Task 6's lockout counts `login.failed`. A signed-in user fumbling their own current
-    password must not be able to lock their own login out."""
+    """A signed-in user fumbling their own current password did not attempt a login, and the
+    trail should say which door was tried. The throttle counts it all the same — it keeps its
+    own state rather than scanning these rows (`tests/test_lockout.py`)."""
     await login(client)
 
     await change(client, current="not the password")

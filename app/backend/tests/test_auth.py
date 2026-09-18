@@ -9,6 +9,7 @@ from sqlalchemy import text
 from auth import session as session_mod
 from core.config import get_settings
 from core.db import get_purge_engine, session_scope
+from core.redis import get_redis
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -34,6 +35,9 @@ async def claimed_instance(client):
         for table in ("users", "businesses", "setup_token"):
             await db.execute(text(f"DELETE FROM {table}"))
         await db.commit()
+    # Including the per-account throttle counters: a test that ends on a failed login would
+    # otherwise leave the next one's first attempt already delayed.
+    await get_redis().flushdb()
 
     from auth import setup
 
