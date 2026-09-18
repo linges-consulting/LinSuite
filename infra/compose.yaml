@@ -44,7 +44,36 @@ services:
       # Longer rule = higher default priority, so /api wins over the frontend's catch-all.
       traefik.http.routers.app.rule: Host(`${APP_HOST:-localhost}`) && PathPrefix(`/api`)
       traefik.http.routers.app.entrypoints: web
+      traefik.http.routers.app.middlewares: api-ratelimit@docker
       traefik.http.services.app.loadbalancer.server.port: "8000"
+
+      # Blunt per-IP volumetric limits (tech-stack §14). Deliberately *not* application code:
+      # this is about traffic, and it must refuse a flood before it reaches a worker, a
+      # database connection or an Argon2 verify. The per-account throttling that actually
+      # defends a credential lives in `auth/throttle.py`, because distributed credential
+      # stuffing walks straight past an IP limit and a clinic behind one NAT is one IP.
+      #
+      # `average` requests per `period`, refilled steadily, with `burst` allowed at once.
+      # General API: 300/minute (5/s) with a burst of 100 — a staff member loading a busy
+      # calendar fires a handful of requests, nothing near this.
+      traefik.http.middlewares.api-ratelimit.ratelimit.average: "300"
+      traefik.http.middlewares.api-ratelimit.ratelimit.period: "1m"
+      traefik.http.middlewares.api-ratelimit.ratelimit.burst: "100"
+      # Credentials: 60/minute (1/s) with a burst of 20. Chosen against the real floor —
+      # `/auth/me` is polled every 5s while Admin Mode is open, so roughly 12/minute per open
+      # tab — which leaves room for several tabs and still turns a password-guessing burst
+      # into one attempt a second per address.
+      traefik.http.middlewares.auth-ratelimit.ratelimit.average: "60"
+      traefik.http.middlewares.auth-ratelimit.ratelimit.period: "1m"
+      traefik.http.middlewares.auth-ratelimit.ratelimit.burst: "20"
+      # Its own router onto the same service, so the tighter bucket applies to the credential
+      # endpoints only. Priority is explicit rather than left to rule length: a later, longer
+      # rule on the `app` router would otherwise silently take these paths back.
+      traefik.http.routers.auth.rule: Host(`${APP_HOST:-localhost}`) && PathPrefix(`/api/auth`)
+      traefik.http.routers.auth.entrypoints: web
+      traefik.http.routers.auth.priority: "100"
+      traefik.http.routers.auth.service: app
+      traefik.http.routers.auth.middlewares: auth-ratelimit@docker
 
   worker:
     <<: *backend
