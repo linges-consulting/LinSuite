@@ -145,6 +145,11 @@ test('a rejected token returns to the first step with the reason', async () => {
 
   expect(await screen.findByText('Step 1 of 3')).toBeInTheDocument()
   expect(screen.getByText('Invalid setup token')).toBeInTheDocument()
+
+  // The typed answers survive, and the message dies with the token that caused it.
+  await user.click(screen.getByRole('button', { name: 'Continue' }))
+  expect(await screen.findByLabelText('Business name')).toHaveValue('Cedar Lane Clinic')
+  expect(screen.queryByText('Invalid setup token')).not.toBeInTheDocument()
 })
 
 test('/setup is a not-found state once the instance is claimed', async () => {

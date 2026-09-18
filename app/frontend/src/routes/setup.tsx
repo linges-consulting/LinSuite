@@ -48,6 +48,8 @@ export function SetupPage() {
     admin_password: '',
   })
   const set = (patch: Partial<SetupPayload>) => setForm((f) => ({ ...f, ...patch }))
+  // Lives here, not in the step, so stepping back and forward keeps both password fields.
+  const [confirm, setConfirm] = useState('')
 
   const submit = useMutation({
     mutationFn: completeSetup,
@@ -126,7 +128,10 @@ export function SetupPage() {
               value={form.token}
               error={error}
               onChange={(token) => set({ token })}
-              onContinue={() => setStep('business')}
+              onContinue={() => {
+                submit.reset() // the rejected-token message dies with the token that caused it
+                setStep('business')
+              }}
             />
           )}
           {step === 'business' && (
@@ -142,6 +147,8 @@ export function SetupPage() {
               form={form}
               error={error}
               pending={submit.isPending}
+              confirm={confirm}
+              onConfirmChange={setConfirm}
               onChange={set}
               onBack={() => setStep('business')}
               onSubmit={() => submit.mutate(form)}
@@ -247,20 +254,23 @@ function AdminStep(props: {
   form: SetupPayload
   error?: string
   pending: boolean
+  confirm: string
+  onConfirmChange: (value: string) => void
   onChange: (patch: Partial<SetupPayload>) => void
   onBack: () => void
   onSubmit: () => void
 }) {
-  const [confirm, setConfirm] = useState('')
-  const [error, setError] = useState<string>()
+  const confirm = props.confirm
+  const [error, setError] = useState<{ password?: string; confirm?: string }>({})
 
   return (
     <Form
       onSubmit={() => {
         if (props.form.admin_password.length < MIN_PASSWORD_LENGTH)
-          return setError(`Use at least ${MIN_PASSWORD_LENGTH} characters.`)
-        if (props.form.admin_password !== confirm) return setError('The two passwords do not match.')
-        setError(undefined)
+          return setError({ password: `Use at least ${MIN_PASSWORD_LENGTH} characters.` })
+        if (props.form.admin_password !== confirm)
+          return setError({ confirm: 'The two passwords do not match.' })
+        setError({})
         props.onSubmit()
       }}
     >
@@ -275,7 +285,12 @@ function AdminStep(props: {
           onChange={(e) => props.onChange({ admin_email: e.target.value })}
         />
       </Field>
-      <Field label="Password" htmlFor="admin-password">
+      <Field
+        label="Password"
+        htmlFor="admin-password"
+        error={error.password}
+        hint={`At least ${MIN_PASSWORD_LENGTH} characters. Length beats symbols — a short phrase works.`}
+      >
         <Input
           id="admin-password"
           type="password"
@@ -283,17 +298,22 @@ function AdminStep(props: {
           autoComplete="new-password"
           value={props.form.admin_password}
           onChange={(e) => props.onChange({ admin_password: e.target.value })}
+          aria-invalid={error.password ? true : undefined}
         />
       </Field>
-      <Field label="Confirm password" htmlFor="admin-password-confirm" error={error ?? props.error}>
+      <Field
+        label="Confirm password"
+        htmlFor="admin-password-confirm"
+        error={error.confirm ?? props.error}
+      >
         <Input
           id="admin-password-confirm"
           type="password"
           required
           autoComplete="new-password"
           value={confirm}
-          onChange={(e) => setConfirm(e.target.value)}
-          aria-invalid={error ? true : undefined}
+          onChange={(e) => props.onConfirmChange(e.target.value)}
+          aria-invalid={error.confirm ? true : undefined}
         />
       </Field>
       <Actions onBack={props.onBack} label={props.pending ? 'Creating…' : 'Create and finish'} pending={props.pending} />
