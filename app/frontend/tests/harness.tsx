@@ -3,6 +3,7 @@ import { render } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import App from '@/App'
 import { Toaster } from '@/components/ui/sonner'
+import type { BrandingDocument } from '@/lib/api'
 import { createQueryClient } from '@/lib/query-client'
 import { ThemeProvider } from '@/lib/theme'
 
@@ -19,6 +20,75 @@ export const EMAILED_CODE = '654321'
 export const FRESH_CODES = ['ffff1-00001', 'ffff1-00002', 'ffff1-00003']
 /** Stands in for the twelve hours of `ADMIN_MFA_INTERVAL_HOURS`. */
 export const MFA_INTERVAL_MS = 12 * 3600_000
+
+export const BUSINESS_NAME = 'Cedar Lane Clinic'
+export const PRIMARY = '#1d4ed8'
+export const PRIMARY_DARK = '#659dff'
+/** The one colour this fake reports as failing the 4.5:1 guideline. */
+export const LOW_CONTRAST = '#7a7a7a'
+
+/** What `GET /api/branding` answers for a business with a logo and a favicon. */
+export const BRANDING_DOCUMENT: BrandingDocument = {
+  name: BUSINESS_NAME,
+  colors: {
+    primary: PRIMARY,
+    primary_foreground: '#ffffff',
+    primary_dark: PRIMARY_DARK,
+    primary_dark_foreground: '#0f172a',
+    secondary: '#0f766e',
+    secondary_foreground: '#ffffff',
+    secondary_dark: '#68b5ac',
+    secondary_dark_foreground: '#0f172a',
+  },
+  logo_url: '/api/branding/logo?v=abc123def456',
+  logo_etag: '"abc123"',
+  favicon_url: '/api/branding/favicon?v=fed654cba321',
+  favicon_etag: '"fed654"',
+}
+
+const PROVINCES = [
+  { code: 'AB', name: 'Alberta', timezone: 'America/Edmonton' },
+  { code: 'BC', name: 'British Columbia', timezone: 'America/Vancouver' },
+  { code: 'ON', name: 'Ontario', timezone: 'America/Toronto' },
+]
+
+const EMPTY_PROFILE = {
+  name: BUSINESS_NAME,
+  address_line1: null,
+  address_line2: null,
+  city: null,
+  province: null,
+  postal_code: null,
+  phone: null,
+  email: null,
+  gst_hst_number: null,
+  pst_qst_number: null,
+  currency_symbol: '$',
+  receipt_footer: null,
+}
+
+/**
+ * The server derives the dark variant and the contrast numbers, so the fake does too — the
+ * screen never computes them, and a fake that returned a shape the server does not send
+ * would be testing a client that could not exist.
+ */
+function branding(colours: { brand_primary: string; brand_secondary: string }) {
+  const ratio = (hex: string) => (hex === LOW_CONTRAST ? 3.1 : 8.6)
+  return {
+    ...colours,
+    colors: {
+      ...BRANDING_DOCUMENT.colors,
+      primary: colours.brand_primary,
+      secondary: colours.brand_secondary,
+    },
+    contrast: {
+      primary: ratio(colours.brand_primary),
+      primary_dark: ratio(colours.brand_primary),
+      secondary: ratio(colours.brand_secondary),
+      secondary_dark: ratio(colours.brand_secondary),
+    },
+  }
+}
 
 /**
  * An account with no second factor and nothing owed, for the fakes that are about something
@@ -68,6 +138,8 @@ type Api = {
    * browser only ever sees the 429 it sends back.
    */
   respond?: (url: string, body: any) => Response | undefined
+  /** What `GET /api/branding` answers; defaults to a business with both images set. */
+  brandingDocument?: BrandingDocument
 }
 
 /** A throttled or locked-out refusal, shaped exactly as `auth/throttle.py` sends it. */
@@ -114,8 +186,12 @@ export function stubApi({
   emailOtpAllowed = false,
   verifiedAgoMs = null,
   respond,
+  brandingDocument,
 }: Api = {}) {
   const calls: Call[] = []
+  let timezone = 'America/Toronto'
+  let business = { ...EMPTY_PROFILE }
+  let brandColours = { brand_primary: PRIMARY, brand_secondary: '#0f766e' }
   let session = signedIn
   let mustChange = mustChangePassword
   let password = PASSWORD
@@ -179,11 +255,19 @@ export function stubApi({
     'fetch',
     vi.fn(async (url: string, init?: RequestInit) => {
       const headers = (init?.headers ?? {}) as Record<string, string>
-      const body = init?.body ? JSON.parse(init.body as string) : undefined
+      // A file upload is the one request that is not JSON; nothing here reads its body.
+      const body =
+        typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
       calls.push({ url, method: init?.method ?? 'GET', body, contentType: headers['Content-Type'] })
       const chosen = respond?.(url, body)
       if (chosen) return chosen
       if (url === '/api/setup/status') return Response.json({ required: setupRequired })
+      // Anonymous, and asked for on every boot: the tab and the login screen are branded
+      // before there is a session. It sits above the session check for that reason.
+      if (url === '/api/branding') return Response.json(brandingDocument ?? BRANDING_DOCUMENT)
+      if (url === '/api/setup/timezones') {
+        return Response.json({ timezones: ['America/Toronto', 'America/Vancouver'] })
+      }
       // Both reset endpoints are anonymous, so they sit above the session check below.
       if (url === '/api/auth/password-reset/request') {
         // 202 whatever the address — the fake withholds the same answer the server does.
@@ -384,18 +468,34 @@ export function stubApi({
         mode = body.mode
         return Response.json(account())
       }
-      if (url === '/api/admin/business') {
+      if (url.startsWith('/api/admin/business')) {
         if (account().mode !== 'admin') {
           return Response.json(
             { detail: 'Switch to Admin Mode to do this.', code: 'admin_mode_required' },
             { status: 403 },
           )
         }
-        return Response.json({
-          name: 'Cedar Lane Clinic',
-          timezone: 'America/Toronto',
-          setup_completed_at: '2026-01-05T12:00:00Z',
-        })
+        if (url === '/api/admin/business/provinces') return Response.json(PROVINCES)
+        if (url === '/api/admin/business/timezone') {
+          timezone = body.timezone
+          return Response.json({ timezone })
+        }
+        if (url === '/api/admin/business') {
+          if (init?.method === 'PUT') business = { ...business, ...body }
+          return Response.json({
+            ...business,
+            country: 'CA',
+            timezone,
+            setup_completed_at: '2026-01-05T12:00:00Z',
+          })
+        }
+        if (url.startsWith('/api/admin/business/branding')) {
+          const wanted = url.includes('?')
+            ? Object.fromEntries(new URLSearchParams(url.split('?')[1]))
+            : (body ?? brandColours)
+          if (init?.method === 'PUT') brandColours = body
+          return Response.json(branding(wanted as typeof brandColours))
+        }
       }
       return Response.json({ status: 'ok', database: 'ok' })
     }),

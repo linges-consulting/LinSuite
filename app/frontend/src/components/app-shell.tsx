@@ -1,6 +1,7 @@
 import { LogOut, Menu, ShieldCheck, UserRound, X } from 'lucide-react'
 import { useState } from 'react'
 import { Link, NavLink, Outlet, useLocation } from 'react-router'
+import { BrandMark } from '@/components/brand-mark'
 import { ModeSwitcher } from '@/components/mode-switcher'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Button } from '@/components/ui/button'
@@ -15,8 +16,6 @@ import {
 import { useLogout, useSession } from '@/lib/auth'
 import { NAV, navFor } from '@/lib/nav'
 import { cn } from '@/lib/utils'
-
-const BUSINESS_NAME = 'LinSuite' // replaced by the business's own name once branding lands
 
 export function AppShell() {
   const [open, setOpen] = useState(false)
@@ -47,9 +46,8 @@ export function AppShell() {
         )}
       >
         <div className="flex h-14 items-center gap-2.5 border-b px-4">
-          <NavLink to="/" className="flex items-center gap-2.5 font-semibold" onClick={() => setOpen(false)}>
-            <span aria-hidden className="size-6 rounded-md bg-primary" />
-            <span className="truncate">{BUSINESS_NAME}</span>
+          <NavLink to="/" className="min-w-0" onClick={() => setOpen(false)}>
+            <BrandMark className="flex items-center gap-2.5 font-semibold" />
           </NavLink>
           <Button
             variant="ghost"

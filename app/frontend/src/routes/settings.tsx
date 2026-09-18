@@ -1,27 +1,37 @@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { BrandingPanel } from '@/routes/settings-branding'
+import { BusinessPanel } from '@/routes/settings-business'
 import { RolesPanel } from '@/routes/settings-roles'
 import { SecurityPanel } from '@/routes/settings-security'
 import { UsersPanel } from '@/routes/settings-users'
 
 /**
- * The RBAC & User Management panel (PRD §7).
+ * Everything about the business itself (PRD §1, §7).
  *
- * Tabs rather than two nav entries: roles and accounts are one job done in two passes —
- * you define what a role may do, then you put people on it — and splitting them across the
- * sidebar would make the second half of that job something you go looking for.
+ * Tabs rather than a nav entry each: these are the settings you visit, change one thing in,
+ * and leave. Business comes first because it is the one a new instance has to fill in — the
+ * wizard collects a name and a timezone and nothing else.
  *
- * All three panels need Admin Mode. Nothing here hides itself when the window lapses; the panels
+ * Every panel needs Admin Mode. Nothing here hides itself when the window lapses; the panels
  * surface the server's refusal instead, because a screen that empties on expiry looks broken
  * rather than locked.
  */
 export function SettingsPage() {
   return (
-    <Tabs defaultValue="roles" className="gap-4">
+    <Tabs defaultValue="business" className="gap-4">
       <TabsList>
+        <TabsTrigger value="business">Business</TabsTrigger>
+        <TabsTrigger value="branding">Branding</TabsTrigger>
         <TabsTrigger value="roles">Roles</TabsTrigger>
         <TabsTrigger value="users">People</TabsTrigger>
         <TabsTrigger value="security">Security</TabsTrigger>
       </TabsList>
+      <TabsContent value="business">
+        <BusinessPanel />
+      </TabsContent>
+      <TabsContent value="branding">
+        <BrandingPanel />
+      </TabsContent>
       <TabsContent value="roles">
         <RolesPanel />
       </TabsContent>

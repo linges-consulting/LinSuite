@@ -43,7 +43,7 @@ test('Admin Mode reaches the administrative endpoint', async () => {
 
   renderApp('/')
 
-  expect(await screen.findByText('Cedar Lane Clinic')).toBeInTheDocument()
+  expect(await screen.findByText('Business profile')).toBeInTheDocument()
 })
 
 test('Staff Mode neither shows the administrative surface nor asks for it', async () => {
@@ -61,7 +61,7 @@ test('a 403 from an admin endpoint drops the UI to Staff Mode and says why', asy
   const user = userEvent.setup()
 
   renderApp('/')
-  await screen.findByText('Cedar Lane Clinic')
+  await screen.findByText('Business profile')
   // The window lapses server-side; this tab has not been told yet and still believes it is
   // administering, which is exactly the state the 403 has to resolve.
   server.expireAdminWindow()
@@ -72,7 +72,7 @@ test('a 403 from an admin endpoint drops the UI to Staff Mode and says why', asy
   await waitFor(() =>
     expect(screen.getByRole('button', { name: /Switch mode/ })).toHaveTextContent('Staff Mode'),
   )
-  expect(screen.queryByText('Cedar Lane Clinic')).not.toBeInTheDocument()
+  expect(screen.queryByText('Business profile')).not.toBeInTheDocument()
 })
 
 test('a 401 from the API ends the session and returns to the login screen', async () => {
@@ -80,7 +80,7 @@ test('a 401 from the API ends the session and returns to the login screen', asyn
   const user = userEvent.setup()
 
   renderApp('/')
-  await screen.findByText('Cedar Lane Clinic')
+  await screen.findByText('Business profile')
   server.endSession()
 
   await user.click(screen.getByRole('button', { name: 'Refresh business profile' }))

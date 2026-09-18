@@ -195,16 +195,147 @@ export async function switchMode(request: {
   return res.json()
 }
 
+/** What a receipt, an invoice and a form header are rendered from (PRD §1). */
 export type BusinessProfile = {
   name: string
+  address_line1: string | null
+  address_line2: string | null
+  city: string | null
+  /** One of the thirteen two-letter codes, or null until an address is entered. */
+  province: string | null
+  postal_code: string | null
+  phone: string | null
+  email: string | null
+  gst_hst_number: string | null
+  pst_qst_number: string | null
+  currency_symbol: string
+  receipt_footer: string | null
+}
+
+export type Business = BusinessProfile & {
+  /** Fixed at `CA`, and not this form's to change. */
+  country: string
+  /** Changed through its own endpoint, never as part of the profile. */
   timezone: string
   setup_completed_at: string | null
 }
 
 /** Admin Mode only. A 403 means the window lapsed — see `createQueryClient`. */
-export async function fetchAdminBusiness(): Promise<BusinessProfile> {
+export async function fetchAdminBusiness(): Promise<Business> {
   const res = await fetch('/api/admin/business')
   if (!res.ok) throw await failure(res, 'Could not load the business')
+  return res.json()
+}
+
+export async function updateBusiness(profile: BusinessProfile): Promise<Business> {
+  const res = await send('PUT', '/api/admin/business', profile)
+  if (!res.ok) throw await failure(res, 'Could not save the business')
+  return res.json()
+}
+
+/**
+ * Change the zone every recurring rule in the app is read against. Separate from the profile
+ * on purpose: this re-interprets data that already exists rather than replacing a field.
+ */
+export async function updateTimezone(timezone: string): Promise<{ timezone: string }> {
+  const res = await send('PATCH', '/api/admin/business/timezone', { timezone })
+  if (!res.ok) throw await failure(res, 'Could not change the timezone')
+  return res.json()
+}
+
+export type Province = {
+  code: string
+  name: string
+  /** The zone most of this province keeps — a suggestion a human confirms, never applied. */
+  timezone: string
+}
+
+export async function fetchProvinces(): Promise<Province[]> {
+  const res = await fetch('/api/admin/business/provinces')
+  if (!res.ok) throw await failure(res, 'Could not load the provinces')
+  return res.json()
+}
+
+// --- branding ---------------------------------------------------------------------------
+
+/** The stored hexes, plus everything the server derives from them. */
+export type Branding = {
+  brand_primary: string
+  brand_secondary: string
+  /** `primary`, `primary_dark`, each one's foreground, and the same pair for the secondary. */
+  colors: Record<string, string>
+  /**
+   * Text on each brand surface, in the theme it is used in. Computed server-side beside the
+   * derivation it depends on, so the warning on screen and the colour that ships agree.
+   */
+  contrast: Record<string, number>
+}
+
+export async function fetchBranding(): Promise<Branding> {
+  const res = await fetch('/api/admin/business/branding')
+  if (!res.ok) throw await failure(res, 'Could not load the branding')
+  return res.json()
+}
+
+/** What the screen draws while somebody is still choosing. Nothing is saved. */
+export async function previewBranding(colours: {
+  brand_primary: string
+  brand_secondary: string
+}): Promise<Branding> {
+  const query = new URLSearchParams(colours)
+  const res = await fetch(`/api/admin/business/branding/preview?${query}`)
+  if (!res.ok) throw await failure(res, 'Could not preview those colours')
+  return res.json()
+}
+
+export async function updateBrandColours(colours: {
+  brand_primary: string
+  brand_secondary: string
+}): Promise<Branding> {
+  const res = await send('PUT', '/api/admin/business/branding', colours)
+  if (!res.ok) throw await failure(res, 'Could not save the colours')
+  return res.json()
+}
+
+export type BrandingAssetKind = 'logo' | 'favicon'
+
+/**
+ * The one request in the application that is not `application/json`. A file cannot be, and
+ * the server allowlists exactly these two paths for it — the browser sends `Origin` on a
+ * multipart POST, which is what stands in for the JSON-only rule there.
+ *
+ * `Content-Type` is deliberately unset: the browser has to write the multipart boundary.
+ */
+export async function uploadBrandingAsset(
+  kind: BrandingAssetKind,
+  file: File,
+): Promise<{ url: string; etag: string; width: number; height: number }> {
+  const body = new FormData()
+  body.append('file', file)
+  const res = await fetch(`/api/admin/business/${kind}`, { method: 'POST', body })
+  if (!res.ok) throw await failure(res, `Could not upload the ${kind}`)
+  return res.json()
+}
+
+export async function removeBrandingAsset(kind: BrandingAssetKind): Promise<void> {
+  const res = await send('DELETE', `/api/admin/business/${kind}`)
+  if (!res.ok) throw await failure(res, `Could not remove the ${kind}`)
+}
+
+/** Everything the shell needs to look like this business. Anonymous: the login screen and
+ *  the browser tab are branded before anybody has signed in. */
+export type BrandingDocument = {
+  name: string
+  colors: Record<string, string>
+  logo_url: string | null
+  logo_etag: string | null
+  favicon_url: string | null
+  favicon_etag: string | null
+}
+
+export async function fetchBrandingDocument(): Promise<BrandingDocument> {
+  const res = await fetch('/api/branding')
+  if (!res.ok) throw new Error(`Branding failed: HTTP ${res.status}`)
   return res.json()
 }
 

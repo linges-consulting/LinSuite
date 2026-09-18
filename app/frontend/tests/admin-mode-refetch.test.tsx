@@ -58,6 +58,7 @@ test('entering Admin Mode re-asks for what Staff Mode was refused', async () => 
           )
         }
         if (url === '/api/admin/capabilities') return Response.json({ capabilities: [] })
+        if (url === '/api/admin/business/provinces') return Response.json([])
         return Response.json({ roles: [], users: [] })
       }
       return Response.json({ status: 'ok', database: 'ok' })
@@ -82,6 +83,7 @@ test('entering Admin Mode re-asks for what Staff Mode was refused', async () => 
   await user.click(await screen.findByRole('menuitem', { name: /Admin Mode/ }))
 
   // The panel returns on its own — no reload, no second click.
+  await user.click(await screen.findByRole('tab', { name: 'Roles' }))
   await waitFor(
     () => expect(screen.getByRole('button', { name: 'New role' })).toBeInTheDocument(),
     { timeout: 5_000 },

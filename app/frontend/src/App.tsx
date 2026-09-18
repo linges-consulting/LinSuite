@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from 'react-router'
 import { AppShell } from '@/components/app-shell'
 import { fetchSetupStatus } from '@/lib/api'
 import { useSession } from '@/lib/auth'
+import { useApplyBranding } from '@/lib/branding'
 import { ChangePasswordPage } from '@/routes/change-password'
 import { ForgotPasswordPage } from '@/routes/forgot-password'
 import { HomePage } from '@/routes/home'
@@ -34,6 +35,13 @@ import { SetupPage } from '@/routes/setup'
  * is owed there is no route that renders the application.
  */
 export default function App() {
+  // Outside the gates: the login screen and the browser tab are this business's too, and
+  // the branding document is anonymous precisely so they can be.
+  useApplyBranding()
+  return <AppRoutes />
+}
+
+function AppRoutes() {
   const { data: setup, isPending: setupPending } = useQuery({
     queryKey: ['setup-status'],
     queryFn: fetchSetupStatus,

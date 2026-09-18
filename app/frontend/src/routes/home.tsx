@@ -31,9 +31,14 @@ export function HomePage() {
 }
 
 /**
- * The first administrative surface, and the proof that the guard is real: this data comes
- * from an endpoint that answers 403 to the same signed-in user in Staff Mode. Task 9 turns
- * it into the settings screen that also writes.
+ * A read-only glance, and the proof that the guard is real: this data comes from an endpoint
+ * that answers 403 to the same signed-in user in Staff Mode. Settings → Business is where the
+ * same record is edited; the card stays because "am I actually administering right now?" is
+ * a question the dashboard should answer without a trip into Settings.
+ *
+ * The name appears twice on this screen — here and in the sidebar — and that is not a
+ * duplicate: the sidebar's comes from the anonymous branding document, this one from behind
+ * the Admin Mode guard. The mode tests assert on this card's *title* for that reason.
  */
 function BusinessProfileCard() {
   const { data, isPending, refetch, isFetching } = useQuery({

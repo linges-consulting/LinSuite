@@ -1,28 +1,14 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { Check, ChevronsUpDown, CircleCheck, KeyRound, Lock } from 'lucide-react'
+import { CircleCheck, KeyRound, Lock } from 'lucide-react'
 import { useState } from 'react'
 import { EmptyState } from '@/components/empty-state'
 import { AuthLayout, Field, Form } from '@/components/form'
+import { TimezoneCombobox } from '@/components/timezone-combobox'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import {
-  Command,
-  CommandEmpty,
-  CommandGroup,
-  CommandInput,
-  CommandItem,
-  CommandList,
-} from '@/components/ui/command'
 import { Input } from '@/components/ui/input'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { ApiError, completeSetup, fetchSetupStatus, type SetupPayload } from '@/lib/api'
 import { MIN_PASSWORD_LENGTH } from '@/lib/password'
-import {
-  ApiError,
-  completeSetup,
-  fetchSetupStatus,
-  fetchTimezones,
-  type SetupPayload,
-} from '@/lib/api'
 
 
 type Step = 'token' | 'business' | 'admin' | 'done'
@@ -312,56 +298,6 @@ function AdminStep(props: {
       </Field>
       <Actions onBack={props.onBack} label={props.pending ? 'Creating…' : 'Create and finish'} pending={props.pending} />
     </Form>
-  )
-}
-
-function TimezoneCombobox(props: { value: string; onChange: (value: string) => void }) {
-  const [open, setOpen] = useState(false)
-  const { data: zones = [] } = useQuery({
-    queryKey: ['timezones'],
-    queryFn: fetchTimezones,
-    staleTime: Infinity,
-  })
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Button
-          id="timezone"
-          type="button"
-          variant="outline"
-          role="combobox"
-          aria-expanded={open}
-          className="w-full justify-between font-normal"
-        >
-          {props.value || 'Select a timezone'}
-          <ChevronsUpDown className="opacity-50" aria-hidden />
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent align="start" className="w-(--radix-popover-trigger-width) p-0">
-        <Command>
-          <CommandInput placeholder="Search timezones…" />
-          <CommandList>
-            <CommandEmpty>No matching timezone.</CommandEmpty>
-            <CommandGroup>
-              {zones.map((zone) => (
-                <CommandItem
-                  key={zone}
-                  value={zone}
-                  onSelect={() => {
-                    props.onChange(zone)
-                    setOpen(false)
-                  }}
-                >
-                  {zone}
-                  {zone === props.value && <Check className="ml-auto size-4" aria-hidden />}
-                </CommandItem>
-              ))}
-            </CommandGroup>
-          </CommandList>
-        </Command>
-      </PopoverContent>
-    </Popover>
   )
 }
 

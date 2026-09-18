@@ -169,6 +169,9 @@ describe('the Roles panel', () => {
     const user = userEvent.setup()
     renderSettings()
 
+    // Settings opens on Business; the Roles panel is a tab away.
+    await user.click(await screen.findByRole('tab', { name: 'Roles' }))
+
     await user.click(await screen.findByRole('button', { name: 'New role' }))
     await user.type(screen.getByLabelText('Name'), 'Stylist')
     // Two on, from two different groups — the grouping must not lose one.
@@ -191,6 +194,9 @@ describe('the Roles panel', () => {
     const user = userEvent.setup()
     renderSettings()
 
+    // Settings opens on Business; the Roles panel is a tab away.
+    await user.click(await screen.findByRole('tab', { name: 'Roles' }))
+
     const card = (await screen.findByText('Receptionist')).closest('[data-slot="card"]')!
     await user.click(within(card as HTMLElement).getByRole('button', { name: 'Edit' }))
     // It starts on, because the role holds it.
@@ -210,6 +216,9 @@ describe('the Roles panel', () => {
     const user = userEvent.setup()
     renderSettings()
 
+    // Settings opens on Business; the Roles panel is a tab away.
+    await user.click(await screen.findByRole('tab', { name: 'Roles' }))
+
     await user.click(await screen.findByRole('button', { name: 'New role' }))
 
     expect(screen.getByText('See the appointment calendar.')).toBeInTheDocument()
@@ -220,6 +229,9 @@ describe('the Roles panel', () => {
     fakeServer()
     const user = userEvent.setup()
     renderSettings()
+
+    // Settings opens on Business; the Roles panel is a tab away.
+    await user.click(await screen.findByRole('tab', { name: 'Roles' }))
 
     const card = (await screen.findByText('Administrator')).closest('[data-slot="card"]')!
     expect(within(card as HTMLElement).getByText('Built-in')).toBeInTheDocument()
@@ -232,7 +244,11 @@ describe('the Roles panel', () => {
 
   it('offers no delete on a built-in role, and disables it on one in use', async () => {
     fakeServer()
+    const user = userEvent.setup()
     renderSettings()
+
+    // Settings opens on Business; the Roles panel is a tab away.
+    await user.click(await screen.findByRole('tab', { name: 'Roles' }))
 
     const builtIn = (await screen.findByText('Staff')).closest('[data-slot="card"]')!
     expect(within(builtIn as HTMLElement).queryByRole('button', { name: /delete/i })).toBeNull()
@@ -242,6 +258,9 @@ describe('the Roles panel', () => {
     const server = fakeServer()
     const user = userEvent.setup()
     renderSettings()
+
+    // Settings opens on Business; the Roles panel is a tab away.
+    await user.click(await screen.findByRole('tab', { name: 'Roles' }))
 
     const card = (await screen.findByText('Receptionist')).closest('[data-slot="card"]')!
     await user.click(within(card as HTMLElement).getByRole('button', { name: /Delete Receptionist/ }))

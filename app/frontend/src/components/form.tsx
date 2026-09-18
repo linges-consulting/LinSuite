@@ -1,4 +1,5 @@
 import type { FormEvent } from 'react'
+import { BrandMark } from '@/components/brand-mark'
 import { Label } from '@/components/ui/label'
 
 /**
@@ -8,10 +9,7 @@ import { Label } from '@/components/ui/label'
 export function AuthLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-dvh flex-col items-center justify-center gap-6 p-4">
-      <div className="flex items-center gap-2.5 font-semibold">
-        <span aria-hidden className="size-6 rounded-md bg-primary" />
-        LinSuite
-      </div>
+      <BrandMark className="flex items-center gap-2.5 font-semibold" />
       <div className="w-full max-w-md">{children}</div>
     </div>
   )

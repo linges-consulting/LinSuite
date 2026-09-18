@@ -37,6 +37,6 @@ test('entering Admin Mode with no window open asks for the password', async () =
 
   await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   expect(screen.getByRole('button', { name: /Switch mode/ })).toHaveTextContent('Admin Mode')
-  expect(await screen.findByText('Cedar Lane Clinic')).toBeInTheDocument()
+  expect(await screen.findByText('Business profile')).toBeInTheDocument()
 })
 

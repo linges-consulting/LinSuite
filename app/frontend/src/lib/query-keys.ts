@@ -11,3 +11,7 @@ export const CAPABILITIES = ['capabilities'] as const
 export const ACCOUNTS = ['accounts'] as const
 export const MFA = ['mfa'] as const
 export const SECURITY = ['security-policy'] as const
+/** The public branding document: read by the shell, invalidated by the Branding panel. */
+export const BRANDING_DOCUMENT = ['branding'] as const
+export const BUSINESS = ['business'] as const
+export const BRANDING = ['business-branding'] as const

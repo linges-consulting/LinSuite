@@ -15,6 +15,29 @@ Three layers. Components only ever use layer 2 via Tailwind utilities (layer 3).
 | `--brand-primary` / `-foreground` | `#1d4ed8` / `#fff` | primary buttons, active states, focus ring, links |
 | `--brand-primary-dark` / `-foreground` | `#60a5fa` / `#0f172a` | the same roles on dark surfaces (a dark brand colour is unreadable on slate-950) |
 | `--brand-secondary` / `-foreground` | `#0f766e` / `#fff` | accents: calendar highlights, secondary chart series. Never buttons. |
+| `--brand-secondary-dark` / `-foreground` | `#68b5ac` / `#0f172a` | the same, on dark surfaces |
+
+A business sets only `--brand-primary` and `--brand-secondary`. The other four are **derived**,
+server-side, in `app/backend/src/settings/branding.py` — one implementation, which the Branding
+screen's live preview asks for rather than re-deriving in TypeScript.
+
+- **The dark variant** raises the colour's Oklab lightness to `L = 0.72` and keeps 90% of its
+  chroma. Oklab because its lightness axis is perceptually uniform: scaling `#rrggbb` toward
+  `#ffffff` in sRGB shifts hue (blues go violet, reds go pink), and the result is a different
+  colour rather than a lighter one. Chroma is pulled back slightly because full saturation at
+  that lightness reads as neon. `#1d4ed8` derives to `#659dff`, against the `#60a5fa` that was
+  chosen by hand for the default — close enough that the rule and the taste agree.
+- **The foreground** is whichever of `#ffffff` and `#0f172a` has the higher WCAG contrast on
+  the colour.
+- **Contrast is reported, never enforced.** The Branding screen shows the ratio of text on each
+  brand surface in both themes and warns below 4.5:1 — and saves anyway. It is the business's
+  own brand; an application that refused a logo colour would be wrong about whose decision that is.
+
+Two indirections make the white-label swap free: `--primary` resolves to `--brand-primary` on
+`:root`/`.light` and to `--brand-primary-dark` under `.dark`, and `--accent-brand` does the same
+for the secondary. Components use `bg-primary` / `bg-brand-secondary` and never know which theme
+they are in. `.light` exists so a nested element — the Branding preview panel — can carry the
+light palette inside a dark page, exactly as `.dark` already did the reverse.
 
 **2. Semantic** — `background`, `foreground`, `card`, `popover`, `primary`, `secondary` (neutral, *not* brand),
 `muted`, `accent`, `border`, `input`, `ring`, `sidebar-*`, and status: `destructive`, `success`, `warning`, `info`.
