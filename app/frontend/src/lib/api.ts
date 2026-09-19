@@ -709,6 +709,125 @@ export async function reactivateResource(id: string): Promise<ResourceRow> {
   return res.json()
 }
 
+// --- availability: working hours, time off, closures -------------------------------------
+
+/**
+ * One working block of the weekly matrix. `weekday` is ISO with Monday = 0, and the two
+ * minutes are **minutes since local midnight** — not a UTC instant, and not a time string
+ * with an offset. "Works Mondays 09:00–12:00" is a rule about a clock face, and storing it
+ * any other way would slide every schedule by an hour at each DST boundary (PRD §1).
+ *
+ * `end_minute` may be 1440, which is a block that runs to midnight.
+ */
+export type HoursBlock = {
+  weekday: number
+  start_minute: number
+  end_minute: number
+}
+
+export async function fetchStaffHours(staffId: string): Promise<HoursBlock[]> {
+  const res = await fetch(`/api/admin/staff/${staffId}/hours`)
+  if (!res.ok) throw await failure(res, 'Could not load the working hours')
+  return (await res.json()).blocks
+}
+
+/** The whole week at once — the screen is a matrix, and a per-block API would let a
+ *  half-applied week exist. A 409 means two blocks on one day overlap. */
+export async function replaceStaffHours(
+  staffId: string,
+  blocks: HoursBlock[],
+): Promise<HoursBlock[]> {
+  const res = await send('PUT', `/api/admin/staff/${staffId}/hours`, { blocks })
+  if (!res.ok) throw await failure(res, 'Could not save the working hours')
+  return (await res.json()).blocks
+}
+
+/**
+ * One absence. The instants are what the scheduler reads; the local fields are the same span
+ * as somebody entered it, sent by the server so this screen never has to work out which
+ * local day an instant falls on.
+ */
+export type TimeOffEntry = {
+  id: string
+  all_day: boolean
+  reason: string | null
+  starts_at: string
+  ends_at: string
+  starts_at_local: string
+  ends_at_local: string
+  /** Local calendar dates. For an all-day range, `end_date` is the last day away — inclusive. */
+  start_date: string
+  end_date: string
+}
+
+/** All-day takes local dates; a timed absence takes local datetimes with **no** offset —
+ *  the server converts with the business timezone and refuses anything carrying one. */
+export type TimeOffDraft =
+  | { all_day: true; start_date: string; end_date?: string; reason: string | null }
+  | {
+      all_day: false
+      starts_at_local: string
+      ends_at_local: string
+      reason: string | null
+    }
+
+export async function fetchTimeOff(staffId: string): Promise<TimeOffEntry[]> {
+  const res = await fetch(`/api/staff/${staffId}/time-off`)
+  if (!res.ok) throw await failure(res, 'Could not load the time off')
+  return (await res.json()).time_off
+}
+
+export async function createTimeOff(
+  staffId: string,
+  draft: TimeOffDraft,
+): Promise<TimeOffEntry> {
+  const res = await send('POST', `/api/staff/${staffId}/time-off`, draft)
+  if (!res.ok) throw await failure(res, 'Could not save the time off')
+  return res.json()
+}
+
+export async function deleteTimeOff(staffId: string, entryId: string): Promise<void> {
+  const res = await send('DELETE', `/api/staff/${staffId}/time-off/${entryId}`)
+  if (!res.ok) throw await failure(res, 'Could not remove the time off')
+}
+
+/** A day the business is shut. `source` is a label, not a rule: a statutory holiday and a
+ *  staff retreat block bookings identically. */
+export type Closure = {
+  id: string
+  /** A local calendar date, `YYYY-MM-DD`. */
+  date: string
+  name: string
+  source: 'manual' | 'statutory'
+}
+
+export async function fetchClosures(year: number): Promise<Closure[]> {
+  const res = await fetch(`/api/admin/closures?year=${year}`)
+  if (!res.ok) throw await failure(res, 'Could not load the closures')
+  return (await res.json()).closures
+}
+
+export async function addClosure(draft: { date: string; name: string }): Promise<Closure> {
+  const res = await send('POST', '/api/admin/closures', draft)
+  if (!res.ok) throw await failure(res, 'Could not add the closure')
+  return res.json()
+}
+
+/** A year of the business province's statutory holidays. Dates already present are skipped,
+ *  so pressing it twice is free and a deleted holiday stays deleted. */
+export async function importStatutoryClosures(
+  year: number,
+): Promise<{ added: number; skipped: number; closures: Closure[] }> {
+  const res = await send('POST', `/api/admin/closures/import-statutory?year=${year}`, {})
+  if (!res.ok) throw await failure(res, 'Could not import the holidays')
+  return res.json()
+}
+
+export async function deleteClosure(id: string): Promise<void> {
+  const res = await send('DELETE', `/api/admin/closures/${id}`)
+  if (!res.ok) throw await failure(res, 'Could not remove the closure')
+}
+
 export type SecurityPolicy = {
   mfa_required_for_admin: boolean
   mfa_email_otp_allowed: boolean

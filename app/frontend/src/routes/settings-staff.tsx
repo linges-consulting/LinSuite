@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   BadgeCheck,
+  CalendarClock,
+  CalendarOff,
   LockOpen,
   MailPlus,
   MoreHorizontal,
@@ -61,6 +63,7 @@ import {
 } from '@/lib/api'
 import { ROLES, STAFF, STAFF_PALETTE } from '@/lib/query-keys'
 import { clockTime } from '@/lib/throttle'
+import { HoursDialog, TimeOffDialog } from '@/routes/staff-availability'
 
 /**
  * Settings → Staff: who works here, what they are licensed to do, and what they earn on it
@@ -86,6 +89,10 @@ export function StaffPanel() {
   const palette = useQuery({ queryKey: STAFF_PALETTE, queryFn: fetchStaffPalette })
   const [editing, setEditing] = useState<StaffRow | null>(null)
   const [creating, setCreating] = useState(false)
+  // The two availability editors are their own screens hanging off a row, not fields on the
+  // staff form: that form edits who somebody is, these edit when they work.
+  const [hoursFor, setHoursFor] = useState<StaffRow | null>(null)
+  const [timeOffFor, setTimeOffFor] = useState<StaffRow | null>(null)
 
   if (staff.isPending || roles.isPending || palette.isPending) {
     return <Skeleton className="h-64 w-full" />
@@ -147,6 +154,8 @@ export function StaffPanel() {
               roles={roleOptions}
               palette={palette.data ?? []}
               onEdit={() => setEditing(member)}
+              onHours={() => setHoursFor(member)}
+              onTimeOff={() => setTimeOffFor(member)}
             />
           ))}
         </TableBody>
@@ -167,6 +176,8 @@ export function StaffPanel() {
           onClose={() => setEditing(null)}
         />
       )}
+      {hoursFor && <HoursDialog member={hoursFor} onClose={() => setHoursFor(null)} />}
+      {timeOffFor && <TimeOffDialog member={timeOffFor} onClose={() => setTimeOffFor(null)} />}
     </div>
   )
 }
@@ -198,6 +209,8 @@ function StaffLine(props: {
   roles: RoleOption[]
   palette: StaffColour[]
   onEdit: () => void
+  onHours: () => void
+  onTimeOff: () => void
 }) {
   const { member } = props
   const queryClient = useQueryClient()
@@ -332,6 +345,14 @@ function StaffLine(props: {
             <DropdownMenuItem onSelect={props.onEdit}>
               <Pencil aria-hidden />
               Edit
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={props.onHours}>
+              <CalendarClock aria-hidden />
+              Hours
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={props.onTimeOff}>
+              <CalendarOff aria-hidden />
+              Time off
             </DropdownMenuItem>
             <DropdownMenuItem
               disabled={!member.invite_pending || invite.isPending}

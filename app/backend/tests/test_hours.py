@@ -44,6 +44,9 @@ SETUP = {
 STAFF = "/api/admin/staff"
 CLOSURES = "/api/admin/closures"
 
+# Every address this module signs in as. See `claimed_instance`.
+ADDRESSES = (EMAIL, "rae@cedar.example", "deputy@cedar.example", "sched@cedar.example")
+
 
 @pytest.fixture(autouse=True)
 async def claimed_instance(client):
@@ -64,7 +67,13 @@ async def claimed_instance(client):
         await db.execute(text("DELETE FROM roles WHERE NOT is_system"))
         await db.commit()
 
-    from auth import setup
+    from auth import setup, throttle
+    from core.redis import get_redis
+
+    # Redis outlives the database reset, and every module in this suite signs in as the same
+    # address. An earlier module's failed attempt would otherwise land this one's first login
+    # inside the progressive delay — a throttle doing its job, on a test that is not about it.
+    await get_redis().delete(*(throttle.delay_key(e) for e in ADDRESSES))
 
     async with session_scope() as db:
         token = await setup.bootstrap_setup_token(db)

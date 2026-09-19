@@ -16,6 +16,12 @@ export const STAFF_PALETTE = ['staff-palette'] as const
  *  on one tab must invalidate what the other tab has cached too, and a shared prefix does
  *  that in one call. */
 export const RESOURCES = ['resources'] as const
+/** One staff member's weekly matrix, and one staff member's absences. Both take the staff
+ *  id as a second element, so a prefix invalidation clears every person the tab has seen. */
+export const STAFF_HOURS = ['staff-hours'] as const
+export const TIME_OFF = ['time-off'] as const
+/** The days the business is shut, by year. */
+export const CLOSURES = ['closures'] as const
 export const MFA = ['mfa'] as const
 export const SECURITY = ['security-policy'] as const
 /** The public branding document: read by the shell, invalidated by the Branding panel. */
