@@ -241,7 +241,9 @@ class Closure(Base):
     **No computation at read time, and no overrides table.** The alternative — deriving the
     holiday list on every availability query, with a second table saying which ones this
     business ignores — is two mechanisms for one answer. Importing a year writes rows, and
-    deleting one means the business works that day. That is the whole model.
+    deleting one means the business works that day. That is the whole model, and its one
+    sharp edge is that re-importing the same year adds a deleted statutory day back; the
+    screen says so before the delete rather than growing a tombstone table to prevent it.
     """
 
     __tablename__ = "closures"

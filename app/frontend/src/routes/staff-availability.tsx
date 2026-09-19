@@ -151,7 +151,7 @@ export function HoursDialog({ member, onClose }: { member: StaffRow; onClose: ()
                           <Input
                             type="time"
                             step={STEP_SECONDS}
-                            className="w-28"
+                            className="w-36"
                             aria-label={`${name} block ${index + 1} start`}
                             value={block.start}
                             onChange={(e) => change(weekday, index, 'start', e.target.value)}
@@ -162,7 +162,7 @@ export function HoursDialog({ member, onClose }: { member: StaffRow; onClose: ()
                           <Input
                             type="time"
                             step={STEP_SECONDS}
-                            className="w-28"
+                            className="w-36"
                             aria-label={`${name} block ${index + 1} end`}
                             value={block.end}
                             onChange={(e) => change(weekday, index, 'end', e.target.value)}

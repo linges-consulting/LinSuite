@@ -34,10 +34,11 @@ import { CLOSURES } from '@/lib/query-keys'
  * hand sits in the same list, because a staff retreat blocks bookings exactly as Canada Day
  * does. `source` only changes the badge and what an import is allowed to skip.
  *
- * **Deleting a statutory day is a decision, not a mistake.** A business that works Boxing Day
- * deletes it, and re-importing will not bring it back — the import skips dates already
- * present and adds nothing else. There is no overrides table, because there is nothing to
- * override: the row either exists or it does not.
+ * **Deleting one is how a business says it works that day.** There is no overrides table and
+ * nothing is computed at read time: the row exists or it does not. The consequence, which
+ * the copy has to be honest about, is that an import adds back a statutory day somebody
+ * deleted — it only skips dates already on the list. A tombstone would be a second mechanism
+ * for one answer, so the button warns instead.
  */
 export function ClosuresPanel() {
   const queryClient = useQueryClient()
@@ -71,7 +72,7 @@ export function ClosuresPanel() {
     mutationFn: (closure: Closure) => deleteClosure(closure.id),
     onSuccess: (_, closure) => {
       toast.success(`${closure.name} is no longer a closure`, {
-        description: 'Importing statutory holidays again will not bring it back.',
+        description: 'Importing statutory holidays again would add it back.',
       })
       refresh()
     },
@@ -169,7 +170,7 @@ export function ClosuresPanel() {
                         confirm(
                           `Remove ${closure.name} on ${closure.date}?\n\n` +
                             'The business can be booked that day again. Importing statutory ' +
-                            'holidays will not put it back.',
+                            'holidays for this year would add it back.',
                         )
                       )
                         remove.mutate(closure)

@@ -425,7 +425,9 @@ async def import_statutory(year: Year, admin: Administrator, db: SessionDep) -> 
     is what makes the button safe to press twice.
 
     Nothing is computed at read time and there is no overrides table: a statutory day somebody
-    deletes is simply a day this business works.
+    deletes is simply a day this business works, until somebody imports that year again. That
+    last clause is the honest cost of having no tombstones — one mechanism, one answer, and a
+    screen that warns rather than a second table to keep in step.
     """
     province = await db.scalar(select(Business.province).where(Business.id == 1))
     if not province:

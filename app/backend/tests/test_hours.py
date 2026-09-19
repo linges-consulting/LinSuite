@@ -613,8 +613,9 @@ async def test_an_import_never_overwrites_a_manual_closure_on_the_same_date(clie
     assert kept["source"] == "manual"
 
 
-async def test_a_statutory_day_can_be_deleted_and_stays_deleted(client):
-    """A business that works Boxing Day is not an error to be corrected on the next import."""
+async def test_a_statutory_day_can_be_deleted(client):
+    """A business that works Canada Day deletes it, and it is gone. No overrides table —
+    the row exists or it does not."""
     await as_admin(client)
     await client.post(f"{CLOSURES}/import-statutory?year=2026", json={})
     listed = (await client.get(f"{CLOSURES}?year=2026")).json()["closures"]
@@ -625,6 +626,26 @@ async def test_a_statutory_day_can_be_deleted_and_stays_deleted(client):
     assert removed.status_code == 204, removed.text
     after = (await client.get(f"{CLOSURES}?year=2026")).json()["closures"]
     assert "2026-07-01" not in {c["date"] for c in after}
+
+
+async def test_re_importing_a_year_adds_back_a_deleted_statutory_day(client):
+    """The honest cost of keeping no tombstones, pinned rather than left to be discovered.
+
+    The import's only skip rule is "a row for this date already exists", so a deleted one is
+    not remembered. That is one mechanism with one answer rather than two tables to keep in
+    step — and the screen warns before the delete, which is where the cost is paid.
+    """
+    await as_admin(client)
+    await client.post(f"{CLOSURES}/import-statutory?year=2026", json={})
+    listed = (await client.get(f"{CLOSURES}?year=2026")).json()["closures"]
+    canada_day = next(c for c in listed if c["date"] == "2026-07-01")
+    await remove(client, f"{CLOSURES}/{canada_day['id']}")
+
+    again = await client.post(f"{CLOSURES}/import-statutory?year=2026", json={})
+
+    assert again.json()["added"] == 1
+    after = (await client.get(f"{CLOSURES}?year=2026")).json()["closures"]
+    assert "2026-07-01" in {c["date"] for c in after}
 
 
 async def test_importing_without_a_province_says_so(client):
