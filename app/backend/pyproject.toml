@@ -21,6 +21,7 @@ dependencies = [
     "cryptography>=43",
     "pillow>=11",
     "python-multipart>=0.0.20",
+    "holidays>=0.104",
 ]
 
 [dependency-groups]
