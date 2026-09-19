@@ -45,8 +45,9 @@ from core.config import get_settings
 from core.db import SessionDep
 from core.models import Business
 from notifications.tasks import send_email
+from scheduling._admin_forms import blank_to_none, known_colour, refuse, refuse_emptied_field
 from scheduling.models import MAX_BASIS_POINTS, Staff
-from scheduling.palette import BY_KEY, PALETTE, next_free
+from scheduling.palette import PALETTE, next_free
 
 log = logging.getLogger(__name__)
 
@@ -129,11 +130,6 @@ Rate = Annotated[int, Field(ge=0, le=MAX_BASIS_POINTS)]
 Name = Annotated[str, Field(min_length=1, max_length=100)]
 
 
-def _blank_to_none(value: str | None) -> str | None:
-    """A cleared text input sends `""`, and an empty licence number is not a short one."""
-    return value.strip() or None if isinstance(value, str) else value
-
-
 class StaffFields(BaseModel):
     """Everything an administrator sets, on create and on edit alike."""
 
@@ -155,7 +151,7 @@ class StaffFields(BaseModel):
     @field_validator("designation", "licence_number", "display_name", mode="after")
     @classmethod
     def _trimmed(cls, value: str | None) -> str | None:
-        return _blank_to_none(value)
+        return blank_to_none(value)
 
     @field_validator("first_name", "last_name", mode="after")
     @classmethod
@@ -168,9 +164,7 @@ class StaffFields(BaseModel):
     @field_validator("colour")
     @classmethod
     def _known_colour(cls, value: str | None) -> str | None:
-        if value is not None and value not in BY_KEY:
-            raise ValueError("not one of the staff colours")
-        return value
+        return known_colour(value)
 
 
 class StaffCreate(StaffFields):
@@ -223,21 +217,12 @@ class StaffPatch(BaseModel):
     def _trimmed(cls, value: str | None) -> str | None:
         # A string of spaces passes `min_length` and is not a value. It becomes null, which
         # the handler then refuses for a required field and recomputes for `display_name`.
-        return _blank_to_none(value)
+        return blank_to_none(value)
 
     @field_validator("colour")
     @classmethod
     def _known_colour(cls, value: str | None) -> str | None:
-        if value is not None and value not in BY_KEY:
-            raise ValueError("not one of the staff colours")
-        return value
-
-
-def _refuse(field: str, message: str) -> HTTPException:
-    """Shaped like FastAPI's own 422, so the frontend reads one error format."""
-    return HTTPException(
-        status_code=422, detail=[{"type": "value_error", "loc": ["body", field], "msg": message}]
-    )
+        return known_colour(value)
 
 
 _CREDENTIALS = (
@@ -251,7 +236,7 @@ _CREDENTIAL_FIELDS = ("is_practitioner", "designation", "licence_number")
 
 def _assert_credentials(staff: Staff) -> None:
     if staff.is_practitioner and not (staff.designation and staff.licence_number):
-        raise _refuse("licence_number" if staff.designation else "designation", _CREDENTIALS)
+        raise refuse("licence_number" if staff.designation else "designation", _CREDENTIALS)
 
 
 # --- reading ------------------------------------------------------------------------------
@@ -378,14 +363,8 @@ async def update_staff(
     staff, user = await _load(db, staff_id)
     sent = payload.model_dump(exclude_unset=True)
 
-    # Before anything is set. Blind-copying a null onto one of these reaches the database as a
-    # NOT NULL violation at commit, which the caller would read as a 500 — an answer that says
-    # the server broke rather than that the request asked for something it cannot have.
-    emptied = [field for field in _NOT_NULLABLE if sent.get(field, ...) is None]
-    if emptied:
-        raise _refuse(
-            emptied[0], "This cannot be emptied. Send a value, or leave the field out to keep it."
-        )
+    # Before anything is set — see `_admin_forms.refuse_emptied_field`.
+    refuse_emptied_field(sent, _NOT_NULLABLE)
 
     changed = []
     for field, value in sent.items():

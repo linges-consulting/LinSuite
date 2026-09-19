@@ -31,8 +31,8 @@ from auth.capabilities import Requires
 from auth.models import User
 from core.audit import record_event
 from core.db import SessionDep
+from scheduling._admin_forms import blank_to_none, known_colour, refuse_emptied_field
 from scheduling.models import Resource
-from scheduling.palette import BY_KEY
 
 router = APIRouter(prefix="/admin/resources", tags=["resources"])
 
@@ -71,17 +71,6 @@ def _out(resource: Resource) -> ResourceOut:
 Name = Annotated[str, Field(min_length=1, max_length=200)]
 
 
-def _blank_to_none(value: str | None) -> str | None:
-    """A cleared text input sends `""`, and an empty description is not a short one."""
-    return value.strip() or None if isinstance(value, str) else value
-
-
-def _known_colour(value: str | None) -> str | None:
-    if value is not None and value not in BY_KEY:
-        raise ValueError("not one of the staff colours")
-    return value
-
-
 class ResourceFields(BaseModel):
     """Everything an administrator sets, on create and on edit alike — `kind` excepted,
     which is only ever chosen once."""
@@ -102,12 +91,12 @@ class ResourceFields(BaseModel):
     @field_validator("description", mode="after")
     @classmethod
     def _trimmed(cls, value: str | None) -> str | None:
-        return _blank_to_none(value)
+        return blank_to_none(value)
 
     @field_validator("colour")
     @classmethod
     def _colour(cls, value: str | None) -> str | None:
-        return _known_colour(value)
+        return known_colour(value)
 
 
 class ResourceCreate(ResourceFields):
@@ -134,19 +123,12 @@ class ResourcePatch(BaseModel):
     def _trimmed(cls, value: str | None) -> str | None:
         # A string of spaces passes `min_length` and is not a value. It becomes null, which
         # the handler then refuses for `name` — the one required field here.
-        return _blank_to_none(value)
+        return blank_to_none(value)
 
     @field_validator("colour")
     @classmethod
     def _colour(cls, value: str | None) -> str | None:
-        return _known_colour(value)
-
-
-def _refuse(field: str, message: str) -> HTTPException:
-    """Shaped like FastAPI's own 422, so the frontend reads one error format."""
-    return HTTPException(
-        status_code=422, detail=[{"type": "value_error", "loc": ["body", field], "msg": message}]
-    )
+        return known_colour(value)
 
 
 def _duplicate(kind: str, name: str) -> HTTPException:
@@ -215,11 +197,8 @@ async def update_resource(
     resource = await _load(db, resource_id)
     sent = payload.model_dump(exclude_unset=True)
 
-    emptied = [field for field in _NOT_NULLABLE if sent.get(field, ...) is None]
-    if emptied:
-        raise _refuse(
-            emptied[0], "This cannot be emptied. Send a value, or leave the field out to keep it."
-        )
+    # Before anything is set — see `_admin_forms.refuse_emptied_field`.
+    refuse_emptied_field(sent, _NOT_NULLABLE)
 
     changed = []
     for field, value in sent.items():
