@@ -137,8 +137,24 @@ async def login(payload: LoginRequest, response: Response, db: SessionDep) -> Us
         # the wrong thing. It says the true thing instead, and yes, that confirms the address
         # exists — to somebody who already knows it was invited. The alternative is telling a
         # new colleague their password is wrong when they have never had one.
+        #
+        # Recorded and counted like any other refused attempt. Without that this would be the
+        # one door in the product that costs an attacker nothing and leaves no trace — and it
+        # is the door that answers "does this address exist", so it is exactly the one worth
+        # probing. The lockout is no obstacle to the person it belongs to: spending the
+        # invitation link clears it (`auth/passwords.py`).
+        record_event(
+            db,
+            "login.refused_no_password",
+            target_type="user",
+            target_id=str(user.id),
+            actor_user_id=None,
+            metadata={"email": email},
+        )
+        locked = await throttle.record_failure(db, email, user)
+        await db.commit()
         log.info("auth: sign-in refused for %s — the invitation has not been accepted", email)
-        raise Forbidden(
+        raise locked or Forbidden(
             PASSWORD_NOT_SET,
             "This account has not been set up yet. Open the link in your invitation email to "
             "choose a password, or ask an administrator to send another.",
@@ -162,12 +178,14 @@ async def login(payload: LoginRequest, response: Response, db: SessionDep) -> Us
         log.warning("auth: failed login for %s", email)
         raise locked or _REFUSED
 
-    await throttle.clear(email)
-
     # After the password, not before: a deactivated account must not be a way for somebody
     # holding only an address to learn that it exists. The credential was right and the
     # account is closed, which is a different fact from a wrong password and gets its own
     # code so the sign-in screen can say so instead of offering a password reset.
+    #
+    # And before `throttle.clear`, deliberately: a refused sign-in must not reset the failure
+    # run and the offence tier. Clearing here would hand anybody holding a deactivated
+    # account's password an unlimited way to wipe the lockout state off that address.
     if not await db.scalar(select(Staff.active).where(Staff.user_id == user.id)):
         record_event(
             db,
@@ -184,6 +202,7 @@ async def login(payload: LoginRequest, response: Response, db: SessionDep) -> Us
             "This account has been deactivated. Ask an administrator to restore it.",
         )
 
+    await throttle.clear(email)
     issued = issue_token(user.id)
     set_session_cookie(response, issued)
     claims = decode_token(issued.token)

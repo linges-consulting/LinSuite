@@ -157,6 +157,14 @@ class StaffFields(BaseModel):
     def _trimmed(cls, value: str | None) -> str | None:
         return _blank_to_none(value)
 
+    @field_validator("first_name", "last_name", mode="after")
+    @classmethod
+    def _real_name(cls, value: str) -> str:
+        # `min_length` lets a string of spaces through, and " " is not a name.
+        if not value.strip():
+            raise ValueError("this cannot be blank")
+        return value.strip()
+
     @field_validator("colour")
     @classmethod
     def _known_colour(cls, value: str | None) -> str | None:
@@ -170,10 +178,31 @@ class StaffCreate(StaffFields):
     role_id: uuid.UUID
 
 
+# The columns with no "absent" state. `None` on one of these is a request to delete a fact
+# the row cannot be without — it would be a NOT NULL violation at commit, and a 500 for the
+# caller — so it is refused at the boundary. Every field here is `… | None` only because
+# "leave it alone" and "set it" have to be told apart on a PATCH.
+_NOT_NULLABLE = (
+    "first_name",
+    "last_name",
+    "is_practitioner",
+    "commission_rate_services_bp",
+    "commission_rate_retail_bp",
+    "colour",
+    "max_concurrent_appointments",
+    "sort_order",
+)
+
+
 class StaffPatch(BaseModel):
     """Every field optional, and the credentials are checked against the result rather than
     against what was sent: turning `is_practitioner` on without a licence in the same request
-    is the mistake this has to catch."""
+    is the mistake this has to catch.
+
+    `designation` and `licence_number` are the only two that may be sent as null — that is
+    somebody ceasing to be a practitioner. `display_name` sent as null is the third case and
+    not a deletion: blank means "call them by their name", which the handler recomputes.
+    """
 
     first_name: Annotated[str | None, Field(min_length=1, max_length=100)] = None
     last_name: Annotated[str | None, Field(min_length=1, max_length=100)] = None
@@ -187,9 +216,13 @@ class StaffPatch(BaseModel):
     max_concurrent_appointments: Annotated[int | None, Field(ge=1)] = None
     sort_order: int | None = None
 
-    @field_validator("designation", "licence_number", mode="after")
+    @field_validator(
+        "designation", "licence_number", "display_name", "first_name", "last_name", mode="after"
+    )
     @classmethod
     def _trimmed(cls, value: str | None) -> str | None:
+        # A string of spaces passes `min_length` and is not a value. It becomes null, which
+        # the handler then refuses for a required field and recomputes for `display_name`.
         return _blank_to_none(value)
 
     @field_validator("colour")
@@ -343,12 +376,35 @@ async def update_staff(
     staff_id: uuid.UUID, payload: StaffPatch, admin: StaffManager, db: SessionDep
 ) -> StaffOut:
     staff, user = await _load(db, staff_id)
+    sent = payload.model_dump(exclude_unset=True)
+
+    # Before anything is set. Blind-copying a null onto one of these reaches the database as a
+    # NOT NULL violation at commit, which the caller would read as a 500 — an answer that says
+    # the server broke rather than that the request asked for something it cannot have.
+    emptied = [field for field in _NOT_NULLABLE if sent.get(field, ...) is None]
+    if emptied:
+        raise _refuse(
+            emptied[0], "This cannot be emptied. Send a value, or leave the field out to keep it."
+        )
 
     changed = []
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    for field, value in sent.items():
+        # Applied after the names below, because clearing it means "recompute from them".
+        if field == "display_name":
+            continue
         if getattr(staff, field) != value:
             setattr(staff, field, value)
             changed.append(field)
+
+    if "display_name" in sent:
+        # Blank means "call them by their name", which is what the form's hint promises. The
+        # fallback is read off the row, so a request that renames and clears in one go gets
+        # the new name rather than the old one.
+        wanted = sent["display_name"] or f"{staff.first_name} {staff.last_name}".strip()
+        if staff.display_name != wanted:
+            staff.display_name = wanted
+            changed.append("display_name")
+
     _assert_credentials(staff)
 
     if changed:

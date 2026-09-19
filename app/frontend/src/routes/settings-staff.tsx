@@ -173,15 +173,23 @@ export function StaffPanel() {
 
 type RoleOption = { id: string; name: string }
 
-/** The swatch the calendar will paint this person's appointments with. */
+/**
+ * The swatch the calendar will paint this person's appointments with.
+ *
+ * The dot itself carries no information a screen reader can reach — `title` on a `span` is
+ * not announced — so the colour's name rides beside it, visible only to one.
+ */
 function Swatch({ colour, label }: { colour?: StaffColour; label: string }) {
+  const name = colour?.name ?? label
   return (
-    <span
-      aria-hidden
-      title={colour?.name ?? label}
-      className="size-3 shrink-0 rounded-full ring-1 ring-foreground/10"
-      style={{ backgroundColor: colour?.hex ?? 'transparent' }}
-    />
+    <>
+      <span
+        aria-hidden
+        className="size-3 shrink-0 rounded-full ring-1 ring-foreground/10"
+        style={{ backgroundColor: colour?.hex ?? 'transparent' }}
+      />
+      <span className="sr-only">Calendar colour: {name}</span>
+    </>
   )
 }
 
@@ -430,7 +438,9 @@ function StaffDialog(props: {
   const draft: StaffDraft = {
     first_name: firstName.trim(),
     last_name: lastName.trim(),
-    display_name: displayName.trim() || null,
+    // A cleared field means "call them by their name", so the name is what goes — not a null
+    // the server would have to interpret. The hint under the input says the same thing.
+    display_name: displayName.trim() || suggested || null,
     is_practitioner: isPractitioner,
     designation: isPractitioner ? designation.trim() || null : null,
     licence_number: isPractitioner ? licence.trim() || null : null,
@@ -489,7 +499,7 @@ function StaffDialog(props: {
               </Field>
               <Field label="Role" htmlFor="staff-role">
                 <Select value={roleId} onValueChange={setRoleId}>
-                  <SelectTrigger id="staff-role">
+                  <SelectTrigger id="staff-role" className="w-full">
                     <SelectValue placeholder="Choose a role" />
                   </SelectTrigger>
                   <SelectContent>

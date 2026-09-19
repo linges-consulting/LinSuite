@@ -56,9 +56,11 @@ PALETTE_KEYS = (
 BACKFILL = f"""
 INSERT INTO staff (user_id, first_name, last_name, display_name, colour)
 SELECT u.id,
-       split_part(u.email, '@', 1),
+       -- Truncated, because `users.email` allows 320 characters and `first_name` allows 100:
+       -- a long local part would abort the whole upgrade on a `value too long` error.
+       left(split_part(u.email, '@', 1), 100),
        '',
-       split_part(u.email, '@', 1),
+       left(split_part(u.email, '@', 1), 100),
        (ARRAY[{", ".join(f"'{key}'" for key in PALETTE_KEYS)}])
          [(u.seat - 1) % {len(PALETTE_KEYS)} + 1]
 FROM (

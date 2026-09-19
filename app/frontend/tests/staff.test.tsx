@@ -302,6 +302,8 @@ describe('adding a staff member', () => {
     await user.type(screen.getByLabelText('Email'), 'ana@cedar.example')
     await user.type(screen.getByLabelText('First name'), 'Ana')
     await user.type(screen.getByLabelText('Last name'), 'Rossi')
+    // The role select fills its column rather than collapsing to its placeholder.
+    expect(screen.getByLabelText('Role').className).toContain('w-full')
     await user.click(screen.getByRole('button', { name: 'Rose' }))
     expect(screen.getByRole('button', { name: 'Rose' })).toHaveAttribute('aria-pressed', 'true')
     await user.click(screen.getByRole('button', { name: 'Add and send invitation' }))
@@ -314,6 +316,20 @@ describe('adding a staff member', () => {
 })
 
 describe('the roster', () => {
+  it('names the calendar colour for a screen reader, not just as a dot', async () => {
+    fakeServer()
+    const user = userEvent.setup()
+    renderStaff()
+    await openStaff(user)
+
+    const practitioner = (await screen.findByText('Ada Okonkwo')).closest('tr')!
+    // `title` on a span is not announced, so the swatch carries the name beside it.
+    expect(within(practitioner).getByText('Calendar colour: Blue')).toBeInTheDocument()
+    expect(within(screen.getByText('Theo Marsh').closest('tr')!).getByText(
+      'Calendar colour: Teal',
+    )).toBeInTheDocument()
+  })
+
   it('shows the practitioner credentials that a receipt will carry', async () => {
     fakeServer()
     const user = userEvent.setup()
@@ -328,6 +344,25 @@ describe('the roster', () => {
     expect(within(receptionist).queryByText(/RMT/)).toBeNull()
     // No password has ever been set on that account, and the row says so.
     expect(within(receptionist).getByText('Invited')).toBeInTheDocument()
+  })
+
+  it('sends the name instead of a null when the display name is cleared', async () => {
+    const server = fakeServer()
+    const user = userEvent.setup()
+    renderStaff()
+    await openStaff(user)
+
+    await openActions(user, 'owner@cedar.example')
+    await user.click(await screen.findByRole('menuitem', { name: 'Edit' }))
+    await user.clear(screen.getByLabelText('Display name'))
+    await user.click(screen.getByRole('button', { name: 'Save staff member' }))
+
+    // The hint says "leave blank to use their name". A null would be a request to delete a
+    // NOT NULL column; the name it falls back to is what the hint actually promises.
+    await waitFor(() => {
+      const patch = server.calls.find((c) => c.method === 'PATCH' && c.url.endsWith('/s1'))
+      expect(patch?.body.display_name).toBe('Ada Okonkwo')
+    })
   })
 
   it('edits a rate and sends only what changed', async () => {

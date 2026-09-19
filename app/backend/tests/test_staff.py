@@ -157,6 +157,15 @@ def test_every_palette_colour_carries_white_text():
         assert contrast(colour.hex, WHITE) >= 4.5, f"{colour.key} {colour.hex}"
 
 
+def test_every_palette_colour_is_legible_on_a_dark_calendar_too():
+    """The dark hex is derived rather than chosen (`settings/branding.py`), so nobody eyeballed
+    it. The same title is written on it, and DESIGN.md says dark is designed rather than
+    inherited — this is what stops a derivation change shipping an unreadable half."""
+    for colour in PALETTE:
+        ratio = contrast(colour.dark_hex, colour.dark_foreground)
+        assert ratio >= 4.5, f"{colour.key} {colour.dark_hex} on {colour.dark_foreground}"
+
+
 def test_palette_keys_and_hexes_are_unique():
     assert len({c.key for c in PALETTE}) == len(PALETTE)
     assert len({c.hex for c in PALETTE}) == len(PALETTE)
@@ -252,6 +261,26 @@ async def test_signing_in_before_the_invitation_is_accepted_is_refused_and_costs
     assert resp.status_code == 403, resp.text
     assert resp.json()["code"] == "password_not_set"
     assert hashed == []
+    # Recorded and counted, like any other refused attempt. This is the one answer in the
+    # product that confirms an address exists, so probing it must cost something and leave a
+    # trail — otherwise it is a free enumeration oracle nobody can see being used.
+    assert "login.refused_no_password" in await events()
+
+
+async def test_probing_an_unaccepted_invitation_costs_the_same_as_a_wrong_password(
+    client, sent_emails
+):
+    """The progressive delay is what makes repeating it expensive: the second probe is
+    refused by the throttle rather than answered, exactly as a second wrong password is."""
+    await as_admin(client)
+    await make(client)
+    client.cookies.clear()
+
+    first = await login(client, "ana@cedar.example", "wrong")
+    second = await login(client, "ana@cedar.example", "wrong")
+
+    assert first.status_code == 403
+    assert second.status_code == 429, second.text
 
 
 async def test_a_practitioner_without_credentials_is_refused(client):
@@ -375,6 +404,78 @@ async def test_editing_records_only_the_fields_that_changed(client, sent_emails)
     assert "licence_number" not in updated[0][1]
 
 
+async def test_clearing_the_display_name_falls_back_to_their_name(client, sent_emails):
+    """The form's hint says "leave blank to use their name", and a cleared text input sends
+    null. That is the one null on this endpoint that means something other than deletion."""
+    await as_admin(client)
+    staff = await make(client, display_name="Dr. Rossi")
+
+    resp = await client.patch(f"{STAFF}/{staff['id']}", json={"display_name": None})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["display_name"] == "Ana Rossi"
+
+
+async def test_clearing_and_renaming_at_once_uses_the_new_name(client, sent_emails):
+    await as_admin(client)
+    staff = await make(client, display_name="Dr. Rossi")
+
+    resp = await client.patch(
+        f"{STAFF}/{staff['id']}", json={"last_name": "Moreau", "display_name": None}
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["display_name"] == "Ana Moreau"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("first_name", None),
+        ("last_name", None),
+        ("colour", None),
+        ("is_practitioner", None),
+        ("commission_rate_services_bp", None),
+        ("commission_rate_retail_bp", None),
+        ("max_concurrent_appointments", None),
+        ("sort_order", None),
+        ("first_name", "   "),
+    ],
+)
+async def test_emptying_a_required_field_is_refused_rather_than_a_five_hundred(
+    client, sent_emails, field, value
+):
+    """Every field on the patch model is `… | None` so that "leave it alone" and "set it" can
+    be told apart — which means a null reaches a NOT NULL column unless something stops it.
+    Refused at the boundary, where the answer can name the field."""
+    await as_admin(client)
+    staff = await make(client)
+
+    resp = await client.patch(f"{STAFF}/{staff['id']}", json={field: value})
+
+    assert resp.status_code == 422, resp.text
+    async with session_scope() as db:
+        assert (
+            await db.scalar(text("SELECT first_name FROM staff WHERE id = :i"), {"i": staff["id"]})
+            == "Ana"
+        )
+
+
+async def test_the_two_credentials_are_the_ones_that_may_be_nulled(client, sent_emails):
+    """Somebody ceasing to be a practitioner. The row keeps its shape; the credentials go."""
+    await as_admin(client)
+    staff = await make(client)
+
+    resp = await client.patch(
+        f"{STAFF}/{staff['id']}",
+        json={"is_practitioner": False, "designation": None, "licence_number": None},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["designation"] is None
+    assert resp.json()["licence_number"] is None
+
+
 async def test_turning_somebody_into_a_practitioner_demands_credentials(client, sent_emails):
     await as_admin(client)
     staff = await make(
@@ -427,6 +528,31 @@ async def test_deactivating_ends_every_session_and_refuses_the_next_sign_in(clie
     refused = await login(client, "ana@cedar.example", INVITED_PASSWORD)
     assert refused.status_code == 403, refused.text
     assert refused.json()["code"] == "account_inactive"
+
+
+async def test_a_refused_sign_in_does_not_wipe_the_lockout_state(client, sent_emails):
+    """`throttle.clear` runs only for a sign-in that succeeds. Running it before the inactive
+    check would hand anybody holding a deactivated account's password an unlimited way to
+    reset the failure run and the offence tier on that address."""
+    await as_admin(client)
+    staff = await make(client)
+    await client.post(
+        "/api/auth/password-reset/confirm",
+        json={"token": invite_link(sent_emails[0]), "new_password": INVITED_PASSWORD},
+    )
+    client.cookies.clear()
+    await as_admin(client)
+    await client.post(f"{STAFF}/{staff['id']}/deactivate", json={})
+    client.cookies.clear()
+
+    wrong = await login(client, "ana@cedar.example", "not the password")
+    # The right password, and still refused — so if `clear` ran here the delay would be gone.
+    refused = await login(client, "ana@cedar.example", INVITED_PASSWORD)
+    after = await login(client, "ana@cedar.example", INVITED_PASSWORD)
+
+    assert wrong.status_code == 401
+    assert refused.status_code in (403, 429)
+    assert after.status_code == 429, after.text
 
 
 async def test_deactivating_preserves_the_row(client, sent_emails):
