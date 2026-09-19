@@ -642,6 +642,73 @@ export async function resetUserMfa(userId: string): Promise<void> {
   if (!res.ok) throw await failure(res, 'Could not reset the second factor')
 }
 
+// --- resources: spaces and equipment ----------------------------------------------------
+
+export type ResourceKind = 'space' | 'equipment'
+
+/** A space or a piece of equipment — the physical things a service is delivered in and
+ *  with. Both kinds share this shape; only `kind` tells them apart. */
+export type ResourceRow = {
+  id: string
+  kind: ResourceKind
+  name: string
+  description: string | null
+  /** A key from the server's staff palette, or null — a resource need not have one. */
+  colour: string | null
+  active: boolean
+  sort_order: number
+}
+
+/** What the create and edit forms send. `kind` is only sent on create — it is fixed once
+ *  a resource exists. */
+export type ResourceDraft = {
+  name: string
+  description: string | null
+  colour: string | null
+  sort_order: number
+}
+
+/** Inactive resources are left out unless asked for: they are history, not the picker. */
+export async function fetchResources(
+  kind: ResourceKind,
+  includeInactive = false,
+): Promise<ResourceRow[]> {
+  const query = new URLSearchParams({ kind })
+  if (includeInactive) query.set('include_inactive', 'true')
+  const res = await fetch(`/api/admin/resources?${query}`)
+  if (!res.ok) throw await failure(res, 'Could not load the resources')
+  return (await res.json()).resources
+}
+
+export async function createResource(
+  draft: ResourceDraft & { kind: ResourceKind },
+): Promise<ResourceRow> {
+  const res = await send('POST', '/api/admin/resources', draft)
+  if (!res.ok) throw await failure(res, 'Could not create the resource')
+  return res.json()
+}
+
+export async function updateResource(
+  id: string,
+  draft: Partial<ResourceDraft>,
+): Promise<ResourceRow> {
+  const res = await send('PATCH', `/api/admin/resources/${id}`, draft)
+  if (!res.ok) throw await failure(res, 'Could not save the resource')
+  return res.json()
+}
+
+export async function deactivateResource(id: string): Promise<ResourceRow> {
+  const res = await send('POST', `/api/admin/resources/${id}/deactivate`, {})
+  if (!res.ok) throw await failure(res, 'Could not deactivate the resource')
+  return res.json()
+}
+
+export async function reactivateResource(id: string): Promise<ResourceRow> {
+  const res = await send('POST', `/api/admin/resources/${id}/reactivate`, {})
+  if (!res.ok) throw await failure(res, 'Could not reactivate the resource')
+  return res.json()
+}
+
 export type SecurityPolicy = {
   mfa_required_for_admin: boolean
   mfa_email_otp_allowed: boolean

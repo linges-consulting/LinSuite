@@ -12,6 +12,10 @@ export const CAPABILITIES = ['capabilities'] as const
 export const STAFF = ['staff'] as const
 /** The curated colours. Served by the backend, so the calendar and the picker agree. */
 export const STAFF_PALETTE = ['staff-palette'] as const
+/** Spaces and equipment. One key, filtered by `kind` in the query itself — a space created
+ *  on one tab must invalidate what the other tab has cached too, and a shared prefix does
+ *  that in one call. */
+export const RESOURCES = ['resources'] as const
 export const MFA = ['mfa'] as const
 export const SECURITY = ['security-policy'] as const
 /** The public branding document: read by the shell, invalidated by the Branding panel. */

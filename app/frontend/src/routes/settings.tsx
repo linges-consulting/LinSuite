@@ -1,6 +1,7 @@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { BrandingPanel } from '@/routes/settings-branding'
 import { BusinessPanel } from '@/routes/settings-business'
+import { ResourcesPanel } from '@/routes/settings-resources'
 import { RolesPanel } from '@/routes/settings-roles'
 import { SecurityPanel } from '@/routes/settings-security'
 import { StaffPanel } from '@/routes/settings-staff'
@@ -24,6 +25,7 @@ export function SettingsPage() {
         <TabsTrigger value="branding">Branding</TabsTrigger>
         <TabsTrigger value="roles">Roles</TabsTrigger>
         <TabsTrigger value="staff">Staff</TabsTrigger>
+        <TabsTrigger value="resources">Resources</TabsTrigger>
         <TabsTrigger value="security">Security</TabsTrigger>
       </TabsList>
       <TabsContent value="business">
@@ -37,6 +39,9 @@ export function SettingsPage() {
       </TabsContent>
       <TabsContent value="staff">
         <StaffPanel />
+      </TabsContent>
+      <TabsContent value="resources">
+        <ResourcesPanel />
       </TabsContent>
       <TabsContent value="security">
         <SecurityPanel />

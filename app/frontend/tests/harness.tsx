@@ -217,7 +217,7 @@ export function stubApi({
     email: 'owner@cedar.example',
     role: dualRole ? 'Administrator' : 'Staff',
     capabilities: dualRole
-      ? ['admin', 'roles.manage', 'users.manage', 'schedule.view']
+      ? ['admin', 'roles.manage', 'users.manage', 'catalog.manage', 'schedule.view']
       : ['schedule.view', 'customers.view'],
     mode: granted() ? mode : 'staff',
     can_switch_modes: dualRole,
