@@ -20,6 +20,11 @@ LOGO_MAX_BYTES = 1024 * 1024
 FAVICON_MAX_BYTES = 256 * 1024
 LOGO_MAX_PX = 512
 FAVICON_MAX_PX = 64
+# The byte cap does not bound the *decoded* image: PNG compresses flat colour so well that a
+# megabyte of it is a 20000x20000 bitmap, which is 1.6 GB of RAM the moment Pillow decodes it.
+# So the header's dimensions are checked before anything is decoded. Fifty megapixels is a
+# generous ceiling for a mark that ends up 512 pixels wide.
+MAX_PIXELS = 50_000_000
 
 PNG = b"\x89PNG\r\n\x1a\n"
 JPEG = b"\xff\xd8\xff"
@@ -57,8 +62,19 @@ def normalise(data: bytes, *, allowed: tuple[str, ...], max_px: int) -> tuple[by
             + " or ".join(fmt.upper() for fmt in allowed)
             + " image. SVG is not accepted, because it can carry script.",
         )
+    # Pillow's own bomb guard raises here for anything past twice *its* ceiling, which is a
+    # size question and so a 413 like the others. Everything below that ceiling it merely
+    # warns about, which is what the explicit check is for.
     try:
+        # `open` reads the header only, so the dimensions are known before any pixels are.
         image = Image.open(io.BytesIO(data))
+    except Image.DecompressionBombError:
+        raise Rejected(413, "That image is too large to decode. Resize it first.") from None
+    except Exception:
+        raise Rejected(415, "That file could not be read as an image.") from None
+    if image.width * image.height > MAX_PIXELS:
+        raise Rejected(413, f"That image is {image.width}x{image.height}. Resize it first.")
+    try:
         image.load()
     except Exception:
         raise Rejected(415, "That file could not be read as an image.") from None

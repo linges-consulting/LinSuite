@@ -393,6 +393,24 @@ async def test_an_oversized_logo_is_refused(client):
     assert resp.status_code == 413, resp.text
 
 
+@pytest.mark.parametrize("side", [15_000, 20_000])
+async def test_a_decompression_bomb_is_refused_before_it_is_decoded(client, side):
+    """Well under the byte cap, and gigabytes of RAM the moment anything decodes it.
+
+    Two sizes on purpose: Pillow raises on its own past twice its ceiling (20000²), and only
+    warns below it (15000²) — which is the band `MAX_PIXELS` exists to cover. Both answer 413,
+    because to the person uploading they are the same mistake.
+    """
+    await as_admin(client)
+    bomb = io.BytesIO()
+    Image.new("L", (side, side)).save(bomb, "PNG")
+    assert len(bomb.getvalue()) < 1024 * 1024
+
+    resp = await upload(client, f"{BUSINESS}/logo", bomb.getvalue())
+
+    assert resp.status_code == 413, resp.text
+
+
 @pytest.mark.parametrize(
     "name,content_type,data",
     [
