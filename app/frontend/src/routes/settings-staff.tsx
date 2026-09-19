@@ -132,6 +132,8 @@ export function StaffPanel() {
             <TableHead>Email</TableHead>
             <TableHead>Role</TableHead>
             <TableHead className="text-right">Commission</TableHead>
+            {/* Two numbers under one heading, so the column stays narrow enough for the
+                actions to stay on screen. The unit is spelled out on each cell. */}
             <TableHead>Status</TableHead>
             <TableHead>Two-factor</TableHead>
             <TableHead className="text-right">Actions</TableHead>
@@ -287,9 +289,13 @@ function StaffLine(props: {
           </SelectContent>
         </Select>
       </TableCell>
-      <TableCell className="text-right tabular-nums" data-numeric>
-        {`${percent(member.commission_rate_services_bp)}% services · ` +
-          `${percent(member.commission_rate_retail_bp)}% retail`}
+      <TableCell
+        className="text-right whitespace-nowrap tabular-nums"
+        data-numeric
+        title="Services · retail"
+      >
+        {`${percent(member.commission_rate_services_bp)}% · ` +
+          `${percent(member.commission_rate_retail_bp)}%`}
       </TableCell>
       <TableCell>
         {/* Status is never colour alone (DESIGN.md) — each badge carries the word. */}
@@ -314,7 +320,7 @@ function StaffLine(props: {
               <MoreHorizontal aria-hidden />
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
+          <DropdownMenuContent align="end" className="min-w-40">
             <DropdownMenuItem onSelect={props.onEdit}>
               <Pencil aria-hidden />
               Edit

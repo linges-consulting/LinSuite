@@ -322,7 +322,7 @@ describe('the roster', () => {
 
     const practitioner = (await screen.findByText('Ada Okonkwo')).closest('tr')!
     expect(within(practitioner).getByText('RMT #12345')).toBeInTheDocument()
-    expect(within(practitioner).getByText('45% services · 10% retail')).toBeInTheDocument()
+    expect(within(practitioner).getByText('45% · 10%')).toBeInTheDocument()
 
     const receptionist = screen.getByText('Theo Marsh').closest('tr')!
     expect(within(receptionist).queryByText(/RMT/)).toBeNull()
