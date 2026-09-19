@@ -3,7 +3,7 @@ import { BrandingPanel } from '@/routes/settings-branding'
 import { BusinessPanel } from '@/routes/settings-business'
 import { RolesPanel } from '@/routes/settings-roles'
 import { SecurityPanel } from '@/routes/settings-security'
-import { UsersPanel } from '@/routes/settings-users'
+import { StaffPanel } from '@/routes/settings-staff'
 
 /**
  * Everything about the business itself (PRD §1, §7).
@@ -23,7 +23,7 @@ export function SettingsPage() {
         <TabsTrigger value="business">Business</TabsTrigger>
         <TabsTrigger value="branding">Branding</TabsTrigger>
         <TabsTrigger value="roles">Roles</TabsTrigger>
-        <TabsTrigger value="users">People</TabsTrigger>
+        <TabsTrigger value="staff">Staff</TabsTrigger>
         <TabsTrigger value="security">Security</TabsTrigger>
       </TabsList>
       <TabsContent value="business">
@@ -35,8 +35,8 @@ export function SettingsPage() {
       <TabsContent value="roles">
         <RolesPanel />
       </TabsContent>
-      <TabsContent value="users">
-        <UsersPanel />
+      <TabsContent value="staff">
+        <StaffPanel />
       </TabsContent>
       <TabsContent value="security">
         <SecurityPanel />

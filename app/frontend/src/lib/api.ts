@@ -402,8 +402,16 @@ export type Role = {
   user_count: number
 }
 
-export type AccountRow = {
+/**
+ * A staff member and the account behind them — one row, because the Staff table shows the
+ * role, the lock and the second factor beside the colour and the credentials.
+ *
+ * `id` is the staff member's, and is what the staff endpoints take. `user_id` is the
+ * account's, which the three Task 5 endpoints (`/role`, `/unlock`, `/mfa/reset`) still key on.
+ */
+export type StaffRow = {
   id: string
+  user_id: string
   email: string
   role: string
   role_id: string
@@ -412,6 +420,48 @@ export type AccountRow = {
   /** Whether there is a second factor to reset. False makes "Reset MFA" a no-op that would
    *  still sign the person out of every device, so the button is disabled instead. */
   mfa_enrolled: boolean
+  first_name: string
+  last_name: string
+  display_name: string
+  is_practitioner: boolean
+  /** Required of a practitioner: insurers reject treatment receipts without both. */
+  designation: string | null
+  licence_number: string | null
+  /** Basis points — 4500 is 45%. The form shows percentages and converts. */
+  commission_rate_services_bp: number
+  commission_rate_retail_bp: number
+  /** A key from the server's palette, never a hex. */
+  colour: string
+  max_concurrent_appointments: number
+  active: boolean
+  sort_order: number
+  /** No password has ever been set: the invitation is still outstanding. */
+  invite_pending: boolean
+}
+
+/** One curated staff colour. The calendar paints appointments with it, so it is served
+ *  rather than chosen in the browser — including the text colour that reads on it. */
+export type StaffColour = {
+  key: string
+  name: string
+  hex: string
+  dark_hex: string
+  foreground: string
+  dark_foreground: string
+}
+
+/** What the create and edit forms send. `colour` absent on create means "choose one". */
+export type StaffDraft = {
+  first_name: string
+  last_name: string
+  display_name: string | null
+  is_practitioner: boolean
+  designation: string | null
+  licence_number: string | null
+  commission_rate_services_bp: number
+  commission_rate_retail_bp: number
+  colour: string | null
+  max_concurrent_appointments: number
 }
 
 export async function fetchCapabilities(): Promise<Capability[]> {
@@ -445,13 +495,57 @@ export async function deleteRole(id: string): Promise<void> {
   if (!res.ok) throw await failure(res, 'Could not delete the role')
 }
 
-export async function fetchAccounts(): Promise<AccountRow[]> {
-  const res = await fetch('/api/admin/users')
-  if (!res.ok) throw await failure(res, 'Could not load the accounts')
-  return (await res.json()).users
+/** Inactive staff are left out unless asked for: they are history, not the roster. */
+export async function fetchStaff(includeInactive = false): Promise<StaffRow[]> {
+  const res = await fetch(`/api/admin/staff${includeInactive ? '?include_inactive=true' : ''}`)
+  if (!res.ok) throw await failure(res, 'Could not load the staff')
+  return (await res.json()).staff
 }
 
-export async function assignRole(userId: string, roleId: string): Promise<AccountRow> {
+export async function fetchStaffPalette(): Promise<StaffColour[]> {
+  const res = await fetch('/api/admin/staff/palette')
+  if (!res.ok) throw await failure(res, 'Could not load the colours')
+  return (await res.json()).colours
+}
+
+/**
+ * Create the staff member and the account together. No password is set and none is sent:
+ * the server emails an invitation link, and that is the only way in.
+ */
+export async function createStaff(
+  draft: StaffDraft & { email: string; role_id: string },
+): Promise<StaffRow> {
+  const res = await send('POST', '/api/admin/staff', draft)
+  if (!res.ok) throw await failure(res, 'Could not add the staff member')
+  return res.json()
+}
+
+export async function updateStaff(id: string, draft: Partial<StaffDraft>): Promise<StaffRow> {
+  const res = await send('PATCH', `/api/admin/staff/${id}`, draft)
+  if (!res.ok) throw await failure(res, 'Could not save the staff member')
+  return res.json()
+}
+
+/** Ends every session they hold and refuses the next sign-in. The record stays. */
+export async function deactivateStaff(id: string): Promise<StaffRow> {
+  const res = await send('POST', `/api/admin/staff/${id}/deactivate`, {})
+  if (!res.ok) throw await failure(res, 'Could not deactivate the staff member')
+  return res.json()
+}
+
+export async function reactivateStaff(id: string): Promise<StaffRow> {
+  const res = await send('POST', `/api/admin/staff/${id}/reactivate`, {})
+  if (!res.ok) throw await failure(res, 'Could not reactivate the staff member')
+  return res.json()
+}
+
+/** A fresh invitation link. Every earlier one stops working. */
+export async function resendInvite(id: string): Promise<void> {
+  const res = await send('POST', `/api/admin/staff/${id}/resend-invite`, {})
+  if (!res.ok) throw await failure(res, 'Could not send the invitation')
+}
+
+export async function assignRole(userId: string, roleId: string): Promise<{ role: string }> {
   const res = await send('PATCH', `/api/admin/users/${userId}/role`, { role_id: roleId })
   if (!res.ok) throw await failure(res, 'Could not change the role')
   return res.json()

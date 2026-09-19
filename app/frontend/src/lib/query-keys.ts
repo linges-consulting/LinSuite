@@ -8,7 +8,10 @@
  */
 export const ROLES = ['roles'] as const
 export const CAPABILITIES = ['capabilities'] as const
-export const ACCOUNTS = ['accounts'] as const
+/** The roster behind Settings → Staff, with the account facts on each row. */
+export const STAFF = ['staff'] as const
+/** The curated colours. Served by the backend, so the calendar and the picker agree. */
+export const STAFF_PALETTE = ['staff-palette'] as const
 export const MFA = ['mfa'] as const
 export const SECURITY = ['security-policy'] as const
 /** The public branding document: read by the shell, invalidated by the Branding panel. */
