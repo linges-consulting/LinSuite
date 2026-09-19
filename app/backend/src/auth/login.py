@@ -8,6 +8,15 @@ can read it and an attacker cannot.
 All four endpoints live together because they are one thing: the lifecycle of a session.
 The rule the mode switch adds to that lifecycle is in `auth/modes.py`; this module is only
 its HTTP surface.
+
+**Two refusals that are not about the credential.** An account whose invitation has not been
+accepted has no password to be wrong about, and a deactivated staff member's password is
+right and beside the point. Both are coded 403s rather than the uniform 401, because both
+have an action attached — open your invitation link; ask an administrator — and "incorrect
+email or password" sends somebody looking for the wrong thing. The second reads
+`staff.active`, which is why this module knows about `scheduling.models`: whether a person
+still works here is a fact about the person, and the sign-in door is the last one left open
+once `revoke_all` has closed the others.
 """
 
 import logging
@@ -37,8 +46,15 @@ from auth.session import (
 )
 from core.audit import record_event
 from core.db import SessionDep
-from core.errors import ADMIN_MODE_REQUIRED, INVALID_PASSWORD, Forbidden
+from core.errors import (
+    ACCOUNT_INACTIVE,
+    ADMIN_MODE_REQUIRED,
+    INVALID_PASSWORD,
+    PASSWORD_NOT_SET,
+    Forbidden,
+)
 from core.security import verify_password
+from scheduling.models import Staff
 
 log = logging.getLogger(__name__)
 
@@ -114,6 +130,20 @@ async def login(payload: LoginRequest, response: Response, db: SessionDep) -> Us
     await throttle.guard(email)
     user = await db.scalar(select(User).where(func.lower(User.email) == email))
 
+    if user is not None and user.password_hash is None:
+        # An account an administrator created, whose invitation nobody has accepted. Refused
+        # before the hash is touched, because there is no hash: Argon2 must never be handed
+        # this column's null, and the dummy-hash padding would only buy a slower way to say
+        # the wrong thing. It says the true thing instead, and yes, that confirms the address
+        # exists — to somebody who already knows it was invited. The alternative is telling a
+        # new colleague their password is wrong when they have never had one.
+        log.info("auth: sign-in refused for %s — the invitation has not been accepted", email)
+        raise Forbidden(
+            PASSWORD_NOT_SET,
+            "This account has not been set up yet. Open the link in your invitation email to "
+            "choose a password, or ask an administrator to send another.",
+        )
+
     # `None` verifies against a dummy hash: an unknown address costs the same milliseconds
     # as a known one, so the response time is not an account-enumeration oracle.
     if not await verify_password(user.password_hash if user else None, payload.password):
@@ -133,6 +163,27 @@ async def login(payload: LoginRequest, response: Response, db: SessionDep) -> Us
         raise locked or _REFUSED
 
     await throttle.clear(email)
+
+    # After the password, not before: a deactivated account must not be a way for somebody
+    # holding only an address to learn that it exists. The credential was right and the
+    # account is closed, which is a different fact from a wrong password and gets its own
+    # code so the sign-in screen can say so instead of offering a password reset.
+    if not await db.scalar(select(Staff.active).where(Staff.user_id == user.id)):
+        record_event(
+            db,
+            "login.refused_inactive",
+            target_type="user",
+            target_id=str(user.id),
+            actor_user_id=None,
+            metadata={"email": email},
+        )
+        await db.commit()
+        log.warning("auth: sign-in refused for the deactivated account %s", email)
+        raise Forbidden(
+            ACCOUNT_INACTIVE,
+            "This account has been deactivated. Ask an administrator to restore it.",
+        )
+
     issued = issue_token(user.id)
     set_session_cookie(response, issued)
     claims = decode_token(issued.token)

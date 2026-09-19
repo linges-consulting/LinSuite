@@ -20,6 +20,7 @@ from core.db import SessionDep, get_engine, get_purge_engine, session_scope
 from core.errors import UPLOAD_ORIGIN_REQUIRED, Forbidden
 from core.logging import configure_logging
 from core.redis import get_redis
+from scheduling.staff import router as staff_router
 from settings.images import FAVICON_MAX_BYTES, LOGO_MAX_BYTES
 from settings.routes import public as branding_router
 from settings.routes import router as business_router
@@ -149,6 +150,7 @@ api.include_router(passwords_router)
 api.include_router(setup_router)
 api.include_router(roles_router)
 api.include_router(admin_users_router)
+api.include_router(staff_router)
 api.include_router(business_router)
 api.include_router(branding_router)
 app.include_router(api)

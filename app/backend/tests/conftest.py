@@ -99,3 +99,39 @@ async def client(database) -> AsyncIterator[AsyncClient]:
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c
+
+
+# An account and the staff row that now always accompanies one. Since Task 10 every user has
+# exactly one `staff` record — the wizard makes the first, `POST /api/admin/staff` makes the
+# rest, and migration 0009 backfilled the ones that predated the table — and sign-in reads
+# `staff.active`. A suite that inserted a bare `users` row would be describing an account no
+# instance can have, and would be refused at the door. One statement so the pair can never
+# land half-written.
+_ACCOUNT = """
+WITH account AS (
+    INSERT INTO users (email, password_hash, role_id)
+    VALUES (
+        :email, :hash,
+        coalesce(cast(:role AS uuid), (SELECT id FROM roles WHERE name = 'Staff'))
+    )
+    RETURNING id, email
+)
+INSERT INTO staff (user_id, first_name, display_name, colour)
+SELECT id, split_part(email, '@', 1), split_part(email, '@', 1), 'teal' FROM account
+RETURNING user_id
+"""
+
+
+async def add_account(email: str, password_hash: str, *, role: str | None = None) -> str:
+    """Create an account on `role` (default: the seeded Staff role), and return its id."""
+    from sqlalchemy import text
+
+    from core.db import session_scope
+
+    async with session_scope() as db:
+        row = await db.execute(
+            text(_ACCOUNT), {"email": email, "hash": password_hash, "role": role}
+        )
+        user_id = row.scalar_one()
+        await db.commit()
+    return str(user_id)

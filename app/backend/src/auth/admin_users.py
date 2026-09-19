@@ -7,6 +7,13 @@ The unlock endpoint lived in `auth/throttle.py` until this task, next to the pol
 undoes. It moved here because it is an administrative screen's endpoint rather than part of
 the throttle: `throttle.py` now holds only the functions that decide, and every route that
 acts on an account is in one module. `throttle.unlock` is still the single implementation.
+
+**What is left here since Task 10.** The three acts that are about the *account* — its role,
+its lock, its second factor — and `UserOut`, which is the shape every answer about an account
+takes. The roster the Staff screen reads is `GET /api/admin/staff`
+(`scheduling/staff.py`), which extends `UserOut` rather than describing an account a second
+way; `GET /api/admin/users` remains the plain account list underneath it. These three paths
+are unchanged and still key on the account's id, not the staff member's.
 """
 
 import logging
@@ -48,9 +55,26 @@ class UserOut(BaseModel):
     # button whose only effect is signing somebody out of every device for no reason.
     mfa_enrolled: bool
 
+    @classmethod
+    def of(cls, user: User, locked_until: datetime | None) -> "UserOut":
+        """One shape for every answer this API gives about an account, so the list, the role
+        change and the staff roster cannot drift into describing it differently."""
+        return cls(
+            id=str(user.id),
+            email=user.email,
+            role=user.role.name,
+            role_id=str(user.role_id),
+            locked_until=locked_until,
+            mfa_enrolled=user.mfa_method is not None,
+        )
 
-async def _locks(emails: list[str]) -> dict[str, datetime]:
-    """The lock TTLs, in one round trip rather than one per row."""
+
+async def locks_for(emails: list[str]) -> dict[str, datetime]:
+    """The lock TTLs, in one round trip rather than one per row.
+
+    Public because the staff roster (`scheduling/staff.py`) shows the same column and must
+    read it the same way — one Redis convention, not two.
+    """
     if not emails:
         return {}
     redis = get_redis()
@@ -69,21 +93,8 @@ async def _locks(emails: list[str]) -> dict[str, datetime]:
 @router.get("")
 async def list_users(_: UsersManager, db: SessionDep) -> dict[str, list[UserOut]]:
     users = list(await db.scalars(select(User).order_by(User.email)))
-    locked = await _locks([u.email for u in users])
-    return {"users": [_row(u, locked.get(u.email)) for u in users]}
-
-
-def _row(user: User, locked_until: datetime | None) -> UserOut:
-    """One shape for every answer this module gives about an account, so the list and the
-    role change cannot drift into describing it differently."""
-    return UserOut(
-        id=str(user.id),
-        email=user.email,
-        role=user.role.name,
-        role_id=str(user.role_id),
-        locked_until=locked_until,
-        mfa_enrolled=user.mfa_method is not None,
-    )
+    locked = await locks_for([u.email for u in users])
+    return {"users": [UserOut.of(u, locked.get(u.email)) for u in users]}
 
 
 class RoleAssignment(BaseModel):
@@ -121,8 +132,8 @@ async def assign_role(
         metadata={"email": user.email, "from": was, "to": role.name},
     )
     await db.commit()
-    locked = await _locks([user.email])
-    return _row(user, locked.get(user.email))
+    locked = await locks_for([user.email])
+    return UserOut.of(user, locked.get(user.email))
 
 
 @router.post("/{user_id}/unlock", status_code=204)

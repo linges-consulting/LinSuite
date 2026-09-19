@@ -20,6 +20,7 @@ from core.config import get_settings
 from core.db import get_purge_engine, session_scope
 from core.redis import get_redis
 from core.security import hash_password
+from tests.conftest import add_account
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -124,18 +125,7 @@ async def burn(client, count: int, email=EMAIL):
 
 
 async def add_staff_user(email=STAFF_EMAIL) -> str:
-    digest = await hash_password(PASSWORD)
-    async with session_scope() as db:
-        row = await db.execute(
-            text(
-                "INSERT INTO users (email, password_hash, role_id) "
-                "VALUES (:e, :h, (SELECT id FROM roles WHERE name = 'Staff')) RETURNING id"
-            ),
-            {"e": email, "h": digest},
-        )
-        user_id = row.scalar_one()
-        await db.commit()
-    return str(user_id)
+    return await add_account(email, await hash_password(PASSWORD))
 
 
 async def audit() -> list[tuple]:

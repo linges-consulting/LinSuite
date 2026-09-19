@@ -23,6 +23,7 @@ from auth.capabilities import CAPABILITIES, Requires, unknown
 from auth.models import Role, RoleCapability, User
 from core.audit import record_event
 from core.db import SessionDep
+from scheduling.models import Staff
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -160,8 +161,14 @@ async def assert_an_administrator_remains(db: SessionDep) -> None:
             RoleCapability.role_id == User.role_id, RoleCapability.capability == capability
         )
 
+    # Joined to `staff`, because a deactivated administrator cannot sign in and so cannot
+    # administer anything. Counting them would let the last one be deactivated — a lockout
+    # this guard exists to make impossible, arriving through a different door.
     remaining = await db.scalar(
-        select(func.count()).select_from(User).where(*[holds(c) for c in ADMIN_FLOOR])
+        select(func.count())
+        .select_from(User)
+        .join(Staff, Staff.user_id == User.id)
+        .where(Staff.active, *[holds(c) for c in ADMIN_FLOOR])
     )
     if not remaining:
         await db.rollback()

@@ -24,6 +24,7 @@ from core.config import Settings, get_settings
 from core.db import get_purge_engine, session_scope
 from core.redis import get_redis
 from core.security import hash_password
+from tests.conftest import add_account
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -86,16 +87,7 @@ async def login(client, email=EMAIL, password=PASSWORD):
 
 
 async def add_staff_user(email=STAFF_EMAIL):
-    digest = await hash_password(PASSWORD)
-    async with session_scope() as db:
-        await db.execute(
-            text(
-                "INSERT INTO users (email, password_hash, role_id) "
-                "VALUES (:e, :h, (SELECT id FROM roles WHERE name = 'Staff'))"
-            ),
-            {"e": email, "h": digest},
-        )
-        await db.commit()
+    await add_account(email, await hash_password(PASSWORD))
 
 
 def jti(client) -> str:

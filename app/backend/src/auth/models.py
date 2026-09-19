@@ -93,7 +93,12 @@ class User(Base):
         primary_key=True, server_default=text("gen_random_uuid()")
     )
     email: Mapped[str] = mapped_column(String(320))
-    password_hash: Mapped[str] = mapped_column(String(255))
+    # Null for an account an administrator created and nobody has accepted yet: there is no
+    # password, rather than a weak one, and 0009 made the column nullable to say so. No
+    # temporary credential is ever minted — the invitation link is the only way in, and
+    # `auth/login.py` refuses the account with its own code until it has been spent. Every
+    # reader of this column must treat null as "no password", never hand it to Argon2.
+    password_hash: Mapped[str | None] = mapped_column(String(255))
     # RESTRICT, not CASCADE: deleting a role must never delete the people holding it. The
     # roles endpoint refuses to delete a role in use, and this is the database saying the
     # same thing to anything that bypasses it.

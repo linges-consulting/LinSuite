@@ -26,6 +26,7 @@ from sqlalchemy import text
 from core.db import get_purge_engine, session_scope
 from core.redis import get_redis
 from core.security import hash_password
+from tests.conftest import add_account
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -673,13 +674,9 @@ async def test_a_role_without_the_admin_capability_is_refused(client, method, pa
         json={"name": "Front desk", "description": "Reception.", "capabilities": ["schedule.view"]},
     )
     assert role.status_code == 201, role.text
-    digest = await hash_password(STAFF_PASSWORD)
-    async with session_scope() as db:
-        await db.execute(
-            text("INSERT INTO users (email, password_hash, role_id) VALUES (:e, :h, :r)"),
-            {"e": "desk@cedar.example", "h": digest, "r": role.json()["id"]},
-        )
-        await db.commit()
+    await add_account(
+        "desk@cedar.example", await hash_password(STAFF_PASSWORD), role=role.json()["id"]
+    )
     client.cookies.clear()
     resp = await client.post(
         "/api/auth/login", json={"email": "desk@cedar.example", "password": STAFF_PASSWORD}

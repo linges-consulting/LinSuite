@@ -63,7 +63,8 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         "users.manage",
-        "Assign roles to staff, and unlock accounts locked by failed sign-ins.",
+        "Add staff members, set their credentials and commission rates, assign roles, and "
+        "unlock accounts locked by failed sign-ins.",
         "Administration",
         requires_admin_mode=True,
     ),

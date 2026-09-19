@@ -28,6 +28,12 @@ PASSWORD_CHANGE_REQUIRED = "password_change_required"
 # none of these — the form that collected the password is the only thing that should react.
 INVALID_PASSWORD = "invalid_password"
 INVALID_SETUP_TOKEN = "invalid_setup_token"
+# The account exists and has never had a password: it was created by an administrator and the
+# invitation has not been accepted. Its own code, because "incorrect email or password" would
+# send somebody hunting for a password nobody ever gave them.
+PASSWORD_NOT_SET = "password_not_set"
+# The staff member has been deactivated. The credential was right; the account is closed.
+ACCOUNT_INACTIVE = "account_inactive"
 # A code was wrong, spent or expired — whichever it was, the answer is the same one.
 INVALID_MFA_CODE = "invalid_mfa_code"
 # The session is real but owes a second factor: route to the verify screen, not to /login.

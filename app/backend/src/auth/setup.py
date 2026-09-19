@@ -32,6 +32,8 @@ from core.db import SessionDep
 from core.errors import INVALID_SETUP_TOKEN, Forbidden
 from core.models import Business
 from core.security import check_password_policy, hash_password
+from scheduling.models import Staff
+from scheduling.palette import PALETTE
 from settings.timezones import canonical_timezones, is_canonical
 
 log = logging.getLogger(__name__)
@@ -203,11 +205,24 @@ async def complete_setup(payload: SetupRequest, session: SessionDep) -> dict[str
     # The Administrator role is seeded by migration 0006, so it exists before any instance
     # boots. Looked up by name rather than pinned to an id: the id is generated per database.
     administrator = await session.scalar(select(Role.id).where(Role.name == "Administrator"))
+    owner = User(
+        email=payload.admin_email.lower(),
+        password_hash=await hash_password(payload.admin_password),
+        role_id=administrator,
+    )
+    session.add(owner)
+    await session.flush()
+    # Every account is a staff member, from the first one on (`scheduling/models.py`). The
+    # wizard asks for an email and a password and nothing else, so the record starts from
+    # what it has — the address's local part — and the Staff screen is where it gets a real
+    # name. Without this row they could not be deactivated, scheduled or paid commission,
+    # and every screen that reads a staff record would need a branch for the owner.
     session.add(
-        User(
-            email=payload.admin_email.lower(),
-            password_hash=await hash_password(payload.admin_password),
-            role_id=administrator,
+        Staff(
+            user_id=owner.id,
+            first_name=owner.email.split("@")[0],
+            display_name=owner.email.split("@")[0],
+            colour=PALETTE[0].key,
         )
     )
     # The token dies with the request that used it, in the same transaction as the business.

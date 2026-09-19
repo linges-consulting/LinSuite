@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     # How long a password-reset link stays usable. tech-stack §14 says 30–60 minutes: long
     # enough to survive a slow mailbox, short enough that a link left in an inbox goes stale.
     password_reset_minutes: int = 45
+    # How long an invitation to a new staff member stays usable. Far longer than a reset,
+    # deliberately: nobody asked for it, so it has to survive a weekend, a holiday and a
+    # mailbox somebody only reads on Monday. Re-issuable from the Staff screen either way.
+    invitation_hours: int = 72
 
     # --- Multi-factor authentication (tech-stack §14, `auth/mfa.py`) -----------------------
     # AES-256-GCM key for the TOTP secrets at rest, 32 bytes as hex. A TOTP secret cannot be

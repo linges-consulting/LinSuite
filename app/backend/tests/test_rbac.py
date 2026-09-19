@@ -24,6 +24,7 @@ from core.db import get_purge_engine, session_scope
 from core.redis import get_redis
 from core.security import hash_password
 from main import app as main_app
+from tests.conftest import add_account
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -157,17 +158,7 @@ async def make_role(client, name, capabilities):
 
 
 async def add_user(email, role_id, password=OTHER_PASSWORD) -> str:
-    digest = await hash_password(password)
-    async with session_scope() as db:
-        row = await db.execute(
-            text(
-                "INSERT INTO users (email, password_hash, role_id) VALUES (:e, :h, :r) RETURNING id"
-            ),
-            {"e": email, "h": digest, "r": role_id},
-        )
-        user_id = row.scalar_one()
-        await db.commit()
-    return str(user_id)
+    return await add_account(email, await hash_password(password), role=role_id)
 
 
 async def role_id_named(name: str) -> str:
