@@ -15,8 +15,7 @@ read against it, so changing it re-interprets data that already exists. A field 
 somebody is editing to fix a typo in the postal code is the wrong place for that.
 """
 
-import hashlib
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
@@ -28,7 +27,7 @@ from auth.models import User
 from core.audit import record_event
 from core.db import SessionDep
 from core.models import Business
-from settings import branding, images
+from settings import assets, branding, images
 from settings.models import FAVICON, LOGO, BrandingAsset
 from settings.timezones import PROVINCES, is_canonical
 
@@ -126,7 +125,28 @@ class BusinessProfile(BaseModel):
     receipt_footer: _text(2000) = None  # type: ignore[valid-type]
 
 
-class BusinessOut(BusinessProfile):
+class BusinessOut(BaseModel):
+    """The same fields, read back — and deliberately *not* a subclass of the one above.
+
+    Inheriting would re-run the input validators against whatever is in the row, so a value
+    written out of band (a data fix in `psql`, a future import) would make the read fail with
+    a 500. A read model's job is to report what is there, not to refuse it: the constraints in
+    migration 0008 and `BusinessProfile` are what keep bad values out, at the moment they are
+    written, where the answer can be a 422 somebody can act on.
+    """
+
+    name: str
+    address_line1: str | None
+    address_line2: str | None
+    city: str | None
+    province: str | None
+    postal_code: str | None
+    phone: str | None
+    email: str | None
+    gst_hst_number: str | None
+    pst_qst_number: str | None
+    currency_symbol: str
+    receipt_footer: str | None
     # Read-only here on purpose: the country is fixed, the timezone has its own endpoint, and
     # `setup_completed_at` is written once by the wizard and never again.
     country: str
@@ -266,79 +286,38 @@ async def update_branding(
     payload: BrandColours, admin: AdminCapability, db: SessionDep
 ) -> BrandingOut:
     business = await _business(db)
-    was = (business.brand_primary, business.brand_secondary)
+    # Only when something actually moved, like the profile above it. A screen that saves
+    # whatever is in its inputs turns "who changed the brand" into a list of everyone who
+    # ever opened the tab and pressed the button.
+    changed = {
+        field: [getattr(business, field), getattr(payload, field)]
+        for field in ("brand_primary", "brand_secondary")
+        if getattr(business, field) != getattr(payload, field)
+    }
     business.brand_primary = payload.brand_primary
     business.brand_secondary = payload.brand_secondary
-    record_event(
-        db,
-        "business.branding_updated",
-        target_type="business",
-        target_id=str(business.id),
-        actor_user_id=admin.id,
-        metadata={
-            "brand_primary": [was[0], payload.brand_primary],
-            "brand_secondary": [was[1], payload.brand_secondary],
-        },
-    )
+    if changed:
+        record_event(
+            db,
+            "business.branding_updated",
+            target_type="business",
+            target_id=str(business.id),
+            actor_user_id=admin.id,
+            metadata=changed,
+        )
     await db.commit()
     return _branding_out(payload.brand_primary, payload.brand_secondary)
 
 
 # --- the two images -------------------------------------------------------------------------
-
-
-class AssetOut(BaseModel):
-    url: str
-    etag: str
-    byte_length: int
-    width: int
-    height: int
-
-
-async def _store(
-    db: SessionDep, admin: User, kind: str, upload: UploadFile, *, allowed, max_px, cap
-) -> AssetOut:
-    data = await upload.read(cap + 1)
-    if len(data) > cap:
-        # The middleware refuses an honest `Content-Length` before the body is read; this is
-        # the chunked-upload case, where the size is not known until it has arrived.
-        raise HTTPException(status_code=413, detail=f"Keep it under {cap // 1024} KB.")
-    try:
-        encoded, width, height = images.normalise(data, allowed=allowed, max_px=max_px)
-    except images.Rejected as rejected:
-        raise HTTPException(status_code=rejected.status, detail=rejected.detail) from None
-
-    digest = hashlib.sha256(encoded).hexdigest()
-    asset = await db.get(BrandingAsset, kind)
-    if asset is None:
-        asset = BrandingAsset(kind=kind)
-        db.add(asset)
-    asset.content_type = "image/png"
-    asset.data = encoded
-    asset.byte_length = len(encoded)
-    asset.sha256 = digest
-    asset.updated_at = datetime.now(UTC)
-    record_event(
-        db,
-        "business.branding_updated",
-        target_type="business",
-        target_id="1",
-        actor_user_id=admin.id,
-        metadata={kind: "uploaded", "sha256": digest},
-    )
-    await db.commit()
-    return AssetOut(
-        url=_asset_url(kind, digest),
-        etag=_etag(digest),
-        byte_length=len(encoded),
-        width=width,
-        height=height,
-    )
+#
+# Thin by design: the bytes, the caching and the conditional request all live in
+# `settings/assets.py`. What is left here is which limits each of the two kinds gets.
 
 
 @router.post("/business/logo")
-async def upload_logo(file: UploadFile, admin: AdminCapability, db: SessionDep) -> AssetOut:
-    return await _store(
+async def upload_logo(file: UploadFile, admin: AdminCapability, db: SessionDep) -> assets.AssetOut:
+    return await assets.store(
         db,
         admin,
         LOGO,
@@ -350,8 +329,10 @@ async def upload_logo(file: UploadFile, admin: AdminCapability, db: SessionDep) 
 
 
 @router.post("/business/favicon")
-async def upload_favicon(file: UploadFile, admin: AdminCapability, db: SessionDep) -> AssetOut:
-    return await _store(
+async def upload_favicon(
+    file: UploadFile, admin: AdminCapability, db: SessionDep
+) -> assets.AssetOut:
+    return await assets.store(
         db,
         admin,
         FAVICON,
@@ -362,30 +343,14 @@ async def upload_favicon(file: UploadFile, admin: AdminCapability, db: SessionDe
     )
 
 
-async def _remove(db: SessionDep, admin: User, kind: str) -> Response:
-    asset = await db.get(BrandingAsset, kind)
-    if asset is not None:
-        await db.delete(asset)
-        record_event(
-            db,
-            "business.branding_updated",
-            target_type="business",
-            target_id="1",
-            actor_user_id=admin.id,
-            metadata={kind: "removed"},
-        )
-        await db.commit()
-    return Response(status_code=204)
-
-
 @router.delete("/business/logo", status_code=204)
 async def remove_logo(admin: AdminCapability, db: SessionDep) -> Response:
-    return await _remove(db, admin, LOGO)
+    return await assets.remove(db, admin, LOGO)
 
 
 @router.delete("/business/favicon", status_code=204)
 async def remove_favicon(admin: AdminCapability, db: SessionDep) -> Response:
-    return await _remove(db, admin, FAVICON)
+    return await assets.remove(db, admin, FAVICON)
 
 
 # --- what the browser reads (no session) ----------------------------------------------------
@@ -417,34 +382,21 @@ async def branding_document(db: SessionDep) -> BrandingDocument:
         # called something. The product name is the honest answer until there is another.
         name=business.name if business else "LinSuite",
         colors=palette.colors(),
-        logo_url=_asset_url(LOGO, digests[LOGO]) if LOGO in digests else None,
-        logo_etag=_etag(digests[LOGO]) if LOGO in digests else None,
-        favicon_url=_asset_url(FAVICON, digests[FAVICON]) if FAVICON in digests else None,
-        favicon_etag=_etag(digests[FAVICON]) if FAVICON in digests else None,
+        logo_url=assets.url_of(LOGO, digests[LOGO]) if LOGO in digests else None,
+        logo_etag=assets.etag_of(digests[LOGO]) if LOGO in digests else None,
+        favicon_url=assets.url_of(FAVICON, digests[FAVICON]) if FAVICON in digests else None,
+        favicon_etag=assets.etag_of(digests[FAVICON]) if FAVICON in digests else None,
     )
-
-
-async def _serve(db: SessionDep, request: Request, kind: str) -> Response:
-    asset = await db.get(BrandingAsset, kind)
-    if asset is None:
-        raise HTTPException(status_code=404, detail="Not Found")
-    etag = _etag(asset.sha256)
-    # `max-age` is short and the ETag does the real work: the URL carries the digest, so a
-    # changed logo is a changed URL and the stale copy is never asked for again anyway.
-    headers = {"ETag": etag, "Cache-Control": "public, max-age=300"}
-    if etag in [tag.strip() for tag in request.headers.get("if-none-match", "").split(",")]:
-        return Response(status_code=304, headers=headers)
-    return Response(asset.data, media_type=asset.content_type, headers=headers)
 
 
 @public.get("/logo")
 async def serve_logo(db: SessionDep, request: Request) -> Response:
-    return await _serve(db, request, LOGO)
+    return await assets.serve(db, request, LOGO)
 
 
 @public.get("/favicon")
 async def serve_favicon(db: SessionDep, request: Request) -> Response:
-    return await _serve(db, request, FAVICON)
+    return await assets.serve(db, request, FAVICON)
 
 
 # --- the two multi-factor switches ----------------------------------------------------------
@@ -500,16 +452,6 @@ async def update_security(
 
 
 # --- shared ---------------------------------------------------------------------------------
-
-
-def _etag(digest: str) -> str:
-    return f'"{digest}"'
-
-
-def _asset_url(kind: str, digest: str) -> str:
-    # The digest in the query string is what makes a replaced logo a different URL, so a
-    # browser holding the old one never has to be told to forget it.
-    return f"/api/branding/{kind}?v={digest[:12]}"
 
 
 async def _business(db: SessionDep) -> Business:

@@ -18,6 +18,8 @@ import { BRANDING_DOCUMENT } from '@/lib/query-keys'
  */
 
 const CACHE = 'branding'
+/** What `index.html` ships with, and what the tab goes back to when a favicon is removed. */
+const STOCK_FAVICON = { href: '/favicon.svg', type: 'image/svg+xml' }
 
 export function applyBranding(document_: BrandingDocument): void {
   const root = document.documentElement
@@ -25,18 +27,22 @@ export function applyBranding(document_: BrandingDocument): void {
     root.style.setProperty(`--brand-${name.replaceAll('_', '-')}`, value)
   }
   if (document_.name) document.title = document_.name
-  if (document_.favicon_url) {
-    // Created rather than assumed: the tab icon has to be swappable wherever the document
-    // came from, and a missing `<link>` would silently leave the stock mark in place.
-    let icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]')
-    if (!icon) {
-      icon = document.createElement('link')
-      icon.rel = 'icon'
-      document.head.append(icon)
-    }
-    icon.type = 'image/png'
-    icon.href = document_.favicon_url
+  // Created rather than assumed: the tab icon has to be swappable wherever the document came
+  // from, and a missing `<link>` would silently leave the stock mark in place.
+  let icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]')
+  if (!icon) {
+    icon = document.createElement('link')
+    icon.rel = 'icon'
+    document.head.append(icon)
   }
+  // Both directions. Removing a favicon has to put the stock mark back in this tab, or the
+  // one thing the administrator did — take the old icon away — is the one thing that did not
+  // happen until they reload.
+  const { href, type } = document_.favicon_url
+    ? { href: document_.favicon_url, type: 'image/png' }
+    : STOCK_FAVICON
+  icon.type = type
+  icon.href = href
 }
 
 /** Called from `main.tsx` before the first render. Never throws: a broken cache is no cache. */
@@ -45,7 +51,13 @@ export function applyCachedBranding(): void {
     const cached = localStorage.getItem(CACHE)
     if (cached) applyBranding(JSON.parse(cached))
   } catch {
-    /* private mode, cleared storage, or a cache this version cannot read */
+    // A cache this version cannot read is worse than none: it would dress the page in
+    // whatever it did parse and keep doing so on every load. Drop it and wait for the fetch.
+    try {
+      localStorage.removeItem(CACHE)
+    } catch {
+      /* private mode: there was nothing to remove */
+    }
   }
 }
 

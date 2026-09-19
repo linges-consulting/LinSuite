@@ -186,6 +186,33 @@ async def test_a_postal_code_is_stored_in_one_shape(client):
     assert (await client.get(BUSINESS)).json()["postal_code"] == "V8W 1P6"
 
 
+async def test_the_database_refuses_a_postal_code_the_api_would_have(client):
+    """The second line, for the writer that is not this API — a data fix, a future import."""
+    await as_admin(client)
+    await put_profile(client)
+
+    async with session_scope() as db:
+        with pytest.raises(Exception, match="ck_businesses_postal_code"):
+            await db.execute(text("UPDATE businesses SET postal_code = '90210'"))
+            await db.commit()
+
+
+async def test_a_row_written_out_of_band_is_reported_rather_than_refused(client):
+    """The read model does not re-run the input validators. A row the constraints allow but
+    `BusinessProfile` would not — an address line longer than the form permits, say — has to
+    come back, because a GET that 500s leaves nobody able to see or fix it."""
+    await as_admin(client)
+    await put_profile(client)
+    async with session_scope() as db:
+        await db.execute(text("UPDATE businesses SET email = 'not-an-address'"))
+        await db.commit()
+
+    resp = await client.get(BUSINESS)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["email"] == "not-an-address"
+
+
 # --- the timezone ---------------------------------------------------------------------------
 
 
@@ -219,6 +246,18 @@ async def test_the_timezone_list_is_canonical(client):
     assert "America/St_Johns" in zones
     for alias in ("US/Eastern", "Asia/Calcutta", "Africa/Asmera", "Canada/Eastern", "EST"):
         assert alias not in zones
+
+
+async def test_utc_survives_the_filter(client):
+    """The one zone with no area that stays: an instance that has not decided its local time
+    yet is a real state, and the wizard accepted `UTC` before this filter existed — a row
+    holding it must still be re-selectable in its own picker. `Etc/UTC` stays out."""
+    zones = (await client.get("/api/setup/timezones")).json()["timezones"]
+    assert "UTC" in zones
+    assert "Etc/UTC" not in zones
+
+    await as_admin(client)
+    assert (await client.patch(f"{BUSINESS}/timezone", json={"timezone": "UTC"})).status_code == 200
 
 
 @pytest.mark.parametrize(
@@ -339,6 +378,33 @@ async def test_changing_the_colours_is_audited(client):
     assert "#aa0000" in entries[0]
 
 
+async def test_saving_the_same_colours_again_records_nothing(client):
+    """Otherwise "who changed the brand" is a list of everyone who opened the tab."""
+    await as_admin(client)
+    colours = {"brand_primary": "#aa0000", "brand_secondary": "#00aa00"}
+    await client.put(f"{BUSINESS}/branding", json=colours)
+
+    resp = await client.put(f"{BUSINESS}/branding", json=colours)
+
+    assert resp.status_code == 200, resp.text
+    assert len(await audit("business.branding_updated")) == 1
+
+
+async def test_only_the_colour_that_changed_is_recorded(client):
+    await as_admin(client)
+    await client.put(
+        f"{BUSINESS}/branding", json={"brand_primary": "#aa0000", "brand_secondary": "#00aa00"}
+    )
+
+    await client.put(
+        f"{BUSINESS}/branding", json={"brand_primary": "#aa0000", "brand_secondary": "#0000aa"}
+    )
+
+    last = (await audit("business.branding_updated"))[-1]
+    assert "brand_secondary" in last
+    assert "brand_primary" not in last
+
+
 # --- uploads --------------------------------------------------------------------------------
 
 
@@ -360,10 +426,34 @@ async def test_a_logo_upload_is_accepted_on_the_allowlisted_path(client):
 async def test_a_multipart_upload_without_a_matching_origin_is_refused(client):
     await as_admin(client)
 
-    assert (await upload(client, f"{BUSINESS}/logo", png(64), origin=None)).status_code == 403
-    assert (
-        await upload(client, f"{BUSINESS}/logo", png(64), origin="http://evil.example")
-    ).status_code == 403
+    for origin in (None, "http://evil.example"):
+        resp = await upload(client, f"{BUSINESS}/logo", png(64), origin=origin)
+        assert resp.status_code == 403, resp.text
+        # Coded like every other 403 the API emits, or `query-client.ts` falls through every
+        # arm and the person gets a bare toast for a refusal the screen could explain.
+        assert resp.json()["code"] == "upload_origin_required"
+        assert isinstance(resp.json()["detail"], str)
+
+
+async def test_a_referer_stands_in_for_a_withheld_origin(client):
+    """Some browsers omit `Origin` on a same-origin POST; `Referer` is the fallback, and a
+    `Referer` from somewhere else is refused exactly like a wrong `Origin`."""
+    await as_admin(client)
+
+    accepted = await client.post(
+        f"{BUSINESS}/logo",
+        files={"file": ("logo.png", png(64), "image/png")},
+        headers={"Referer": f"{ORIGIN}/settings"},
+    )
+    refused = await client.post(
+        f"{BUSINESS}/logo",
+        files={"file": ("logo.png", png(64), "image/png")},
+        headers={"Referer": "http://evil.example/settings"},
+    )
+
+    assert accepted.status_code == 200, accepted.text
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["code"] == "upload_origin_required"
 
 
 async def test_multipart_is_still_refused_on_every_other_path(client):
@@ -440,6 +530,41 @@ async def test_a_large_logo_comes_back_downscaled_and_re_encoded(client):
     assert max(image.size) == 512
 
 
+async def test_a_colour_profile_does_not_survive_the_conversion(client):
+    """Pillow re-attaches `icc_profile` from `im.info` on save. After `convert("RGBA")` it
+    describes a colour space the pixels are no longer in, and on a brand colour that is the
+    one thing this feature exists to get right."""
+    from PIL import ImageCms
+
+    await as_admin(client)
+    source = io.BytesIO()
+    profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("LAB"))
+    Image.new("RGB", (200, 200), (29, 78, 216)).save(source, "JPEG", icc_profile=profile.tobytes())
+    assert Image.open(io.BytesIO(source.getvalue())).info.get("icc_profile")
+
+    resp = await upload(client, f"{BUSINESS}/logo", source.getvalue(), name="logo.jpg")
+
+    assert resp.status_code == 200, resp.text
+    served = await client.get(f"{BRANDING}/logo")
+    assert "icc_profile" not in Image.open(io.BytesIO(served.content)).info
+
+
+async def test_a_photo_with_an_orientation_tag_is_stored_upright(client):
+    """Drop the EXIF tag without rotating the pixels and the logo is stored sideways."""
+    await as_admin(client)
+    source = io.BytesIO()
+    sideways = Image.new("RGB", (400, 200), (29, 78, 216))
+    exif = sideways.getexif()
+    exif[274] = 6  # rotate 90° clockwise on display
+    sideways.save(source, "JPEG", exif=exif)
+
+    resp = await upload(client, f"{BUSINESS}/logo", source.getvalue(), name="logo.jpg")
+
+    assert resp.status_code == 200, resp.text
+    # 400x200 displayed rotated is 200x400: the stored pixels have to be the rotated ones.
+    assert (resp.json()["width"], resp.json()["height"]) == (200, 400)
+
+
 async def test_a_favicon_is_re_encoded_small(client):
     await as_admin(client)
 
@@ -465,6 +590,32 @@ async def test_the_public_asset_answers_304_to_a_matching_etag(client):
     assert again.content == b""
     assert etag.strip('"') == hashlib.sha256(first.content).hexdigest()
     assert "max-age" in first.headers["cache-control"]
+
+
+@pytest.mark.parametrize("header", ["W/{etag}", "*", '"other", {etag}', " {etag} "])
+async def test_the_conditional_request_follows_the_rfc(client, header):
+    """`W/` is weak-equal to the same tag, `*` matches anything present, and the header is a
+    list. Exact string equality answers 200 to a browser that revalidated with `W/` — a
+    megabyte down the wire for bytes it already had."""
+    await as_admin(client)
+    await upload(client, f"{BUSINESS}/logo", png(120))
+    client.cookies.clear()
+    etag = (await client.get(f"{BRANDING}/logo")).headers["etag"]
+
+    resp = await client.get(f"{BRANDING}/logo", headers={"If-None-Match": header.format(etag=etag)})
+
+    assert resp.status_code == 304, resp.text
+
+
+async def test_a_tag_that_is_not_this_one_still_gets_the_bytes(client):
+    await as_admin(client)
+    await upload(client, f"{BUSINESS}/logo", png(120))
+    client.cookies.clear()
+
+    resp = await client.get(f"{BRANDING}/logo", headers={"If-None-Match": '"stale"'})
+
+    assert resp.status_code == 200
+    assert len(resp.content) > 0
 
 
 async def test_the_branding_document_points_at_the_assets_once_they_exist(client):

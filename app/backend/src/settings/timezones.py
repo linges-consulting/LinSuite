@@ -54,6 +54,14 @@ DEPRECATED: frozenset[str] = frozenset(
 )  # fmt: skip
 
 
+# The one zone with no area that stays. It is what an operator means by "no local time" — a
+# test instance, a lab, a deployment that has not decided yet — and the wizard accepted it
+# before this filter existed, so dropping it would strand any row already holding it in a
+# picker that cannot re-select its own value. `Etc/UTC` is the same clock under the spelling
+# nobody types, and it stays out with the rest of `Etc/`.
+KEPT_WITHOUT_AREA = frozenset({"UTC"})
+
+
 @lru_cache
 def canonical_timezones() -> tuple[str, ...]:
     """Every IANA zone an administrator may choose, sorted."""
@@ -61,7 +69,9 @@ def canonical_timezones() -> tuple[str, ...]:
         sorted(
             zone
             for zone in available_timezones()
-            if "/" in zone and not zone.startswith("Etc/") and zone not in DEPRECATED
+            if zone not in DEPRECATED
+            and not zone.startswith("Etc/")
+            and ("/" in zone or zone in KEPT_WITHOUT_AREA)
         )
     )
 

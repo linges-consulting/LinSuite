@@ -89,6 +89,23 @@ test('cancelling the confirmation leaves the timezone alone', async () => {
   expect(patched(calls)).toHaveLength(0)
 })
 
+test('the address block reads in the order it is written on an envelope', async () => {
+  stubApi(ADMIN)
+  renderApp('/settings')
+  await openBusiness()
+  await screen.findByLabelText('City')
+
+  const labels = Array.from(document.querySelectorAll('label')).map((l) => l.textContent)
+
+  expect(labels.slice(labels.indexOf('Address'), labels.indexOf('Phone'))).toEqual([
+    'Address',
+    'Address line 2',
+    'City',
+    'Province or territory',
+    'Postal code',
+  ])
+})
+
 test('the profile is saved in one request, and the shell re-reads the name', async () => {
   const { calls } = stubApi(ADMIN)
   renderApp('/settings')

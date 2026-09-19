@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { TriangleAlert, Upload } from 'lucide-react'
-import { useRef, useState, type CSSProperties, type DragEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent } from 'react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -22,6 +22,18 @@ import { BRANDING, BRANDING_DOCUMENT } from '@/lib/query-keys'
 const HEX = /^#[0-9a-fA-F]{6}$/
 /** WCAG AA for body text. Below it the screen warns — and saves anyway. */
 const AA = 4.5
+/** Long enough to swallow a drag across the colour picker, short enough to feel live. */
+const PREVIEW_DEBOUNCE_MS = 200
+
+/** The value once it has stopped changing. One consumer, so it lives here. */
+function useDebounced<T>(value: T, ms: number): T {
+  const [settled, setSettled] = useState(value)
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(value), ms)
+    return () => clearTimeout(timer)
+  }, [value, ms])
+  return settled
+}
 
 /**
  * The white-label panel: two images and two colours.
@@ -44,15 +56,34 @@ export function BrandingPanel() {
   }
   const valid = HEX.test(colours.brand_primary) && HEX.test(colours.brand_secondary)
 
-  // Only asked for while somebody is still choosing; the stored answer already carries the
-  // same shape, so nothing is fetched on a screen nobody has touched.
+  // Only asked for while somebody is still choosing, and only once they stop: a colour input
+  // dragged across its picker fires continuously, and without this every intermediate shade
+  // is a round trip *and* a cache entry that lives for the rest of the session.
+  const asked = useDebounced(
+    useMemo(
+      () => ({
+        brand_primary: colours.brand_primary,
+        brand_secondary: colours.brand_secondary,
+      }),
+      [colours.brand_primary, colours.brand_secondary],
+    ),
+    PREVIEW_DEBOUNCE_MS,
+  )
+  // `asked === colours` is what "they have stopped" means. Without it the first keystroke
+  // fires a request for the *previous* value, which is the one already on screen.
+  const settled =
+    asked.brand_primary === colours.brand_primary &&
+    asked.brand_secondary === colours.brand_secondary
   const preview = useQuery({
-    queryKey: [...BRANDING, 'preview', colours.brand_primary, colours.brand_secondary],
-    queryFn: () => previewBranding(colours),
-    enabled: valid && draft !== null,
+    queryKey: [...BRANDING, 'preview', asked.brand_primary, asked.brand_secondary],
+    queryFn: () => previewBranding(asked),
+    enabled: settled && valid && draft !== null,
     staleTime: Infinity,
   })
-  const shown: Branding | undefined = draft === null ? stored.data : preview.data
+  // Falling back to the stored palette keeps the two panels on screen through the pause
+  // rather than blanking them on every keystroke.
+  const shown: Branding | undefined =
+    draft === null ? stored.data : (preview.data ?? stored.data)
 
   const save = useMutation({
     mutationFn: updateBrandColours,

@@ -756,12 +756,19 @@ async def test_every_403_the_api_emits_carries_a_code(client):
         "/api/auth/password/change",
         json={"current_password": "also not it", "new_password": "a brand new passphrase"},
     )
+    # The one 403 that is not raised but built: the upload middleware runs outside the
+    # exception handler, so it has to carry its own `code` and this list is what proves it
+    # does. An enumerated invariant only covers what somebody remembered to enumerate.
+    no_origin = await client.post(
+        "/api/admin/business/logo", files={"file": ("logo.png", b"\x89PNG\r\n\x1a\n", "image/png")}
+    )
 
     for resp, code in (
         (bad_token, "invalid_setup_token"),
         (reauth_needed, "admin_mode_required"),
         (wrong_password, "invalid_password"),
         (wrong_current, "invalid_password"),
+        (no_origin, "upload_origin_required"),
     ):
         assert resp.status_code == 403, resp.text
         assert resp.json()["code"] == code, resp.text

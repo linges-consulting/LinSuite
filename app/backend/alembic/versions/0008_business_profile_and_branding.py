@@ -12,10 +12,12 @@ live — the address is collected on a screen, not by the wizard.
 `country` and `currency_symbol` carry defaults rather than being nullable, because "no
 country" and "no currency symbol" are not states a receipt can be rendered from.
 
-Two CHECK constraints, both for values that end up somewhere they cannot be validated again:
-the province is what a tax-rate table will join on, and the brand colours are interpolated
-into CSS variables on `<html>`. Pydantic refuses a bad one at the boundary; the constraint is
-what refuses it when the next writer is a migration or a psql session.
+Three CHECK constraints, all for values that end up somewhere they cannot be validated again:
+the province is what a tax-rate table will join on, the postal code is printed on a receipt,
+and the brand colours are interpolated into CSS variables on `<html>`. Pydantic refuses a bad
+one at the boundary; the constraint is what refuses it when the next writer is a migration or
+a psql session. That division is why `BusinessOut` does not re-validate on the way out — the
+row is already trustworthy, and a read that 500s helps nobody.
 """
 
 from collections.abc import Sequence
@@ -72,6 +74,12 @@ def upgrade() -> None:
         "businesses",
         "province IS NULL OR province IN (" + ", ".join(f"'{p}'" for p in PROVINCES) + ")",
     )
+    # Canada Post's format, in the one shape the API normalises to: `A1A 1A1`, upper case.
+    op.create_check_constraint(
+        "ck_businesses_postal_code",
+        "businesses",
+        "postal_code IS NULL OR postal_code ~ '^[A-Z][0-9][A-Z] [0-9][A-Z][0-9]$'",
+    )
     op.create_check_constraint(
         "ck_businesses_brand_hex",
         "businesses",
@@ -95,6 +103,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_table("branding_assets")
     op.drop_constraint("ck_businesses_brand_hex", "businesses", type_="check")
+    op.drop_constraint("ck_businesses_postal_code", "businesses", type_="check")
     op.drop_constraint("ck_businesses_province", "businesses", type_="check")
     for column in ("brand_secondary", "brand_primary", "currency_symbol", "country"):
         op.drop_column("businesses", column)

@@ -153,7 +153,9 @@ async def test_timezones_are_the_sorted_canonical_iana_list(client):
     zones = resp.json()["timezones"]
     assert zones == sorted(zones)
     assert "America/Toronto" in zones
-    assert "US/Eastern" not in zones and "UTC" not in zones
+    assert "US/Eastern" not in zones and "Etc/UTC" not in zones
+    # `UTC` is the one exception, and `tests/test_settings.py` is where the reason lives.
+    assert "UTC" in zones
     assert len(zones) > 400
 
 

@@ -17,7 +17,7 @@ from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
 from core.config import get_settings
 from core.db import SessionDep, get_engine, get_purge_engine, session_scope
-from core.errors import Forbidden
+from core.errors import UPLOAD_ORIGIN_REQUIRED, Forbidden
 from core.logging import configure_logging
 from core.redis import get_redis
 from settings.images import FAVICON_MAX_BYTES, LOGO_MAX_BYTES
@@ -101,7 +101,13 @@ async def require_json_body(request: Request, call_next):
     cap = _UPLOADS.get(request.url.path) if request.method == "POST" else None
     if cap is not None:
         if not _from_this_deployment(request):
-            return JSONResponse({"detail": "Upload from this application."}, status_code=403)
+            # Coded like every other 403 (`core/errors.py`). Built by hand rather than raised
+            # as `Forbidden`, because this runs *outside* `ExceptionMiddleware` and the
+            # handler registered for it would never see the exception.
+            return JSONResponse(
+                {"detail": "Upload from this application.", "code": UPLOAD_ORIGIN_REQUIRED},
+                status_code=403,
+            )
         declared = request.headers.get("content-length")
         if declared and declared.isdigit() and int(declared) > cap + _MULTIPART_OVERHEAD:
             return JSONResponse({"detail": f"Keep it under {cap // 1024} KB."}, status_code=413)

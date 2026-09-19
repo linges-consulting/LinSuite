@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { applyBranding, applyCachedBranding } from '@/lib/branding'
 import {
   BRANDING_DOCUMENT,
   BUSINESS_NAME,
@@ -13,6 +14,8 @@ import {
 afterEach(() => {
   vi.unstubAllGlobals()
   document.documentElement.removeAttribute('style')
+  // The `<link rel="icon">` is created in `<head>`, which jsdom keeps across tests in a file.
+  document.querySelector('link[rel="icon"]')?.remove()
   localStorage.clear()
 })
 
@@ -63,6 +66,41 @@ test('an instance with no logo shows the brand mark rather than a broken image',
   await waitFor(() => expect(document.querySelector('img[src^="/api/branding"]')).toBeNull())
 })
 
+test('a wordmark logo keeps its aspect ratio instead of being squeezed into a square', async () => {
+  stubApi({ signedIn: true })
+
+  renderApp('/')
+
+  const logo = await screen.findByRole('presentation', { hidden: true })
+  // Height is pinned to the sidebar row; the width follows. `size-6` on both axes would
+  // render an ordinary wide wordmark at about 24x12 and make it unreadable.
+  expect(logo).toHaveClass('h-6', 'w-auto', 'object-contain')
+  expect(logo.className).not.toMatch(/\bsize-6\b/)
+})
+
+test('removing the favicon puts the stock mark back without a reload', async () => {
+  // The tab as it stands before the administrator removes the icon.
+  applyBranding(BRANDING_DOCUMENT)
+  const icon = document.querySelector<HTMLLinkElement>('link[rel="icon"]')!
+  expect(icon.href).toContain('/api/branding/favicon')
+
+  stubApi({
+    signedIn: true,
+    brandingDocument: { ...BRANDING_DOCUMENT, favicon_url: null, favicon_etag: null },
+  })
+  renderApp('/')
+
+  await waitFor(() => expect(icon.href).toContain('/favicon.svg'))
+})
+
+test('a cache this version cannot read is dropped rather than re-applied every load', async () => {
+  localStorage.setItem('branding', 'not json')
+
+  applyCachedBranding()
+
+  expect(localStorage.getItem('branding')).toBeNull()
+})
+
 // --- the Branding panel ---------------------------------------------------------------------
 
 async function openBranding() {
@@ -102,6 +140,22 @@ test('a malformed hex is refused before it can be saved', async () => {
 
   expect(await screen.findByText(/six-digit hex colour/)).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Save colours' })).toBeDisabled()
+})
+
+test('typing a colour asks the server once, not once per keystroke', async () => {
+  const { calls } = stubApi({ signedIn: true, dualRole: true, adminWindowMs: 15 * 60_000 })
+  renderApp('/settings')
+  const user = await openBranding()
+
+  const primary = await screen.findByRole('textbox', { name: 'Primary' })
+  await user.clear(primary)
+  await user.type(primary, '#b91c1c')
+
+  // The settled value is asked for; the six intermediate shades are not — each would be a
+  // round trip *and* a cache entry that lives for the rest of the session.
+  const previews = () => calls.filter((c) => c.url.includes('/branding/preview'))
+  await waitFor(() => expect(previews()[0]?.url).toContain('%23b91c1c'))
+  expect(previews()).toHaveLength(1)
 })
 
 test('the preview shows the colour on both themes', async () => {

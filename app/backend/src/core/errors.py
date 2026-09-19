@@ -40,6 +40,11 @@ MFA_ENROLMENT_REQUIRED = "mfa_enrolment_required"
 MFA_REQUIRED = "mfa_required"
 # An emailed code was asked for where this account may not use one.
 MFA_EMAIL_OTP_NOT_ALLOWED = "mfa_email_otp_not_allowed"
+# A multipart upload arrived without an `Origin` (or `Referer`) naming this deployment. The
+# two upload paths are the only ones exempt from the JSON-only rule, so this stands in for it
+# there. Emitted by the middleware in `main.py` rather than raised as `Forbidden`: that handler
+# runs inside `ExceptionMiddleware`, which a middleware's own exception never reaches.
+UPLOAD_ORIGIN_REQUIRED = "upload_origin_required"
 
 
 class Forbidden(HTTPException):

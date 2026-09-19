@@ -8,13 +8,21 @@ losing arms race for a format nobody needs for a 512-pixel logo.
 
 **Everything is re-encoded.** The stored bytes are what Pillow wrote from the decoded pixels,
 so whatever metadata, trailing payload or exotic chunk arrived with the upload does not
-survive. The size cap is the other half: a decoded-image bomb is refused by the cap before
-Pillow is asked to allocate anything.
+survive. Two pieces of that metadata have to be handled rather than merely not copied:
+
+- **The ICC profile is carried in `im.info` and Pillow re-attaches it on save.** After a
+  `convert("RGBA")` it describes a colour space the pixels are no longer in — a CMYK JPEG
+  converted to RGB and then shipped with its CMYK profile renders wrong, which on a brand
+  colour is the one thing this feature exists to get right. It is dropped explicitly.
+- **EXIF orientation is applied, not discarded.** A photo from a phone is stored rotated and
+  says so in a tag; drop the tag without rotating the pixels and the logo is sideways.
+
+The size cap is the other half: a decoded-image bomb is refused before Pillow allocates.
 """
 
 import io
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 LOGO_MAX_BYTES = 1024 * 1024
 FAVICON_MAX_BYTES = 256 * 1024
@@ -79,9 +87,13 @@ def normalise(data: bytes, *, allowed: tuple[str, ...], max_px: int) -> tuple[by
     except Exception:
         raise Rejected(415, "That file could not be read as an image.") from None
 
+    # Rotate before converting, while the tag is still attached to the pixels it describes.
+    image = ImageOps.exif_transpose(image)
+    image = image.convert("RGBA")
+    # Now in sRGB whatever it arrived as, so the old profile would be a lie on the way out.
+    image.info.pop("icc_profile", None)
     # `thumbnail` is a no-op when the image already fits, so a small logo is re-encoded but
     # never upscaled — scaling a 64px mark up to 512 would only make it blurry.
-    image = image.convert("RGBA")
     image.thumbnail((max_px, max_px))
     out = io.BytesIO()
     image.save(out, "PNG", optimize=True)

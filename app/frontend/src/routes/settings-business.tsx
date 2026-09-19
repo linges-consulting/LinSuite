@@ -33,10 +33,16 @@ import {
 } from '@/lib/api'
 import { BRANDING_DOCUMENT, BUSINESS } from '@/lib/query-keys'
 
-const PROFILE_FIELDS: { key: keyof BusinessProfile; label: string; hint?: string }[] = [
+// An address, in the order it is written on an envelope. The province select is rendered
+// between `city` and `postal_code` rather than being a text input in this list.
+type ProfileField = { key: keyof BusinessProfile; label: string; hint?: string }
+
+const BEFORE_PROVINCE: ProfileField[] = [
   { key: 'address_line1', label: 'Address' },
   { key: 'address_line2', label: 'Address line 2' },
   { key: 'city', label: 'City' },
+]
+const AFTER_PROVINCE: ProfileField[] = [
   { key: 'postal_code', label: 'Postal code', hint: 'Canadian format, like V8W 1P6.' },
   { key: 'phone', label: 'Phone' },
   { key: 'email', label: 'Email' },
@@ -104,21 +110,18 @@ export function BusinessPanel() {
           />
         </Field>
 
+        {BEFORE_PROVINCE.map((field) => (
+          <TextField key={field.key} field={field} form={form} errors={errors} set={set} />
+        ))}
+
         <ProvinceField
           value={form.province}
           onChange={(province) => set({ province })}
           error={errors.province}
         />
 
-        {PROFILE_FIELDS.map(({ key, label, hint }) => (
-          <Field key={key} label={label} htmlFor={key} error={errors[key]} hint={hint}>
-            <Input
-              id={key}
-              value={(form[key] as string | null) ?? ''}
-              onChange={(e) => set({ [key]: e.target.value } as Partial<BusinessProfile>)}
-              aria-invalid={errors[key] ? true : undefined}
-            />
-          </Field>
+        {AFTER_PROVINCE.map((field) => (
+          <TextField key={field.key} field={field} form={form} errors={errors} set={set} />
         ))}
 
         <Field
@@ -171,6 +174,26 @@ export function BusinessPanel() {
 
       <TimezoneSection current={business.data.timezone} province={form.province} />
     </div>
+  )
+}
+
+function TextField(props: {
+  field: ProfileField
+  form: BusinessProfile
+  errors: Record<string, string>
+  set: (patch: Partial<BusinessProfile>) => void
+}) {
+  const { key, label, hint } = props.field
+  const error = props.errors[key]
+  return (
+    <Field label={label} htmlFor={key} error={error} hint={hint}>
+      <Input
+        id={key}
+        value={(props.form[key] as string | null) ?? ''}
+        onChange={(e) => props.set({ [key]: e.target.value } as Partial<BusinessProfile>)}
+        aria-invalid={error ? true : undefined}
+      />
+    </Field>
   )
 }
 
