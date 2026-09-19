@@ -28,8 +28,10 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
+    Text,
     func,
     text,
 )
@@ -97,5 +99,46 @@ class Staff(Base):
     active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     # The calendar's column order. A tie is broken by display name, so equal values are a
     # stable list rather than whatever the planner returns.
+    sort_order: Mapped[int] = mapped_column(Integer, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Resource(Base):
+    """A space or a piece of equipment: the physical things a service is delivered in and
+    with (PRD §1, tech-stack §15, §20).
+
+    **One table for both, told apart by `kind`.** They carry the same facts — a name, an
+    optional colour to paint the schedule with, whether they can still be booked — and a
+    booking only cares that a resource exists and is active, never which kind it is. Two
+    tables would be two copies of every query that later reads either.
+
+    **`kind` is a CHECK-constrained string, not a Postgres enum**, consistent with `staff`'s
+    `active`/practitioner rules: adding a third kind is an ALTER TABLE either way, and a
+    plain column keeps this file free of a dialect-specific enum type migration.
+
+    **Names are unique per kind, case-insensitively** — `ux_resources_kind_name` below — so
+    "Room 1" and "room 1" collide but the space "Room 1" and the equipment "Room 1" do not.
+
+    **No hard delete.** `active` going false is the only ending: a booking that already
+    claimed this resource must never lose what it pointed at. Later tickets' pickers read
+    `active` to leave it off the list; this table never refuses a write because of it.
+    """
+
+    __tablename__ = "resources"
+    __table_args__ = (
+        CheckConstraint("kind IN ('space', 'equipment')", name="ck_resources_kind"),
+        Index("ux_resources_kind_name", "kind", text("lower(name)"), unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    kind: Mapped[str] = mapped_column(String(16))
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str | None] = mapped_column(Text)
+    # A key from `scheduling/palette.py`, like `staff.colour` — optional here, because a
+    # resource showing up on the schedule in no particular colour is a reasonable start.
+    colour: Mapped[str | None] = mapped_column(String(16))
+    active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     sort_order: Mapped[int] = mapped_column(Integer, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
