@@ -12,6 +12,7 @@ from auth import models as _auth_models  # noqa: F401
 from core import models as _core_models  # noqa: F401
 from core.config import get_settings
 from core.db import Base
+from customers import models as _customers_models  # noqa: F401
 from scheduling import models as _scheduling_models  # noqa: F401
 from settings import models as _settings_models  # noqa: F401
 
