@@ -12,6 +12,7 @@ import { MfaEnrolPage } from '@/routes/mfa-enrol'
 import { MfaVerifyPage } from '@/routes/mfa-verify'
 import { PlaceholderPage } from '@/routes/placeholder'
 import { ResetPasswordPage } from '@/routes/reset-password'
+import { SchedulePage } from '@/routes/schedule'
 import { SecurityPage } from '@/routes/security'
 import { SettingsPage } from '@/routes/settings'
 import { SetupPage } from '@/routes/setup'
@@ -145,7 +146,7 @@ function AppRoutes() {
       />
       <Route element={gate}>
         <Route index element={<HomePage />} />
-        <Route path="schedule" element={<PlaceholderPage title="Schedule" />} />
+        <Route path="schedule" element={<SchedulePage />} />
         <Route path="clients" element={<PlaceholderPage title="Clients" />} />
         <Route path="catalog" element={<PlaceholderPage title="Catalog" />} />
         <Route path="settings" element={<SettingsPage />} />

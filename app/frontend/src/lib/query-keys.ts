@@ -31,3 +31,11 @@ export const BRANDING = ['business-branding'] as const
 /** The service catalog. One key: the table and the create dialog both read it, and a
  *  service created in the dialog has to reach the table behind it. */
 export const SERVICES = ['services'] as const
+/** The schedule's column roster (`/api/staff`), and the appointments on a day. The list key
+ *  takes the date as a second element, so booking invalidates every day the tab has seen. */
+export const ROSTER = ['roster'] as const
+export const APPOINTMENTS = ['appointments'] as const
+/** The catalog as the booking screen reads it — a different endpoint and shape from
+ *  `SERVICES`, which is the administrator's editing view. */
+export const CATALOG = ['catalog'] as const
+export const AVAILABILITY = ['availability'] as const

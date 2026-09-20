@@ -1003,3 +1003,114 @@ export async function fetchAvailability(query: {
   if (!res.ok) throw await failure(res, 'Could not load the available times')
   return res.json()
 }
+
+// --- the schedule: who has a column, what is booked, and booking one -----------------------
+
+/** A column on the schedule. Active staff only, in column order, with the colour's hexes
+ *  so a screen holding no `users.manage` can paint without the admin palette. */
+export type RosterEntry = {
+  id: string
+  display_name: string
+  colour: string
+  hex: string
+  dark_hex: string
+  sort_order: number
+}
+
+export async function fetchRoster(): Promise<RosterEntry[]> {
+  const res = await fetch('/api/staff')
+  if (!res.ok) throw await failure(res, 'Could not load the staff')
+  return (await res.json()).staff
+}
+
+/** The catalog as the booking screen and the availability engine read it: active services,
+ *  with `staff_ids` already pruned to active staff and `bookable` decided server-side. */
+export type CatalogService = Omit<ServiceRow, 'active'> & {
+  bookable: boolean
+  unbookable_reasons: string[]
+}
+
+export async function fetchCatalog(): Promise<CatalogService[]> {
+  const res = await fetch('/api/catalog/services')
+  if (!res.ok) throw await failure(res, 'Could not load the services')
+  return (await res.json()).services
+}
+
+export type Customer = {
+  id: string
+  first_name: string
+  last_name: string
+  email: string | null
+  phone: string | null
+}
+
+export type CustomerDraft = {
+  first_name: string
+  last_name: string
+  email?: string | null
+  phone?: string | null
+}
+
+/** Prefix matches on either name, the email, or the digits of a phone number. */
+export async function searchCustomers(q: string): Promise<Customer[]> {
+  const res = await fetch(`/api/customers?${new URLSearchParams({ q })}`)
+  if (!res.ok) throw await failure(res, 'Could not search the customers')
+  return (await res.json()).customers
+}
+
+/**
+ * One appointment as the calendar draws it. The numbers are the *snapshot* taken from the
+ * service at booking — editing the catalog afterwards changes none of them. Instants are UTC.
+ */
+export type Appointment = {
+  id: string
+  status: 'confirmed' | 'completed' | 'cancelled' | 'no_show'
+  starts_at: string
+  ends_at: string
+  duration_minutes: number
+  buffer_before_minutes: number
+  buffer_after_minutes: number
+  price_cents: number
+  notes: string | null
+  booking_group_id: string | null
+  customer: Customer
+  service: { id: string; name: string }
+  staff: { id: string; display_name: string; colour: string }
+  resources: { id: string; name: string; kind: ResourceKind }[]
+}
+
+/** `from`/`to` are business-local dates, `to` inclusive, at most 31 days apart. */
+export async function fetchAppointments(query: {
+  from: string
+  to: string
+  staff_id?: string
+}): Promise<{ timezone: string; appointments: Appointment[] }> {
+  const params = new URLSearchParams({ from: query.from, to: query.to })
+  if (query.staff_id) params.set('staff_id', query.staff_id)
+  const res = await fetch(`/api/appointments?${params}`)
+  if (!res.ok) throw await failure(res, 'Could not load the appointments')
+  return res.json()
+}
+
+/**
+ * `staff_id` null is "any available": the server assigns the first free person by column
+ * order. `starts_at` is a slot's own `starts_at` from `fetchAvailability`, never a time this
+ * screen computed. Exactly one of `customer_id` and `customer`.
+ *
+ * A 409 with `code: 'slot_taken'` is the race lost: somebody booked it between the slots
+ * being shown and this call. The screen refreshes the slots and says so.
+ */
+export type BookingDraft = {
+  service_id: string
+  staff_id: string | null
+  starts_at: string
+  customer_id?: string
+  customer?: CustomerDraft
+  notes?: string | null
+}
+
+export async function bookAppointment(draft: BookingDraft): Promise<Appointment> {
+  const res = await send('POST', '/api/appointments', draft)
+  if (!res.ok) throw await failure(res, 'Could not book the appointment')
+  return res.json()
+}
