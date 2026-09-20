@@ -25,8 +25,8 @@ export function DragLayer(props: {
           {...dragged}
           top={drag.start}
           height={drag.end - drag.start}
-          left={0}
-          width={1}
+          left={dragged.left}
+          width={dragged.width}
           ghost
           className="pointer-events-none z-30"
           colour={props.colour(dragged.appointment.staff.id)}

@@ -196,13 +196,19 @@ class BookingIn(BaseModel):
 
 
 async def offered_slot(
-    db: AsyncSession, service: CatalogServiceOut, staff_ids: list[uuid.UUID], starts_at
+    db: AsyncSession,
+    service: CatalogServiceOut,
+    staff_ids: list[uuid.UUID],
+    starts_at,
+    *,
+    excluding: uuid.UUID | None = None,
 ) -> tuple[Computed, Slot | None]:
     """The engine's answer for the local day `starts_at` falls on, and the slot at exactly
     that instant if it is offered to one of `staff_ids`. Its own function so a test can hold
-    the door open between the check and the insert (`test_two_concurrent_bookings...`)."""
+    the door open between the check and the insert (`test_two_concurrent_bookings...`).
+    `excluding` is the appointment being moved, left out of what is busy."""
     day = starts_at.astimezone(await business_zone(db)).date()
-    computed = await compute(db, service, staff_ids, day, day)
+    computed = await compute(db, service, staff_ids, day, day, excluding=excluding)
     slot = next((s for s in computed.days[day] if s.starts_at == starts_at), None)
     return computed, slot
 
@@ -442,11 +448,9 @@ async def change_appointment(
             "buffer_after_minutes": appointment.buffer_after_minutes,
         }
     )
-    day = starts_at.astimezone(await business_zone(db)).date()
-    computed = await compute(
-        db, service, [appointment.staff_id], day, day, excluding=appointment.id
+    computed, slot = await offered_slot(
+        db, service, [appointment.staff_id], starts_at, excluding=appointment.id
     )
-    slot = next((s for s in computed.days[day] if s.starts_at == starts_at), None)
     if slot is None:
         return not_offered()
 

@@ -149,7 +149,13 @@ function fakeServer({
         return Response.json({
           timezone: 'America/Toronto',
           granularity_minutes: 15,
-          staff: ROSTER.filter((s) => !staff || s.id === staff).map(({ sort_order: _, ...s }) => s),
+          staff: ROSTER.filter((s) => !staff || s.id === staff).map((s) => ({
+            id: s.id,
+            display_name: s.display_name,
+            colour: s.colour,
+            hex: s.hex,
+            dark_hex: s.dark_hex,
+          })),
           // Everybody works 09:00–17:00 Toronto on every asked-for day.
           working_blocks: dates.flatMap((date) =>
             ROSTER.filter((s) => !staff || s.id === staff).map((s) => ({
@@ -306,14 +312,14 @@ test('an appointment sits in its staff column, one pixel per minute from midnigh
   fakeServer({ appointments: [BOOKED, SHORT] })
   renderSchedule()
 
-  const bo = await screen.findByRole('gridcell', { name: 'Bo Chen' })
+  const bo = await screen.findByRole('region', { name: 'Bo Chen' })
   const card = within(bo).getByTestId('event-a1')
   expect(card).toHaveAccessibleName('Priya Nair, Swedish Massage, 10:00 AM to 11:00 AM with Bo Chen')
   // 10:00 Toronto is 600 minutes into the day; an hour is 60 px.
   expect(card.parentElement).toHaveStyle({ top: '600px', height: '60px' })
   expect(within(bo).getByText('10:00 AM – 11:00 AM')).toBeInTheDocument()
   // A fifteen-minute event still shows a single clipped line with its title.
-  const ana = screen.getByRole('gridcell', { name: 'Ana Rossi' })
+  const ana = screen.getByRole('region', { name: 'Ana Rossi' })
   expect(within(ana).getByTestId('event-a3').parentElement).toHaveStyle({ height: '15px' })
   expect(within(ana).getByText(/Quick Trim/)).toHaveClass('truncate')
   // The now-line is drawn at 10:32 in every column of today.
@@ -328,7 +334,7 @@ test('two overlapping appointments sit side by side at half width', async () => 
   fakeServer({ appointments: [BOOKED, OVERLAPPING] })
   renderSchedule()
 
-  const bo = await screen.findByRole('gridcell', { name: 'Bo Chen' })
+  const bo = await screen.findByRole('region', { name: 'Bo Chen' })
   const first = within(bo).getByTestId('event-a1').parentElement!
   const second = within(bo).getByTestId('event-a2').parentElement!
   expect(first).toHaveStyle({ left: 'calc(0% + 1px)', width: 'calc(50% - 2px)' })
@@ -341,7 +347,7 @@ test('drawing on empty space opens the dialog prefilled with the person and the 
   const user = userEvent.setup()
   renderSchedule()
 
-  const ana = await screen.findByRole('gridcell', { name: 'Ana Rossi' })
+  const ana = await screen.findByRole('region', { name: 'Ana Rossi' })
   // jsdom lays nothing out, so the column's top is 0 and clientY is the y: 10:00 to 10:45.
   fireEvent.pointerDown(ana, { clientY: 600, button: 0, pointerId: 1, pointerType: 'mouse' })
   fireEvent.pointerMove(ana, { clientY: 640, pointerId: 1 })
@@ -368,7 +374,7 @@ test('a drawn time the server does not offer is said so', async () => {
   const user = userEvent.setup()
   renderSchedule()
 
-  const ana = await screen.findByRole('gridcell', { name: 'Ana Rossi' })
+  const ana = await screen.findByRole('region', { name: 'Ana Rossi' })
   // 10:15 is Bo's alone.
   fireEvent.pointerDown(ana, { clientY: 615, button: 0, pointerId: 1, pointerType: 'mouse' })
   fireEvent.pointerUp(ana, { clientY: 615, pointerId: 1 })
@@ -442,6 +448,50 @@ test('the bottom edge is its own handle, and resizes from the keyboard too', asy
   expect(patches(calls)[0].body).toEqual({ duration_minutes: 45 })
 })
 
+test('nothing can be drawn while a card is picked up, and the drag still drops where it was', async () => {
+  onTheFifteenth()
+  const calls = fakeServer({ appointments: [BOOKED] })
+  const user = userEvent.setup()
+  renderSchedule()
+
+  const card = await screen.findByTestId('event-a1')
+  card.focus()
+  await user.keyboard('[Enter][ArrowDown]')
+  expect(screen.getByText('10:15 AM – 11:15 AM')).toBeInTheDocument()
+  // A mouse-down on empty space now: no selection, no dialog on release.
+  const ana = screen.getByRole('region', { name: 'Ana Rossi' })
+  fireEvent.pointerDown(ana, { clientY: 600, button: 0, pointerId: 1, pointerType: 'mouse' })
+  fireEvent.pointerMove(ana, { clientY: 640, pointerId: 1 })
+  expect(screen.queryByTestId('selection')).not.toBeInTheDocument()
+  fireEvent.pointerUp(ana, { clientY: 640, pointerId: 1 })
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  // The drag is untouched: Escape puts it back and nothing was sent.
+  await user.keyboard('[Escape]')
+  expect(screen.queryByText('10:15 AM – 11:15 AM')).not.toBeInTheDocument()
+  expect(patches(calls)).toHaveLength(0)
+  // And drawing works again once nothing is picked up.
+  fireEvent.pointerDown(ana, { clientY: 600, button: 0, pointerId: 1, pointerType: 'mouse' })
+  expect(screen.getByTestId('selection')).toBeInTheDocument()
+  fireEvent.pointerUp(ana, { clientY: 600, pointerId: 1 })
+  expect(await screen.findByRole('dialog', { name: 'New appointment' })).toBeInTheDocument()
+})
+
+test('the ghost keeps the packed width of the card it previews', async () => {
+  onTheFifteenth()
+  fakeServer({ appointments: [BOOKED, OVERLAPPING] })
+  const user = userEvent.setup()
+  renderSchedule()
+
+  const card = await screen.findByTestId('event-a2')
+  card.focus()
+  await user.keyboard('[Enter][ArrowDown]')
+
+  // The 10:30 card, one step down, at its own half of the column.
+  const ghost = screen.getByText('10:45 AM – 11:45 AM').closest('.ring-2')!.parentElement!
+  expect(ghost).toHaveStyle({ left: 'calc(50% + 1px)', width: 'calc(50% - 2px)' })
+  await user.keyboard('[Escape]')
+})
+
 test('a refused move goes back where it was, with the reason on screen', async () => {
   onTheFifteenth()
   const calls = fakeServer({ appointments: [BOOKED], moveRefused: 'not_offered' })
@@ -489,7 +539,7 @@ test('all-day time off and closures are pinned in the row above the grid', async
   const boRow = screen.getByRole('list', { name: 'All day, Bo Chen' })
   expect(within(boRow).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['Closed · Retreat'])
   // The timed one is hatched in the column, not pinned above.
-  const bo = screen.getByRole('gridcell', { name: 'Bo Chen' })
+  const bo = screen.getByRole('region', { name: 'Bo Chen' })
   expect(within(bo).getByTestId('time-off')).toHaveStyle({ top: '840px', height: '60px' })
 })
 
@@ -499,15 +549,15 @@ test('the week view asks for Monday to Sunday and shows seven day columns', asyn
   const user = userEvent.setup()
   renderSchedule()
 
-  await screen.findByRole('gridcell', { name: 'Bo Chen' })
+  await screen.findByRole('region', { name: 'Bo Chen' })
   await user.click(screen.getByRole('tab', { name: 'Week' }))
 
   await waitFor(() =>
     expect(calls.some((c) => c.url === '/api/schedule?from=2026-06-15&to=2026-06-21')).toBe(true),
   )
-  expect(await screen.findByRole('gridcell', { name: 'Mon' })).toBeInTheDocument()
-  expect(screen.getAllByRole('gridcell')).toHaveLength(7)
-  expect(within(screen.getByRole('gridcell', { name: 'Mon' })).getByTestId('event-a1')).toBeInTheDocument()
+  expect(await screen.findByRole('region', { name: 'Mon' })).toBeInTheDocument()
+  expect(document.querySelectorAll('[data-column]')).toHaveLength(7)
+  expect(within(screen.getByRole('region', { name: 'Mon' })).getByTestId('event-a1')).toBeInTheDocument()
   // Narrowing to one person asks the server for that person.
   await user.click(screen.getByRole('combobox', { name: 'Staff member' }))
   await user.click(await screen.findByRole('option', { name: 'Ana Rossi' }))

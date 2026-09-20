@@ -40,7 +40,9 @@ export function EventBody(
 ) {
   const { appointment: a, top, height, left, width, colour } = props
   const foreground = readableOn(colour)
-  const stripe = `color-mix(in srgb, ${foreground} 45%, transparent)`
+  // A solid shade of the colour, pulled a third of the way toward the readable foreground:
+  // darker on a light card, lighter on a dark one, visible on both themes.
+  const stripe = `color-mix(in srgb, ${colour} 65%, ${foreground})`
   const title = `${a.customer.first_name} ${a.customer.last_name}`
   // Two lines need 36 px; under that there is one, clipped — a 15-minute card included.
   const tiny = height < 36
@@ -126,10 +128,12 @@ export function EventCard(
         a.status === 'cancelled' && 'opacity-50 line-through',
       )}
     >
+      {/* oxlint-disable react/refs -- dnd-kit's `setNodeRef`/listeners are callbacks, not `.current` reads */}
       <div
         ref={body.setNodeRef}
         {...body.listeners}
         {...body.attributes}
+        /* oxlint-enable react/refs */
         aria-label={label}
         data-testid={`event-${a.id}`}
         className={cn(
@@ -138,10 +142,12 @@ export function EventCard(
         )}
       />
       {!disabled && (
+        /* oxlint-disable react/refs -- same: dnd-kit callbacks, no ref read in render */
         <div
           ref={edge.setNodeRef}
           {...edge.listeners}
           {...edge.attributes}
+          /* oxlint-enable react/refs */
           aria-label={`Change the end of ${label}`}
           data-testid={`resize-${a.id}`}
           className="absolute inset-x-1 -bottom-1 h-2.5 cursor-ns-resize touch-none rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"

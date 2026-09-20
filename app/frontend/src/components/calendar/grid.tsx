@@ -212,6 +212,10 @@ export function Grid(props: {
     onPointerDown: (i: number) => (event: PointerEvent<HTMLDivElement>) => {
       if (!canManage || event.button !== 0 || event.target !== event.currentTarget) return
       if (event.pointerType === 'touch') return
+      // Not while a card is picked up: a keyboard drag is still live until Enter or Escape,
+      // and a draw on top of it would open the dialog with dnd-kit's window listener still
+      // waiting to drop the card from inside it.
+      if (dragRef.current) return
       const slot = slotAt(event)
       anchor.current = slot
       setSelection({ column: i, start: slot, end: slot + step })
@@ -261,7 +265,9 @@ export function Grid(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const template = `4.25rem repeat(${columns.length}, minmax(9rem, 1fr))`
+  // Seven dates have to fit beside the sidebar at 1200 px; a person's column can be wider.
+  const dates = new Set(columns.map((c) => c.date)).size > 1
+  const template = `4.25rem repeat(${columns.length}, minmax(${dates ? 7 : 9}rem, 1fr))`
   const announce = (id: string) => {
     const current = dragRef.current
     if (!current) return ''
@@ -306,7 +312,6 @@ export function Grid(props: {
                 // Today stands out among dates; among people every column is today.
                 column.today && column.staffId === null && 'text-primary',
               )}
-              role="columnheader"
             >
               {column.staffId && (
                 <span
@@ -355,7 +360,7 @@ export function Grid(props: {
                 key={column.key}
                 data-column={column.key}
                 data-testid={`column-${column.key}`}
-                role="gridcell"
+                role="region"
                 aria-label={column.label}
                 className={cn(
                   'relative border-r bg-muted/60 select-none',
