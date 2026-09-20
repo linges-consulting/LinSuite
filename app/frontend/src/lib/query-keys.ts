@@ -28,3 +28,6 @@ export const SECURITY = ['security-policy'] as const
 export const BRANDING_DOCUMENT = ['branding'] as const
 export const BUSINESS = ['business'] as const
 export const BRANDING = ['business-branding'] as const
+/** The service catalog. One key: the table and the create dialog both read it, and a
+ *  service created in the dialog has to reach the table behind it. */
+export const SERVICES = ['services'] as const

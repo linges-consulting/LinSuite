@@ -668,12 +668,14 @@ export type ResourceDraft = {
   sort_order: number
 }
 
-/** Inactive resources are left out unless asked for: they are history, not the picker. */
+/** Inactive resources are left out unless asked for: they are history, not the picker.
+ *  Omitting `kind` returns both, which is what the service requirements builder wants —
+ *  one round trip rather than one per tab. */
 export async function fetchResources(
-  kind: ResourceKind,
+  kind?: ResourceKind,
   includeInactive = false,
 ): Promise<ResourceRow[]> {
-  const query = new URLSearchParams({ kind })
+  const query = new URLSearchParams(kind ? { kind } : {})
   if (includeInactive) query.set('include_inactive', 'true')
   const res = await fetch(`/api/admin/resources?${query}`)
   if (!res.ok) throw await failure(res, 'Could not load the resources')
@@ -843,5 +845,106 @@ export async function fetchSecurityPolicy(): Promise<SecurityPolicy> {
 export async function updateSecurityPolicy(policy: SecurityPolicy): Promise<SecurityPolicy> {
   const res = await send('PATCH', '/api/admin/business/security', policy)
   if (!res.ok) throw await failure(res, 'Could not save the security policy')
+  return res.json()
+}
+
+// --- services: the catalog ----------------------------------------------------------------
+
+/** One thing delivering a service needs. `resource_id` null is "any active resource of this
+ *  kind" — the majority case, and the reason `kind` is on the row at all. */
+export type ServiceRequirement = {
+  kind: ResourceKind
+  resource_id: string | null
+  /** Carried by the server so a screen with no resource list still has something to print. */
+  resource_name: string | null
+}
+
+/**
+ * A service: what the business sells. `duration_minutes` plus the two buffers is the width
+ * the availability engine slides across a staff member's day, and `requirements` is what its
+ * free intervals have to be intersected with.
+ *
+ * `price_cents` is an integer — money is cents everywhere (CLAUDE.md). The forms show dollars
+ * and convert; nothing here ever holds a float.
+ *
+ * Editing a service never touches an appointment already booked against it: booking copies
+ * the duration, the buffers and the price onto the appointment at the moment it is made.
+ */
+export type ServiceRow = {
+  id: string
+  name: string
+  description: string | null
+  duration_minutes: number
+  buffer_before_minutes: number
+  buffer_after_minutes: number
+  price_cents: number
+  /** False is "staff may book it, the public portal may not offer it". */
+  bookable_online: boolean
+  active: boolean
+  sort_order: number
+  /** Staff ids, not user ids — the same id `/api/admin/staff` rows carry. */
+  staff_ids: string[]
+  requirements: ServiceRequirement[]
+}
+
+/** What the create and edit forms send. The two sets are their own endpoints. */
+export type ServiceDraft = {
+  name: string
+  description: string | null
+  duration_minutes: number
+  buffer_before_minutes: number
+  buffer_after_minutes: number
+  price_cents: number
+  bookable_online: boolean
+  sort_order: number
+}
+
+export async function fetchServices(includeInactive = false): Promise<ServiceRow[]> {
+  const res = await fetch(`/api/admin/services${includeInactive ? '?include_inactive=true' : ''}`)
+  if (!res.ok) throw await failure(res, 'Could not load the services')
+  return (await res.json()).services
+}
+
+export async function createService(draft: ServiceDraft): Promise<ServiceRow> {
+  const res = await send('POST', '/api/admin/services', draft)
+  if (!res.ok) throw await failure(res, 'Could not create the service')
+  return res.json()
+}
+
+export async function updateService(
+  id: string,
+  draft: Partial<ServiceDraft>,
+): Promise<ServiceRow> {
+  const res = await send('PATCH', `/api/admin/services/${id}`, draft)
+  if (!res.ok) throw await failure(res, 'Could not save the service')
+  return res.json()
+}
+
+/** The whole eligible set, replaced. Leaving somebody out is how they are dropped. */
+export async function replaceServiceStaff(id: string, staffIds: string[]): Promise<ServiceRow> {
+  const res = await send('PUT', `/api/admin/services/${id}/staff`, { staff_ids: staffIds })
+  if (!res.ok) throw await failure(res, 'Could not save who may deliver this')
+  return res.json()
+}
+
+/** The whole requirement set, replaced. `resource_name` is the server's to fill in. */
+export async function replaceServiceRequirements(
+  id: string,
+  requirements: { kind: ResourceKind; resource_id: string | null }[],
+): Promise<ServiceRow> {
+  const res = await send('PUT', `/api/admin/services/${id}/requirements`, { requirements })
+  if (!res.ok) throw await failure(res, 'Could not save what this service needs')
+  return res.json()
+}
+
+export async function deactivateService(id: string): Promise<ServiceRow> {
+  const res = await send('POST', `/api/admin/services/${id}/deactivate`, {})
+  if (!res.ok) throw await failure(res, 'Could not deactivate the service')
+  return res.json()
+}
+
+export async function reactivateService(id: string): Promise<ServiceRow> {
+  const res = await send('POST', `/api/admin/services/${id}/reactivate`, {})
+  if (!res.ok) throw await failure(res, 'Could not reactivate the service')
   return res.json()
 }

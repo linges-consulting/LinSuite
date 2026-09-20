@@ -3,6 +3,7 @@ import { BrandingPanel } from '@/routes/settings-branding'
 import { BusinessPanel } from '@/routes/settings-business'
 import { ClosuresPanel } from '@/routes/settings-closures'
 import { ResourcesPanel } from '@/routes/settings-resources'
+import { ServicesPanel } from '@/routes/settings-services'
 import { RolesPanel } from '@/routes/settings-roles'
 import { SecurityPanel } from '@/routes/settings-security'
 import { StaffPanel } from '@/routes/settings-staff'
@@ -27,6 +28,7 @@ export function SettingsPage() {
         <TabsTrigger value="roles">Roles</TabsTrigger>
         <TabsTrigger value="staff">Staff</TabsTrigger>
         <TabsTrigger value="resources">Resources</TabsTrigger>
+        <TabsTrigger value="services">Services</TabsTrigger>
         <TabsTrigger value="closures">Closures</TabsTrigger>
         <TabsTrigger value="security">Security</TabsTrigger>
       </TabsList>
@@ -44,6 +46,9 @@ export function SettingsPage() {
       </TabsContent>
       <TabsContent value="resources">
         <ResourcesPanel />
+      </TabsContent>
+      <TabsContent value="services">
+        <ServicesPanel />
       </TabsContent>
       <TabsContent value="closures">
         <ClosuresPanel />
