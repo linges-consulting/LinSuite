@@ -358,6 +358,23 @@ async def test_an_inactive_staff_member_may_not_be_made_eligible(client):
     assert resp.json()["detail"][0]["loc"] == ["body", "staff_ids"]
 
 
+async def test_a_refused_staff_replace_leaves_the_old_set_exactly_where_it_was(client):
+    """The DELETE and the INSERTs share a transaction. A set that came back half-applied
+    would be a service briefly deliverable by the wrong people."""
+    await as_admin(client)
+    service = await make(client)
+    ana = await make_staff(client, "ana@cedar.example", "Ana")
+    await client.put(f"{SERVICES}/{service['id']}/staff", json={"staff_ids": [ana["id"]]})
+
+    refused = await client.put(
+        f"{SERVICES}/{service['id']}/staff",
+        json={"staff_ids": [ana["id"], "00000000-0000-0000-0000-000000000000"]},
+    )
+
+    assert refused.status_code == 422, refused.text
+    assert (await client.get(SERVICES)).json()["services"][0]["staff_ids"] == [ana["id"]]
+
+
 async def test_the_same_staff_member_twice_is_one_row(client):
     await as_admin(client)
     service = await make(client)
@@ -391,8 +408,13 @@ async def test_requiring_any_space_and_one_particular_device(client):
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["requirements"] == [
-        {"kind": "space", "resource_id": None, "resource_name": None},
-        {"kind": "equipment", "resource_id": laser["id"], "resource_name": "Laser Unit 1"},
+        {"kind": "space", "resource_id": None, "resource_name": None, "resource_active": None},
+        {
+            "kind": "equipment",
+            "resource_id": laser["id"],
+            "resource_name": "Laser Unit 1",
+            "resource_active": True,
+        },
     ]
 
 
@@ -454,6 +476,56 @@ async def test_an_unknown_resource_is_refused(client):
     )
 
     assert resp.status_code == 422, resp.text
+
+
+async def test_a_refused_requirements_replace_leaves_the_old_set_exactly_where_it_was(client):
+    await as_admin(client)
+    service = await make(client)
+    room = await make_resource(client, name="Room 1")
+    laser = await make_resource(client, kind="equipment", name="Laser Unit 1")
+    await client.put(
+        f"{SERVICES}/{service['id']}/requirements",
+        json={"requirements": [{"kind": "space", "resource_id": room["id"]}]},
+    )
+
+    refused = await client.put(
+        f"{SERVICES}/{service['id']}/requirements",
+        json={
+            "requirements": [
+                {"kind": "equipment", "resource_id": laser["id"]},
+                # The kind disagrees, and it is the second row: the first must not survive.
+                {"kind": "space", "resource_id": laser["id"]},
+            ]
+        },
+    )
+
+    assert refused.status_code == 422, refused.text
+    kept = (await client.get(SERVICES)).json()["services"][0]["requirements"]
+    assert [(r["kind"], r["resource_id"]) for r in kept] == [("space", room["id"])]
+
+
+async def test_a_requirement_survives_its_resource_being_deactivated(client):
+    """No cascade, no silent drop: the row stays and the editing screen is told the resource
+    is gone, because somebody has to decide whether to point it elsewhere or remove it."""
+    await as_admin(client)
+    service = await make(client)
+    laser = await make_resource(client, kind="equipment", name="Laser Unit 1")
+    await client.put(
+        f"{SERVICES}/{service['id']}/requirements",
+        json={"requirements": [{"kind": "equipment", "resource_id": laser["id"]}]},
+    )
+
+    await client.post(f"{RESOURCES}/{laser['id']}/deactivate", json={})
+
+    listed = (await client.get(SERVICES)).json()["services"][0]
+    assert listed["requirements"] == [
+        {
+            "kind": "equipment",
+            "resource_id": laser["id"],
+            "resource_name": "Laser Unit 1",
+            "resource_active": False,
+        }
+    ]
 
 
 async def test_the_same_requirement_twice_is_one_row(client):
@@ -547,6 +619,7 @@ async def test_the_catalog_read_endpoint_is_the_shape_the_engine_needs(client):
     await as_admin(client)
     service = await make(client)
     ana = await make_staff(client, "ana@cedar.example", "Ana")
+    await make_resource(client, name="Room 1")
     laser = await make_resource(client, kind="equipment", name="Laser Unit 1")
     await client.put(f"{SERVICES}/{service['id']}/staff", json={"staff_ids": [ana["id"]]})
     await client.put(
@@ -574,15 +647,133 @@ async def test_the_catalog_read_endpoint_is_the_shape_the_engine_needs(client):
             "bookable_online": True,
             "sort_order": 0,
             "staff_ids": [ana["id"]],
+            "bookable": True,
+            "unbookable_reasons": [],
             "requirements": [
-                {"kind": "space", "resource_id": None, "resource_name": None},
+                {
+                    "kind": "space",
+                    "resource_id": None,
+                    "resource_name": None,
+                    "resource_active": None,
+                },
                 {
                     "kind": "equipment",
                     "resource_id": laser["id"],
                     "resource_name": "Laser Unit 1",
+                    "resource_active": True,
                 },
             ],
         }
+    ]
+
+
+async def test_a_departed_practitioner_is_not_offered_to_the_engine(client):
+    """The one thing `staff_ids` means to Task 14 is "whose day to look at".
+
+    A practitioner who has left is not somebody a slot can be offered against, and a caller
+    that had to know to filter would be a caller that eventually forgot. The admin endpoint
+    still shows the row, because that is the screen where somebody removes it.
+    """
+    await as_admin(client)
+    service = await make(client)
+    ana = await make_staff(client, "ana@cedar.example", "Ana")
+    bo = await make_staff(client, "bo@cedar.example", "Bo")
+    await client.put(f"{SERVICES}/{service['id']}/staff", json={"staff_ids": [ana["id"], bo["id"]]})
+    await client.post(f"/api/admin/staff/{ana['id']}/deactivate", json={})
+
+    catalog = (await client.get(CATALOG)).json()["services"][0]
+    admin = (await client.get(SERVICES)).json()["services"][0]
+
+    assert catalog["staff_ids"] == [bo["id"]]
+    assert catalog["bookable"] is True
+    assert set(admin["staff_ids"]) == {ana["id"], bo["id"]}
+
+
+async def test_a_service_nobody_active_can_deliver_is_unbookable(client):
+    await as_admin(client)
+    service = await make(client)
+    ana = await make_staff(client, "ana@cedar.example", "Ana")
+    await client.put(f"{SERVICES}/{service['id']}/staff", json={"staff_ids": [ana["id"]]})
+    await client.post(f"/api/admin/staff/{ana['id']}/deactivate", json={})
+
+    listed = (await client.get(CATALOG)).json()["services"][0]
+
+    assert listed["staff_ids"] == []
+    assert listed["bookable"] is False
+    assert listed["unbookable_reasons"] == ["Nobody active can deliver this."]
+
+
+async def test_a_requirement_on_a_deactivated_resource_makes_the_service_unbookable(client):
+    """Never unconstrained. Dropping the dead requirement would let the engine offer a laser
+    treatment with no laser, which is the one failure this flag exists to prevent."""
+    await as_admin(client)
+    service = await make(client)
+    ana = await make_staff(client, "ana@cedar.example", "Ana")
+    laser = await make_resource(client, kind="equipment", name="Laser Unit 1")
+    await client.put(f"{SERVICES}/{service['id']}/staff", json={"staff_ids": [ana["id"]]})
+    await client.put(
+        f"{SERVICES}/{service['id']}/requirements",
+        json={"requirements": [{"kind": "equipment", "resource_id": laser["id"]}]},
+    )
+    await client.post(f"{RESOURCES}/{laser['id']}/deactivate", json={})
+
+    listed = (await client.get(CATALOG)).json()["services"][0]
+
+    assert listed["bookable"] is False
+    assert listed["unbookable_reasons"] == ["“Laser Unit 1” is deactivated."]
+    # Still reported, flagged rather than hidden.
+    assert listed["requirements"] == [
+        {
+            "kind": "equipment",
+            "resource_id": laser["id"],
+            "resource_name": "Laser Unit 1",
+            "resource_active": False,
+        }
+    ]
+
+
+async def test_an_any_requirement_with_no_active_resource_of_that_kind_is_unbookable(client):
+    await as_admin(client)
+    service = await make(client)
+    ana = await make_staff(client, "ana@cedar.example", "Ana")
+    room = await make_resource(client, name="Room 1")
+    await client.put(f"{SERVICES}/{service['id']}/staff", json={"staff_ids": [ana["id"]]})
+    await client.put(
+        f"{SERVICES}/{service['id']}/requirements",
+        json={"requirements": [{"kind": "space", "resource_id": None}]},
+    )
+    assert (await client.get(CATALOG)).json()["services"][0]["bookable"] is True
+
+    await client.post(f"{RESOURCES}/{room['id']}/deactivate", json={})
+
+    listed = (await client.get(CATALOG)).json()["services"][0]
+    assert listed["bookable"] is False
+    assert listed["unbookable_reasons"] == ["There is no active space."]
+
+
+async def test_every_reason_a_service_cannot_be_booked_is_reported_at_once(client):
+    """One at a time would mean fixing one thing, reloading, and finding another."""
+    await as_admin(client)
+    service = await make(client)
+    laser = await make_resource(client, kind="equipment", name="Laser Unit 1")
+    await client.put(
+        f"{SERVICES}/{service['id']}/requirements",
+        json={
+            "requirements": [
+                {"kind": "space", "resource_id": None},
+                {"kind": "equipment", "resource_id": laser["id"]},
+            ]
+        },
+    )
+    await client.post(f"{RESOURCES}/{laser['id']}/deactivate", json={})
+
+    listed = (await client.get(CATALOG)).json()["services"][0]
+
+    assert listed["bookable"] is False
+    assert listed["unbookable_reasons"] == [
+        "Nobody active can deliver this.",
+        "There is no active space.",
+        "“Laser Unit 1” is deactivated.",
     ]
 
 

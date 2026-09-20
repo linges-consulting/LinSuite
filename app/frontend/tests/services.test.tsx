@@ -77,6 +77,7 @@ function fakeServer() {
 
   const find = (url: string) => services.find((s) => s.id === url.split('/')[4])!
   const named = (id: string) => RESOURCES.find((r) => r.id === id)?.name ?? null
+  const active = (id: string) => RESOURCES.find((r) => r.id === id)?.active ?? null
 
   vi.stubGlobal(
     'fetch',
@@ -86,6 +87,8 @@ function fakeServer() {
       calls.push({ url, method, body })
 
       if (url === '/api/admin/staff/palette') return Response.json({ colours: PALETTE })
+      // Both lists are asked for with `include_inactive=true`: the dialog has to be able to
+      // name somebody who has left, not just the current roster.
       if (url.startsWith('/api/admin/staff')) return Response.json({ staff: STAFF })
       if (url.startsWith('/api/admin/resources')) return Response.json({ resources: RESOURCES })
 
@@ -127,6 +130,7 @@ function fakeServer() {
         row.requirements = body.requirements.map((r: Row) => ({
           ...r,
           resource_name: r.resource_id ? named(r.resource_id) : null,
+          resource_active: r.resource_id ? active(r.resource_id) : null,
         }))
         return Response.json(row)
       }
@@ -198,6 +202,16 @@ describe('dollars and cents', () => {
     expect(dollarsToCents('-5')).toBeNull()
     expect(dollarsToCents('twelve')).toBeNull()
     expect(dollarsToCents('1.2.3')).toBeNull()
+  })
+
+  it('accepts commas only where a thousands separator belongs', () => {
+    expect(dollarsToCents('1,250')).toBe(125000)
+    expect(dollarsToCents('1,250,000.99')).toBe(125000099)
+    // A decimal comma. Stripping it would read $12.50 as $1,250 — a hundredfold overcharge
+    // nobody typed, which is the worst thing this function could do.
+    expect(dollarsToCents('12,5')).toBeNull()
+    expect(dollarsToCents('1,23,456')).toBeNull()
+    expect(dollarsToCents(',500')).toBeNull()
   })
 
   it('renders cents back as dollars', () => {
@@ -324,6 +338,47 @@ describe('eligible staff', () => {
 
     expect(screen.getByLabelText('Ana Rossi')).toBeInTheDocument()
     expect(screen.queryByLabelText('Gone Away')).not.toBeInTheDocument()
+  })
+
+  it('shows an assigned staff member who has left, and lets them be removed', async () => {
+    const server = fakeServer()
+    server.services[0].staff_ids = ['s1', 's3'] // s3 is deactivated
+    const user = userEvent.setup()
+    renderSettings()
+    await openServices(user)
+
+    await openActions(user, 'Swedish Massage')
+    await user.click(await screen.findByRole('menuitem', { name: 'Edit' }))
+
+    // Named rather than silently pruned: the administrator has to see who left, and the
+    // checkbox is disabled because re-assigning them is not on offer.
+    const departed = screen.getByRole('checkbox', { name: 'Gone Away' })
+    expect(departed).toBeDisabled()
+    expect(screen.getByText(/deactivated/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Remove Gone Away' }))
+    expect(screen.queryByRole('checkbox', { name: 'Gone Away' })).not.toBeInTheDocument()
+
+    await user.click(submit('Save service'))
+
+    // The departed id is gone from the payload, so the save is not a permanent 422.
+    await waitFor(() => {
+      const put = server.calls.find((c) => c.url === '/api/admin/services/v1/staff')
+      expect(put?.body).toEqual({ staff_ids: ['s1'] })
+    })
+  })
+
+  it('asks for the inactive staff too, or it could not name the one who left', async () => {
+    const server = fakeServer()
+    const user = userEvent.setup()
+    renderSettings()
+    await openServices(user)
+
+    expect(
+      server.calls.some(
+        (c) => c.url.startsWith('/api/admin/staff') && c.url.includes('include_inactive=true'),
+      ),
+    ).toBe(true)
   })
 
   it('leaves the staff set alone when it was not touched', async () => {
@@ -454,11 +509,70 @@ describe('the requirements builder', () => {
     })
   })
 
+  it('shows a requirement whose resource has been deactivated, and lets it be removed', async () => {
+    const server = fakeServer()
+    server.services[0].requirements = [
+      { kind: 'space', resource_id: 'r1', resource_name: 'Room 1', resource_active: true },
+      {
+        kind: 'equipment',
+        resource_id: 'r4',
+        resource_name: 'Retired Scanner',
+        resource_active: false,
+      },
+    ]
+    const user = userEvent.setup()
+    renderSettings()
+    await openServices(user)
+
+    await openActions(user, 'Swedish Massage')
+    await user.click(await screen.findByRole('menuitem', { name: 'Edit' }))
+
+    // Read-only, not a select with nothing in it: the server refuses any save that still
+    // names it, so the only useful offer is the truth and a way out.
+    expect(
+      screen.getByText((_, el) => el?.textContent === 'Retired Scanner — deactivated'),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('combobox', { name: 'Requirement 2 resource' }),
+    ).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Remove requirement 2' }))
+    await user.click(submit('Save service'))
+
+    await waitFor(() => {
+      const put = server.calls.find((c) => c.url.endsWith('/requirements'))
+      expect(put?.body).toEqual({ requirements: [{ kind: 'space', resource_id: 'r1' }] })
+    })
+  })
+
+  it('flags a deactivated resource in the table summary', async () => {
+    const server = fakeServer()
+    server.services[0].requirements = [
+      {
+        kind: 'equipment',
+        resource_id: 'r4',
+        resource_name: 'Retired Scanner',
+        resource_active: false,
+      },
+    ]
+    const user = userEvent.setup()
+    renderSettings()
+    await openServices(user)
+
+    const row = screen.getByText('Swedish Massage').closest('tr')!
+    expect(within(row).getByText('Retired Scanner (deactivated)')).toBeInTheDocument()
+  })
+
   it('prints what a service needs in the table', async () => {
     const server = fakeServer()
     server.services[0].requirements = [
-      { kind: 'space', resource_id: null, resource_name: null },
-      { kind: 'equipment', resource_id: 'r3', resource_name: 'Laser Unit 1' },
+      { kind: 'space', resource_id: null, resource_name: null, resource_active: null },
+      {
+        kind: 'equipment',
+        resource_id: 'r3',
+        resource_name: 'Laser Unit 1',
+        resource_active: true,
+      },
     ]
     const user = userEvent.setup()
     renderSettings()

@@ -64,18 +64,26 @@ Kind = Literal["space", "equipment"]
 
 
 class RequirementOut(BaseModel):
-    """One thing delivering this service needs. `resource_id` null is "any active resource of
-    this kind"; `resource_name` is carried so a screen that cannot list resources — booking
-    holds no `catalog.manage` — still has something to print."""
+    """One thing delivering this service needs. `resource_id` null is "any resource of this
+    kind"; `resource_name` is carried so a screen that cannot list resources — booking holds
+    no `catalog.manage` — still has something to print.
+
+    **A named requirement is returned even when its resource has been deactivated**, with
+    `resource_active` false. Dropping the row would read as "this service needs nothing", and
+    a service that quietly loses its only laser is far worse than one that says it cannot be
+    booked. `resource_active` is null for an "any" row, which is a question about a kind
+    rather than about one resource — `CatalogServiceOut.bookable` is where that is answered.
+    """
 
     kind: Kind
     resource_id: str | None
     resource_name: str | None
+    resource_active: bool | None
 
 
-class CatalogServiceOut(BaseModel):
-    """The engine's shape (tech-stack §19): how long, how much turnaround either side, who
-    may deliver it, what it needs. `active` is absent because everything here is active."""
+class _ServiceFacts(BaseModel):
+    """The columns both audiences read. Split out because what hangs off them differs: the
+    editing surface wants the set as stored, the engine wants the set as it can be used."""
 
     id: str
     name: str
@@ -86,14 +94,42 @@ class CatalogServiceOut(BaseModel):
     price_cents: int
     bookable_online: bool
     sort_order: int
-    staff_ids: list[str]
     requirements: list[RequirementOut]
 
 
-class ServiceOut(CatalogServiceOut):
-    """What the administrator's table draws — the engine's shape plus the one fact only this
-    screen cares about."""
+class CatalogServiceOut(_ServiceFacts):
+    """The engine's shape (tech-stack §19). `active` is absent because everything here is
+    active — but "active" and "bookable" are not the same question.
 
+    **`staff_ids` holds active staff only.** A practitioner who has left is not somebody a
+    slot can be offered against, and a caller that had to know to filter would be a caller
+    that eventually forgot.
+
+    **`bookable` is the flag to branch on, never the prose.** It is false when the service has
+    no active eligible staff left, when a named requirement's resource has been deactivated,
+    or when an "any" requirement names a kind with no active resource in it. A dead named
+    requirement makes a service **unbookable**, never unconstrained — silently ignoring it
+    would let the engine offer a laser treatment with no laser.
+
+    `unbookable_reasons` is what a screen prints beside that flag. The sentences are written
+    for a person and will get reworded; nothing should match on them.
+    """
+
+    staff_ids: list[str]
+    bookable: bool
+    unbookable_reasons: list[str]
+
+
+class ServiceOut(_ServiceFacts):
+    """What the administrator's table and dialog draw.
+
+    **`staff_ids` is the set as stored**, deactivated staff included — this is the editing
+    surface, and a screen that silently pruned a departed practitioner would be a screen that
+    cannot show who to remove. The same goes for a requirement on a deactivated resource,
+    which `RequirementOut.resource_active` flags rather than hides.
+    """
+
+    staff_ids: list[str]
     active: bool
 
 
@@ -116,30 +152,61 @@ def _requirements(service: Service) -> list[RequirementOut]:
             kind=r.kind,
             resource_id=str(r.resource_id) if r.resource_id else None,
             resource_name=r.resource.name if r.resource else None,
+            resource_active=r.resource.active if r.resource else None,
         )
         for r in rows
     ]
 
 
-def _staff_ids(service: Service) -> list[str]:
-    # Sorted so the response is stable; the screen re-orders by its own roster anyway.
-    return sorted(str(link.staff_id) for link in service.eligible_staff)
+def _facts(service: Service) -> dict:
+    return {
+        "id": str(service.id),
+        "name": service.name,
+        "description": service.description,
+        "duration_minutes": service.duration_minutes,
+        "buffer_before_minutes": service.buffer_before_minutes,
+        "buffer_after_minutes": service.buffer_after_minutes,
+        "price_cents": service.price_cents,
+        "bookable_online": service.bookable_online,
+        "sort_order": service.sort_order,
+        "requirements": _requirements(service),
+    }
 
 
 def _out(service: Service) -> ServiceOut:
+    """The administrator's view: every stored eligibility, sorted so the response is stable."""
     return ServiceOut(
-        id=str(service.id),
-        name=service.name,
-        description=service.description,
-        duration_minutes=service.duration_minutes,
-        buffer_before_minutes=service.buffer_before_minutes,
-        buffer_after_minutes=service.buffer_after_minutes,
-        price_cents=service.price_cents,
-        bookable_online=service.bookable_online,
+        **_facts(service),
+        staff_ids=sorted(str(link.staff_id) for link in service.eligible_staff),
         active=service.active,
-        sort_order=service.sort_order,
-        staff_ids=_staff_ids(service),
-        requirements=_requirements(service),
+    )
+
+
+def _catalog_out(service: Service, kinds_with_a_free_resource: set[str]) -> CatalogServiceOut:
+    """The engine's view: who can actually deliver this, and whether anybody can.
+
+    `kinds_with_a_free_resource` is "which kinds have at least one active resource", read once
+    for the whole list rather than once per requirement — it is the same answer for every
+    service in the response.
+    """
+    staff_ids = sorted(str(link.staff_id) for link in service.eligible_staff if link.staff.active)
+    requirements = _requirements(service)
+
+    reasons = []
+    if not staff_ids:
+        reasons.append("Nobody active can deliver this.")
+    for requirement in requirements:
+        if requirement.resource_id is not None:
+            if not requirement.resource_active:
+                reasons.append(f"“{requirement.resource_name}” is deactivated.")
+        elif requirement.kind not in kinds_with_a_free_resource:
+            reasons.append(f"There is no active {requirement.kind}.")
+
+    return CatalogServiceOut(
+        **_facts(service),
+        staff_ids=staff_ids,
+        bookable=not reasons,
+        unbookable_reasons=reasons,
     )
 
 
@@ -253,6 +320,26 @@ def _duplicate(name: str) -> HTTPException:
     return HTTPException(status_code=409, detail=f"A service named “{name}” already exists.")
 
 
+# The unique index migration 0012 creates on `lower(name)`. Named here because the handlers
+# below check it by name before answering 409.
+_NAME_INDEX = "ux_services_name"
+
+
+def _is_duplicate_name(error: IntegrityError) -> bool:
+    """Whether this violation is the unique name index, rather than anything else.
+
+    A blanket `except IntegrityError: raise 409` tells the caller their name is taken no
+    matter what actually broke — a foreign key, a CHECK reached by a route that skipped its
+    own validation — and "that name is taken" is the one answer that stops somebody looking.
+    asyncpg carries `constraint_name` on the exception it raises; SQLAlchemy's dialect wraps
+    that, so the real one may be a `__cause__` down, and the message is the last resort.
+    """
+    for candidate in (error.orig, getattr(error.orig, "__cause__", None)):
+        if getattr(candidate, "constraint_name", None) == _NAME_INDEX:
+            return True
+    return _NAME_INDEX in str(error.orig)
+
+
 # --- reading ------------------------------------------------------------------------------
 
 
@@ -279,12 +366,15 @@ async def catalog(_: CurrentUser, db: SessionDep) -> dict[str, list[CatalogServi
     Any signed-in account, no capability: refusing this to somebody holding `schedule.manage`
     would mean a booking screen with nothing to book. Inactive services are absent rather
     than flagged — nothing downstream has a use for one, and leaving them in would make
-    every caller filter for itself.
+    every caller filter for itself. The same argument is why a departed practitioner is
+    missing from `staff_ids` and why `bookable` is computed here rather than left to the
+    caller: a rule every reader has to remember is a rule one of them will forget.
     """
     services = await _roster(db, include_inactive=False)
-    return {
-        "services": [CatalogServiceOut(**_out(s).model_dump(exclude={"active"})) for s in services]
-    }
+    # One query for the whole response: "does any active resource of this kind exist" has the
+    # same answer for every service in it.
+    kinds = set(await db.scalars(select(Resource.kind).where(Resource.active).distinct()))
+    return {"services": [_catalog_out(s, kinds) for s in services]}
 
 
 # --- creating -----------------------------------------------------------------------------
@@ -298,8 +388,10 @@ async def create_service(
     db.add(service)
     try:
         await db.flush()
-    except IntegrityError:
+    except IntegrityError as error:
         await db.rollback()
+        if not _is_duplicate_name(error):
+            raise
         raise _duplicate(payload.name) from None
 
     record_event(
@@ -340,8 +432,10 @@ async def update_service(
         name = service.name
         try:
             await db.flush()
-        except IntegrityError:
+        except IntegrityError as error:
             await db.rollback()
+            if not _is_duplicate_name(error):
+                raise
             raise _duplicate(name) from None
         # Field names, not values — what an audit needs, without a second copy of the data.
         # The price *change* is the interesting one here, and it is already in `services`:

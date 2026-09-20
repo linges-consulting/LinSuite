@@ -412,6 +412,12 @@ class ServiceStaff(Base):
         ForeignKey("staff.id", ondelete="CASCADE"), primary_key=True
     )
 
+    # The person, not just their id: `GET /catalog/services` has to leave a departed
+    # practitioner out of what it tells the availability engine, and "is this one still
+    # here?" is a question the id alone cannot answer. Joined rather than selectin — one row
+    # per link, and the links are already being loaded by their service.
+    staff: Mapped["Staff"] = relationship(lazy="joined")
+
 
 class ServiceRequirement(Base):
     """One thing delivering a service needs: a kind of resource, or one exact resource.

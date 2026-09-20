@@ -857,6 +857,13 @@ export type ServiceRequirement = {
   resource_id: string | null
   /** Carried by the server so a screen with no resource list still has something to print. */
   resource_name: string | null
+  /**
+   * Whether that resource is still bookable — null for an "any" row, which is a question
+   * about a kind rather than about one resource. A named requirement survives its resource
+   * being deactivated, flagged rather than dropped: a service that quietly lost its only
+   * laser would read as needing nothing at all.
+   */
+  resource_active: boolean | null
 }
 
 /**

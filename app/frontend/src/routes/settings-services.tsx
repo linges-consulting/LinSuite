@@ -84,8 +84,14 @@ export function ServicesPanel() {
   })
   // The three lists the dialog picks from. Read here rather than inside it so opening the
   // dialog is instant and so the table can name a service's staff and resources too.
-  const staff = useQuery({ queryKey: STAFF, queryFn: () => fetchStaff() })
-  const resources = useQuery({ queryKey: RESOURCES, queryFn: () => fetchResources() })
+  // Inactive ones included, deliberately. A service assigned to somebody who has since left
+  // has to be able to *say so* — and a picker that only knew the active roster would render
+  // that row as a blank with no way to clear it.
+  const staff = useQuery({ queryKey: [...STAFF, 'all'], queryFn: () => fetchStaff(true) })
+  const resources = useQuery({
+    queryKey: [...RESOURCES, 'all'],
+    queryFn: () => fetchResources(undefined, true),
+  })
   const palette = useQuery({ queryKey: STAFF_PALETTE, queryFn: fetchStaffPalette })
   const [editing, setEditing] = useState<ServiceRow | null>(null)
   const [creating, setCreating] = useState(false)
@@ -183,10 +189,13 @@ export function ServicesPanel() {
   )
 }
 
-/** "Any space", or the one resource named. What the table prints and the builder echoes. */
-function requirementLabel(requirement: { kind: ResourceKind; resource_name: string | null }) {
-  if (requirement.resource_name) return requirement.resource_name
-  return requirement.kind === 'space' ? 'Any space' : 'Any equipment'
+/** "Any space", or the one resource named — flagged when that resource is no longer
+ *  bookable, because a service whose only laser is gone cannot be booked at all. */
+function requirementLabel(requirement: ServiceRequirement) {
+  if (!requirement.resource_name) return requirement.kind === 'space' ? 'Any space' : 'Any equipment'
+  return requirement.resource_active === false
+    ? `${requirement.resource_name} (deactivated)`
+    : requirement.resource_name
 }
 
 function ServiceLine({ service, onEdit }: { service: ServiceRow; onEdit: () => void }) {
@@ -308,8 +317,18 @@ function ServiceLine({ service, onEdit }: { service: ServiceRow; onEdit: () => v
 }
 
 /** A requirement while it is being edited. `key` is React's, not the server's — a row with
- *  no resource chosen yet has nothing else to be identified by. */
-type DraftRequirement = { key: number; kind: ResourceKind; resource_id: string | null }
+ *  no resource chosen yet has nothing else to be identified by.
+ *
+ *  `lost` is a named requirement whose resource has since been deactivated. The row is drawn
+ *  read-only with a remove control rather than as an empty select: the server refuses a save
+ *  that still names it, so the only thing this screen can usefully offer is the truth about
+ *  what happened and a way out of it. */
+type DraftRequirement = {
+  key: number
+  kind: ResourceKind
+  resource_id: string | null
+  lost?: { name: string | null }
+}
 
 /** Radix refuses an empty `SelectItem` value, and "any resource of this kind" needs one. A
  *  resource id is a UUID, so nothing can collide with this. */
@@ -318,7 +337,12 @@ const ANY = 'any'
 let nextKey = 0
 
 function toDraft(requirements: ServiceRequirement[]): DraftRequirement[] {
-  return requirements.map((r) => ({ key: nextKey++, kind: r.kind, resource_id: r.resource_id }))
+  return requirements.map((r) => ({
+    key: nextKey++,
+    kind: r.kind,
+    resource_id: r.resource_id,
+    ...(r.resource_id && r.resource_active === false ? { lost: { name: r.resource_name } } : {}),
+  }))
 }
 
 const sameStaff = (a: string[], b: string[]) =>
@@ -356,11 +380,15 @@ function ServiceDialog(props: {
     toDraft(existing?.requirements ?? []),
   )
 
-  // Only active people and only active resources are offered: assigning work to somebody
+  // Only active people and only active resources are *offered*: assigning work to somebody
   // who has left, or requiring a room that is gone, is refused by the server anyway — and a
   // picker that offers what will be refused is the worst version of that conversation.
   const eligible = props.staff.filter((s) => s.active)
   const available = props.resources.filter((r) => r.active)
+  // Already assigned and no longer here. Shown rather than quietly dropped: the server
+  // refuses any save that still names them, so an administrator who cannot see who left
+  // has an eligible set they can never change again.
+  const departed = props.staff.filter((s) => !s.active && staffIds.includes(s.id))
 
   const cents = dollarsToCents(price)
   const minutes = (value: string) => {
@@ -563,6 +591,29 @@ function ServiceDialog(props: {
                 ))}
               </div>
             )}
+            {departed.map((member) => (
+              <div key={member.id} className="flex items-center gap-2 text-muted-foreground">
+                <Checkbox checked disabled aria-label={member.display_name} />
+                <span className="text-sm">
+                  {member.display_name} <span className="text-xs">— deactivated</span>
+                </span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  aria-label={`Remove ${member.display_name}`}
+                  onClick={() => setStaffIds((ids) => ids.filter((i) => i !== member.id))}
+                >
+                  <X aria-hidden />
+                </Button>
+              </div>
+            ))}
+            {departed.length > 0 && (
+              <p className="text-xs text-muted-foreground">
+                Still assigned, no longer on the roster. Remove them before changing who may
+                deliver this.
+              </p>
+            )}
           </fieldset>
 
           <fieldset className="flex flex-col gap-2">
@@ -571,7 +622,28 @@ function ServiceDialog(props: {
               A room, a device, both, or neither. “Any” means whichever one is free — a named
               one means that exact room or device, and nothing else will do.
             </p>
-            {requirements.map((row, index) => (
+            {requirements.map((row, index) =>
+              row.lost ? (
+                // The resource this row names has been deactivated. Read-only rather than a
+                // select with nothing selected: the server refuses a save that still names
+                // it, so the useful thing to offer is what happened and the way out.
+                <div key={row.key} className="flex items-center gap-2 text-muted-foreground">
+                  <span className="w-36 text-sm capitalize">{row.kind}</span>
+                  <span className="flex-1 text-sm">
+                    {row.lost.name ?? 'That resource'}{' '}
+                    <span className="text-xs">— deactivated</span>
+                  </span>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    aria-label={`Remove requirement ${index + 1}`}
+                    onClick={() => setRequirements((rows) => rows.filter((r) => r.key !== row.key))}
+                  >
+                    <X aria-hidden />
+                  </Button>
+                </div>
+              ) : (
               <div key={row.key} className="flex items-center gap-2">
                 <Select
                   value={row.kind}
@@ -627,7 +699,14 @@ function ServiceDialog(props: {
                   <X aria-hidden />
                 </Button>
               </div>
-            ))}
+              ),
+            )}
+            {requirements.some((r) => r.lost) && (
+              <p className="text-xs text-muted-foreground">
+                A resource this service needs has been deactivated. Until it is removed or
+                restored, nothing can be booked into this service.
+              </p>
+            )}
             <Button
               type="button"
               variant="outline"

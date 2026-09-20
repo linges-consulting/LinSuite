@@ -22,14 +22,20 @@ export function centsToDollars(cents: number): string {
  * accepted — a discount is a line on an invoice, not a service that costs less than nothing —
  * so the refusal happens here rather than as a 422 after a round trip.
  *
+ * **Commas have to be thousands separators or not be there at all.** Stripping every comma
+ * would read "12,5" — a decimal comma, which is how most of the world writes $12.50 — as
+ * $1,250, and a hundredfold overcharge that nobody typed is the worst thing this function
+ * could do. Grouped correctly ("1,250.50") it is accepted; grouped wrongly it is refused, and
+ * the field says so.
+ *
  * Rounds half **up** on the third decimal, matching the rule invoices round tax by.
  */
 export function dollarsToCents(typed: string): number | null {
-  const cleaned = typed.trim().replace(/[$,\s]/g, '')
-  const parts = /^(\d*)(?:\.(\d*))?$/.exec(cleaned)
+  const cleaned = typed.trim().replace(/[$\s]/g, '')
+  const parts = /^(\d{1,3}(?:,\d{3})+|\d*)(?:\.(\d*))?$/.exec(cleaned)
   if (!parts || (!parts[1] && !parts[2])) return null
 
-  const whole = Number(parts[1] || '0')
+  const whole = Number(parts[1].replace(/,/g, '') || '0')
   // Padded so a bare ".5" and a "12.5" both have a hundredths and a thousandths digit to
   // read, and anything past the third is already below half a cent.
   const fraction = (parts[2] ?? '').padEnd(3, '0')
