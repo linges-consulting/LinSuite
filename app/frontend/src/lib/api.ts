@@ -959,3 +959,47 @@ export async function reactivateService(id: string): Promise<ServiceRow> {
   if (!res.ok) throw await failure(res, 'Could not reactivate the service')
   return res.json()
 }
+
+// --- availability: the bookable slots -------------------------------------------------------
+
+/** One start that can be booked. Instants in UTC (`...Z`); `staff_ids` is everyone eligible
+ *  who is free for it, so "any available provider" is the slot and a person is the choice. */
+export type AvailabilitySlot = {
+  starts_at: string
+  /** The appointment the client sees — the duration, without the turnaround either side. */
+  ends_at: string
+  staff_ids: string[]
+}
+
+export type AvailabilityDay = {
+  /** A business-local date, `YYYY-MM-DD`. */
+  date: string
+  slots: AvailabilitySlot[]
+}
+
+export type Availability = {
+  service_id: string
+  timezone: string
+  granularity_minutes: number
+  /** The last local date anything is computed for. Days after it come back with no slots. */
+  horizon_ends_on: string
+  /** Every date asked for, in order, empty when nothing can be booked. */
+  days: AvailabilityDay[]
+}
+
+/**
+ * `from` and `to` are business-local dates, `to` inclusive, at most 31 days apart. A 409 is a
+ * service the catalog says cannot be booked yet; its `body.unbookable_reasons` say why.
+ */
+export async function fetchAvailability(query: {
+  service_id: string
+  from: string
+  to: string
+  staff_id?: string
+}): Promise<Availability> {
+  const params = new URLSearchParams({ service_id: query.service_id, from: query.from, to: query.to })
+  if (query.staff_id) params.set('staff_id', query.staff_id)
+  const res = await fetch(`/api/availability?${params}`)
+  if (!res.ok) throw await failure(res, 'Could not load the available times')
+  return res.json()
+}

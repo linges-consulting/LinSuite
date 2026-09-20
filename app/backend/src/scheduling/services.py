@@ -371,10 +371,26 @@ async def catalog(_: CurrentUser, db: SessionDep) -> dict[str, list[CatalogServi
     caller: a rule every reader has to remember is a rule one of them will forget.
     """
     services = await _roster(db, include_inactive=False)
-    # One query for the whole response: "does any active resource of this kind exist" has the
-    # same answer for every service in it.
-    kinds = set(await db.scalars(select(Resource.kind).where(Resource.active).distinct()))
-    return {"services": [_catalog_out(s, kinds) for s in services]}
+    return {"services": [_catalog_out(s, await _kinds_in_stock(db)) for s in services]}
+
+
+async def catalog_entry(db: SessionDep, service_id: uuid.UUID) -> CatalogServiceOut:
+    """One service in the engine's shape, or a 404 — what `scheduling/slots.py` starts from.
+
+    An inactive service is a 404 here, exactly as it is absent from the list above: nothing
+    downstream has a use for one, and "deactivated" is not something a booking screen should
+    have to branch on separately from "gone".
+    """
+    service = await _load(db, service_id)
+    if not service.active:
+        raise HTTPException(status_code=404, detail="No such service.")
+    return _catalog_out(service, await _kinds_in_stock(db))
+
+
+async def _kinds_in_stock(db: SessionDep) -> set[str]:
+    """Which kinds have at least one active resource — read once, the same answer for every
+    service in a response."""
+    return set(await db.scalars(select(Resource.kind).where(Resource.active).distinct()))
 
 
 # --- creating -----------------------------------------------------------------------------

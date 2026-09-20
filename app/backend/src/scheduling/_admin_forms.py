@@ -23,10 +23,11 @@ def blank_to_none(value: str | None) -> str | None:
     return value.strip() or None if isinstance(value, str) else value
 
 
-def refuse(field: str, message: str) -> HTTPException:
-    """Shaped like FastAPI's own 422, so the frontend reads one error format."""
+def refuse(field: str, message: str, *, where: str = "body") -> HTTPException:
+    """Shaped like FastAPI's own 422, so the frontend reads one error format. `where` is
+    `body` for a form field and `query` for a query parameter, as FastAPI would say it."""
     return HTTPException(
-        status_code=422, detail=[{"type": "value_error", "loc": ["body", field], "msg": message}]
+        status_code=422, detail=[{"type": "value_error", "loc": [where, field], "msg": message}]
     )
 
 
