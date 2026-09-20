@@ -20,12 +20,15 @@ from core.db import SessionDep, get_engine, get_purge_engine, session_scope
 from core.errors import UPLOAD_ORIGIN_REQUIRED, Forbidden
 from core.logging import configure_logging
 from core.redis import get_redis
+from customers.routes import router as customers_router
+from scheduling.appointments import router as appointments_router
 from scheduling.closures import router as closures_router
 from scheduling.hours import router as hours_router
 from scheduling.resources import router as resources_router
 from scheduling.services import public as catalog_router
 from scheduling.services import router as services_router
 from scheduling.slots import router as availability_router
+from scheduling.staff import public as roster_router
 from scheduling.staff import router as staff_router
 from scheduling.time_off import router as time_off_router
 from settings.images import FAVICON_MAX_BYTES, LOGO_MAX_BYTES
@@ -170,6 +173,11 @@ api.include_router(services_router)
 api.include_router(catalog_router)
 # What the catalog feeds: the bookable slots for one of its services (`scheduling/slots.py`).
 api.include_router(availability_router)
+# The tracer bullet: what the slots above become once somebody picks one, and the people it
+# is for. `/staff` is the roster every scheduler reads; `/admin/staff` above is the accounts.
+api.include_router(appointments_router)
+api.include_router(customers_router)
+api.include_router(roster_router)
 api.include_router(business_router)
 api.include_router(branding_router)
 app.include_router(api)

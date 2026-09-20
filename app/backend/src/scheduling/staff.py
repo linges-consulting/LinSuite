@@ -47,13 +47,18 @@ from core.models import Business
 from notifications.tasks import send_email
 from scheduling._admin_forms import blank_to_none, known_colour, refuse, refuse_emptied_field
 from scheduling.models import MAX_BASIS_POINTS, Staff
-from scheduling.palette import PALETTE, next_free
+from scheduling.palette import BY_KEY, PALETTE, next_free
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin/staff", tags=["staff"])
+# The read the schedule makes: who has a column, in what order, in what colour. Its own
+# router on the shop-floor prefix for the same reason the catalog has one (`services.py`):
+# `/admin` is administration, and drawing the calendar is not.
+public = APIRouter(prefix="/staff", tags=["staff"])
 
 StaffManager = Annotated[User, Depends(Requires("users.manage"))]
+Scheduler = Annotated[User, Depends(Requires("schedule.view"))]
 
 
 # --- what goes over the wire ------------------------------------------------------------
@@ -260,6 +265,40 @@ async def list_staff(
     _: StaffManager, db: SessionDep, include_inactive: bool = False
 ) -> dict[str, list[StaffOut]]:
     return {"staff": await _roster(db, include_inactive=include_inactive)}
+
+
+class RosterEntry(BaseModel):
+    """A column on the schedule. The palette key *and* its two hexes, so a screen that holds
+    no `users.manage` — most of them — can paint without asking `/palette`."""
+
+    id: str
+    display_name: str
+    colour: str
+    hex: str
+    dark_hex: str
+    sort_order: int
+
+
+@public.get("")
+async def roster(_: Scheduler, db: SessionDep) -> dict[str, list[RosterEntry]]:
+    """Active staff only, in column order. Anybody who may see the calendar may see who is
+    on it; the account facts stay behind `users.manage` above."""
+    rows = await db.scalars(
+        select(Staff).where(Staff.active).order_by(Staff.sort_order, Staff.display_name)
+    )
+    return {
+        "staff": [
+            RosterEntry(
+                id=str(s.id),
+                display_name=s.display_name,
+                colour=s.colour,
+                hex=BY_KEY[s.colour].hex,
+                dark_hex=BY_KEY[s.colour].dark_hex,
+                sort_order=s.sort_order,
+            )
+            for s in rows
+        ]
+    }
 
 
 @router.get("/palette")
