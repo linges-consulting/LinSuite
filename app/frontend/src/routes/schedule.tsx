@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { CalendarDays, ChevronLeft, ChevronRight, Plus } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
+import { Grid } from '@/components/calendar/grid'
+import type { Change, Column, Prefill } from '@/components/calendar/types'
 import { EmptyState } from '@/components/empty-state'
 import { Field, Form, FormError } from '@/components/form'
 import { Button } from '@/components/ui/button'
@@ -22,60 +24,106 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import {
   ApiError,
   bookAppointment,
-  fetchAppointments,
+  changeAppointment,
   fetchAvailability,
   fetchCatalog,
   fetchRoster,
+  fetchSchedule,
   searchCustomers,
   type Appointment,
   type AvailabilitySlot,
   type BookingDraft,
   type Customer,
   type RosterEntry,
+  type Schedule,
 } from '@/lib/api'
+import { useSession } from '@/lib/auth'
 import { useBranding } from '@/lib/branding'
+import { clock, today, weekdayLabel } from '@/lib/calendar/format'
+import { addDays, localDate } from '@/lib/calendar/pixels'
 import { formatPhone } from '@/lib/phone'
-import { APPOINTMENTS, AVAILABILITY, CATALOG, CUSTOMERS, ROSTER } from '@/lib/query-keys'
+import { APPOINTMENTS, AVAILABILITY, CATALOG, CUSTOMERS, ROSTER, SCHEDULE } from '@/lib/query-keys'
 import { useTheme } from '@/lib/theme'
-import { cn } from '@/lib/utils'
 
 /**
- * The schedule: one column per staff member, one day at a time, and the way to put an
- * appointment on it (PRD §3). Lists rather than a time grid — the grid is Task 16; this is
- * the tracer bullet that proves a booking goes in and comes back out.
+ * The schedule: the grid a business runs on (tech-stack §13), and the way to put an
+ * appointment on it. `components/calendar/` draws and drags; this page decides what the
+ * columns are, reads the one compound document the grid needs (`/api/schedule`), and owns
+ * the two writes — booking through the dialog, and moving or resizing through a drag.
  *
- * **The slots come from the server, and so does the decision.** The dialog never computes a
- * time: it shows what `/api/availability` offered and sends back the instant it was given.
- * Two people can still pick the same slot in the same minute; the database refuses the second
- * and the screen says so and refreshes, because that is the honest answer.
+ * **Two views, one engine.** The day view is one column per staff member working that day
+ * (or with something booked on it — a person on their day off with an appointment still
+ * needs to be seen); the week view is seven date columns, for everybody or for one person.
+ *
+ * **A drag is optimistic, and honest about losing.** The card lands where it was dropped
+ * before the server answers; if the answer is `not_offered` or `slot_taken` it goes back
+ * where it was and a toast says which. The server re-runs the engine on every move, so a
+ * client that snapped to the wrong place is corrected, never trusted.
  *
  * **"Today" is the business's today.** The zone comes from the branding document the shell
  * has already read, so the first request this screen makes is for the right day — a
  * receptionist checking from home at 23:30 in another zone sees the day the clinic is in.
- * Times are printed in that zone too.
  */
 export function SchedulePage() {
   const branding = useBranding()
   const zone = branding.data?.timezone
+  const { user } = useSession()
+  const canManage = user?.capabilities?.includes('schedule.manage') ?? false
+  const queryClient = useQueryClient()
   const [chosen, setChosen] = useState<string | null>(null)
-  const [booking, setBooking] = useState(false)
+  const [view, setView] = useState<'day' | 'week'>('day')
+  const [staffFilter, setStaffFilter] = useState<string>(EVERYONE)
+  const [booking, setBooking] = useState<Prefill | 'blank' | null>(null)
   const roster = useQuery({ queryKey: ROSTER, queryFn: fetchRoster })
   // Until the zone is known there is no "today" to ask for.
   const date = chosen ?? (zone ? today(zone) : null)
-  const day = useQuery({
-    queryKey: [...APPOINTMENTS, date],
-    queryFn: () => fetchAppointments({ from: date as string, to: date as string }),
-    enabled: date !== null,
-    // Stepping a day is a different query; keep the columns up rather than flashing a skeleton.
+  const range = date ? (view === 'day' ? [date, date] : weekOf(date)) : null
+  const filter = view === 'week' && staffFilter !== EVERYONE ? staffFilter : undefined
+  const key = range ? [...SCHEDULE, range[0], range[1], filter ?? null] : SCHEDULE
+  const schedule = useQuery({
+    queryKey: key,
+    queryFn: () => fetchSchedule({ from: range![0], to: range![1], staff_id: filter }),
+    enabled: range !== null,
+    // Stepping a day is a different query; keep the grid up rather than flashing a skeleton.
     placeholderData: (previous) => previous,
   })
 
-  if (!date || roster.isPending || day.isPending) return <Skeleton className="h-64 w-full" />
-  const failed = [branding, roster, day].find((q) => q.isError)
+  const change = useMutation({
+    mutationFn: ({ appointment, change }: { appointment: Appointment; change: Change }) =>
+      changeAppointment(appointment.id, change),
+    onMutate: async ({ appointment, change }) => {
+      await queryClient.cancelQueries({ queryKey: key })
+      const before = queryClient.getQueryData<Schedule>(key)
+      queryClient.setQueryData<Schedule>(key, (current) =>
+        current && {
+          ...current,
+          appointments: current.appointments.map((a) =>
+            a.id === appointment.id ? moved(a, change) : a,
+          ),
+        },
+      )
+      return { before }
+    },
+    onError: (error, _variables, context) => {
+      if (context?.before) queryClient.setQueryData(key, context.before)
+      toast.error(`Not moved: ${error.message}`, { duration: 8000 })
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: SCHEDULE })
+      queryClient.invalidateQueries({ queryKey: APPOINTMENTS })
+      queryClient.invalidateQueries({ queryKey: AVAILABILITY })
+    },
+  })
+
+  if (!date || !range || roster.isPending || schedule.isPending) {
+    return <Skeleton className="h-[calc(100dvh-11.5rem)] w-full" />
+  }
+  const failed = [branding, roster, schedule].find((q) => q.isError)
   if (failed) {
     return (
       <p role="alert" className="text-sm text-destructive">
@@ -84,16 +132,21 @@ export function SchedulePage() {
     )
   }
 
+  const data = schedule.data!
+  const todayDate = today(data.timezone)
   const shift = (days: number) => setChosen(addDays(date, days))
-  const columns = roster.data ?? []
-  const appointments = day.data?.appointments ?? []
-  const timezone = day.data?.timezone ?? zone
+  const columns = columnsFor(view, data, range, todayDate, filter ?? null)
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center justify-between gap-4">
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="icon-sm" aria-label="Previous day" onClick={() => shift(-1)}>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            size="icon-sm"
+            aria-label={view === 'day' ? 'Previous day' : 'Previous week'}
+            onClick={() => shift(view === 'day' ? -1 : -7)}
+          >
             <ChevronLeft />
           </Button>
           <Input
@@ -103,87 +156,134 @@ export function SchedulePage() {
             value={date}
             onChange={(e) => e.target.value && setChosen(e.target.value)}
           />
-          <Button variant="outline" size="icon-sm" aria-label="Next day" onClick={() => shift(1)}>
+          <Button
+            variant="outline"
+            size="icon-sm"
+            aria-label={view === 'day' ? 'Next day' : 'Next week'}
+            onClick={() => shift(view === 'day' ? 1 : 7)}
+          >
             <ChevronRight />
           </Button>
           <Button variant="ghost" size="sm" onClick={() => setChosen(null)}>
             Today
           </Button>
+          <Tabs value={view} onValueChange={(v) => setView(v as 'day' | 'week')}>
+            <TabsList aria-label="View">
+              <TabsTrigger value="day">Day</TabsTrigger>
+              <TabsTrigger value="week">Week</TabsTrigger>
+            </TabsList>
+          </Tabs>
+          {view === 'week' && (
+            <Select value={staffFilter} onValueChange={setStaffFilter}>
+              <SelectTrigger aria-label="Staff member" className="w-44">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={EVERYONE}>Everyone</SelectItem>
+                {(roster.data ?? []).map((m) => (
+                  <SelectItem key={m.id} value={m.id}>
+                    {m.display_name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
         </div>
-        <Button onClick={() => setBooking(true)} disabled={columns.length === 0}>
+        <Button onClick={() => setBooking('blank')} disabled={!canManage || columns.length === 0}>
           <Plus aria-hidden />
           New appointment
         </Button>
       </div>
 
-      {columns.length === 0 ? (
+      {data.staff.length === 0 ? (
         <EmptyState
           icon={CalendarDays}
           title="Nobody on the schedule yet"
           description="Staff members appear here as columns once they are added in Settings."
         />
       ) : (
-        // The columns scroll sideways inside this box; the page itself never does (DESIGN.md).
-        <div className="overflow-x-auto" data-testid="columns">
-          <div
-            className="grid gap-4"
-            style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(14rem, 1fr))` }}
-          >
-            {columns.map((member) => (
-              <StaffColumn
-                key={member.id}
-                member={member}
-                timezone={timezone}
-                appointments={appointments.filter((a) => a.staff.id === member.id)}
-              />
-            ))}
-          </div>
-        </div>
+        <Grid
+          schedule={data}
+          columns={columns}
+          canManage={canManage}
+          onCreate={setBooking}
+          onChange={(appointment, next) => change.mutate({ appointment, change: next })}
+        />
       )}
 
       {booking && (
         <BookingDialog
-          date={date}
-          roster={columns}
-          onClose={() => setBooking(false)}
+          date={booking === 'blank' ? date : booking.date}
+          prefill={booking === 'blank' ? null : booking}
+          timezone={data.timezone}
+          roster={roster.data ?? []}
+          onClose={() => setBooking(null)}
         />
       )}
     </div>
   )
 }
 
-function StaffColumn(props: { member: RosterEntry; timezone?: string; appointments: Appointment[] }) {
-  return (
-    <section aria-label={props.member.display_name} className="flex flex-col gap-2 rounded-xl border p-3">
-      <h2 className="flex items-center gap-2 text-base font-medium">
-        <ColourDot member={props.member} />
-        {props.member.display_name}
-      </h2>
-      {props.appointments.length === 0 ? (
-        <p className="text-sm text-muted-foreground">Nothing booked.</p>
-      ) : (
-        <ol className="flex flex-col gap-2">
-          {props.appointments.map((a) => (
-            <li
-              key={a.id}
-              className={cn('rounded-lg border p-2 text-sm', a.status === 'cancelled' && 'opacity-60')}
-            >
-              <time className="block text-xs font-medium text-muted-foreground" dateTime={a.starts_at}>
-                {clock(a.starts_at, props.timezone)}–{clock(a.ends_at, props.timezone)}
-              </time>
-              <span className="block font-medium">
-                {a.customer.first_name} {a.customer.last_name}
-              </span>
-              <span className="block text-muted-foreground">
-                {a.service.name}
-                {a.resources.length > 0 && ` · ${a.resources.map((r) => r.name).join(', ')}`}
-              </span>
-            </li>
-          ))}
-        </ol>
-      )}
-    </section>
-  )
+/** Radix refuses an empty `SelectItem` value; ids are UUIDs, so nothing collides with this. */
+const EVERYONE = 'everyone'
+
+/** The grid's instants carry milliseconds, the server's do not; the moment is the same. */
+const sameInstant = (a: string, b: string) => new Date(a).getTime() === new Date(b).getTime()
+
+/** Monday to Sunday around `date`, on the string — the week the ISO calendar puts it in. */
+function weekOf(date: string): [string, string] {
+  const [y, m, d] = date.split('-').map(Number)
+  const weekday = (new Date(Date.UTC(y, m - 1, d)).getUTCDay() + 6) % 7
+  const monday = addDays(date, -weekday)
+  return [monday, addDays(monday, 6)]
+}
+
+/**
+ * The column axis. Day view: the staff working that day, or with something on it, in roster
+ * order — and everybody when nobody is, so an unconfigured week is a dimmed grid rather than
+ * a blank one. Week view: the seven dates.
+ */
+function columnsFor(
+  view: 'day' | 'week',
+  schedule: Schedule,
+  range: string[],
+  todayDate: string,
+  staffFilter: string | null,
+): Column[] {
+  if (view === 'week') {
+    return Array.from({ length: 7 }, (_, i) => addDays(range[0], i)).map((date) => {
+      const { weekday, day } = weekdayLabel(date)
+      return {
+        key: date,
+        date,
+        staffId: staffFilter,
+        label: weekday,
+        sublabel: String(day),
+        today: date === todayDate,
+      }
+    })
+  }
+  const date = range[0]
+  const working = new Set(schedule.working_blocks.filter((b) => b.date === date).map((b) => b.staff_id))
+  for (const a of schedule.appointments) {
+    if (localDate(new Date(a.starts_at), schedule.timezone) === date) working.add(a.staff.id)
+  }
+  const staff = working.size > 0 ? schedule.staff.filter((s) => working.has(s.id)) : schedule.staff
+  return staff.map((s) => ({
+    key: s.id,
+    date,
+    staffId: s.id,
+    label: s.display_name,
+    today: date === todayDate,
+  }))
+}
+
+/** The appointment as it will be once the server agrees — for the card to land there now. */
+function moved(a: Appointment, change: Change): Appointment {
+  const starts_at = change.starts_at ?? a.starts_at
+  const duration_minutes = change.duration_minutes ?? a.duration_minutes
+  const ends_at = new Date(new Date(starts_at).getTime() + duration_minutes * 60_000).toISOString()
+  return { ...a, starts_at, ends_at, duration_minutes }
 }
 
 /** The staff colour, in whichever of its two hexes the current theme wants. */
@@ -198,7 +298,6 @@ function ColourDot({ member }: { member: RosterEntry }) {
   )
 }
 
-/** Radix refuses an empty `SelectItem` value; ids are UUIDs, so nothing collides with this. */
 const ANY = 'any'
 
 /** A booking refused because the chosen time is gone — the lost race (`slot_taken`, the
@@ -214,12 +313,22 @@ function stalePick(error: unknown): error is ApiError {
  * The slots are re-read whenever the three inputs above them change, and again after a
  * stale pick — the one refusal that means "what you were looking at is out of date".
  */
-function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: () => void }) {
+function BookingDialog(props: {
+  date: string
+  /** What was drawn on the grid: the column's person and the instant at the top of the
+   *  range. The service is still to be chosen; once it is, that instant is picked if the
+   *  server offers it, and said to be unavailable if not. */
+  prefill: Prefill | null
+  timezone: string
+  roster: RosterEntry[]
+  onClose: () => void
+}) {
   const queryClient = useQueryClient()
   const [serviceId, setServiceId] = useState('')
-  const [staffId, setStaffId] = useState(ANY)
+  const [staffId, setStaffId] = useState(props.prefill?.staffId ?? ANY)
   const [date, setDate] = useState(props.date)
-  const [slot, setSlot] = useState<AvailabilitySlot | null>(null)
+  const [picked, setPicked] = useState<AvailabilitySlot | null>(null)
+  const [wanted, setWanted] = useState(props.prefill?.startsAt ?? null)
   const [existing, setExisting] = useState(true)
   const [search, setSearch] = useState('')
   const [customer, setCustomer] = useState<Customer | null>(null)
@@ -242,7 +351,16 @@ function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: ()
     retry: false,
   })
   const slots = availability.data?.days[0]?.slots ?? []
-  const timezone = availability.data?.timezone
+  const timezone = availability.data?.timezone ?? props.timezone
+  // The drawn time is the pick as soon as a service makes it an offer — and again after
+  // every change of service or provider — until a slot is picked by hand.
+  const offered = wanted ? (slots.find((s) => sameInstant(s.starts_at, wanted)) ?? null) : null
+  const slot = picked ?? offered
+  const drawnButGone = Boolean(wanted && service && availability.isSuccess && !offered)
+  const pick = (chosen: AvailabilitySlot) => {
+    setWanted(null)
+    setPicked(chosen)
+  }
   const matches = useQuery({
     queryKey: [...CUSTOMERS, search],
     queryFn: () => searchCustomers(search),
@@ -252,10 +370,13 @@ function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: ()
   const choose = (next: { service?: string; staff?: string; date?: string }) => {
     // Any of the three changes what is on offer; a slot picked under the old answer is not
     // an answer to the new question.
-    setSlot(null)
+    setPicked(null)
     if (next.service !== undefined) {
       setServiceId(next.service)
-      setStaffId(ANY)
+      // The person stays chosen when they can deliver the new service — the one drawn on
+      // the grid especially — and only falls back to "any" when they cannot.
+      const eligible = catalog.data?.find((s) => s.id === next.service)?.staff_ids ?? []
+      if (!eligible.includes(staffId)) setStaffId(ANY)
     }
     if (next.staff !== undefined) setStaffId(next.staff)
     if (next.date !== undefined) setDate(next.date)
@@ -265,7 +386,7 @@ function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: ()
   // column order. The slot survives, because it is in their own list as well.
   const pickUnder = (member: RosterEntry, picked: AvailabilitySlot) => {
     setStaffId(member.id)
-    setSlot(picked)
+    pick(picked)
   }
 
   const customerReady = existing
@@ -297,6 +418,7 @@ function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: ()
       toast.success(
         `Booked ${made.customer.first_name} ${made.customer.last_name} with ${made.staff.display_name}${where}`,
       )
+      queryClient.invalidateQueries({ queryKey: SCHEDULE })
       queryClient.invalidateQueries({ queryKey: APPOINTMENTS })
       queryClient.invalidateQueries({ queryKey: AVAILABILITY })
       props.onClose()
@@ -305,7 +427,8 @@ function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: ()
       if (stalePick(error)) {
         // Longer than the default: this is the one message that changes what to do next.
         toast.error(error.message, { duration: 8000 })
-        setSlot(null)
+        setPicked(null)
+        setWanted(null)
         queryClient.invalidateQueries({ queryKey: AVAILABILITY })
         queryClient.invalidateQueries({ queryKey: APPOINTMENTS })
       }
@@ -376,7 +499,11 @@ function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: ()
           <fieldset className="flex flex-col gap-2">
             <legend className="mb-2 text-sm font-medium">Time</legend>
             {!service ? (
-              <p className="text-xs text-muted-foreground">Choose a service first.</p>
+              <p className="text-xs text-muted-foreground">
+                {wanted
+                  ? `Drawn for ${clock(wanted, timezone)}. Choose a service to book it.`
+                  : 'Choose a service first.'}
+              </p>
             ) : unbookable.length > 0 ? (
               <p role="alert" className="text-xs text-destructive">
                 This service cannot be booked yet: {unbookable.join(' ')}
@@ -394,7 +521,7 @@ function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: ()
               <>
                 <div className="flex flex-col gap-1">
                   <span className="text-xs font-medium text-muted-foreground">Any available</span>
-                  <SlotButtons group="Any available" slots={slots} chosen={slot} timezone={timezone} onPick={setSlot} />
+                  <SlotButtons group="Any available" slots={slots} chosen={slot} timezone={timezone} onPick={pick} />
                 </div>
                 {providers.map((m) => {
                   const theirs = slots.filter((s) => s.staff_ids.includes(m.id))
@@ -417,7 +544,14 @@ function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: ()
                 })}
               </>
             ) : (
-              <SlotButtons slots={slots} chosen={slot} timezone={timezone} onPick={setSlot} />
+              <SlotButtons slots={slots} chosen={slot} timezone={timezone} onPick={pick} />
+            )}
+            {drawnButGone && (
+              <p role="status" className="text-xs text-warning">
+                {clock(wanted as string, timezone)} is not free for this service
+                {staffId === ANY ? '' : ` with ${providers.find((m) => m.id === staffId)?.display_name ?? 'them'}`}
+                . Pick another time.
+              </p>
             )}
           </fieldset>
 
@@ -584,31 +718,3 @@ function SlotButtons(props: {
   )
 }
 
-// --- dates, clocks and numbers ---------------------------------------------------------------
-
-/** Today as `YYYY-MM-DD` on the business's calendar, whatever the browser's clock says. The
- *  `en-CA` locale is the one whose default date format *is* ISO. */
-function today(timezone: string): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: timezone,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date())
-}
-
-/** Calendar arithmetic on the string itself — no zone, no DST, no browser clock. */
-function addDays(iso: string, days: number): string {
-  const [y, m, d] = iso.split('-').map(Number)
-  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10)
-}
-
-/** An instant as a wall-clock time in the business's zone (or the browser's, before the
- *  zone is known). */
-function clock(instant: string, timezone?: string): string {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: 'numeric',
-    minute: '2-digit',
-    timeZone: timezone,
-  }).format(new Date(instant))
-}

@@ -41,3 +41,6 @@ export const CATALOG = ['catalog'] as const
 export const AVAILABILITY = ['availability'] as const
 /** The booking dialog's client search; takes the query string as a second element. */
 export const CUSTOMERS = ['customers'] as const
+/** The grid's one read (`/api/schedule`); takes the range and the staff filter after it.
+ *  Booking, moving and resizing invalidate the prefix. */
+export const SCHEDULE = ['schedule'] as const

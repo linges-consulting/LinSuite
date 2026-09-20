@@ -1116,3 +1116,61 @@ export async function bookAppointment(draft: BookingDraft): Promise<Appointment>
   if (!res.ok) throw await failure(res, 'Could not book the appointment')
   return res.json()
 }
+
+// --- the calendar: one read for the grid, and the two drags -----------------------------------
+
+/** A column on the grid: the roster entry without `sort_order` (the list is already in order). */
+export type ScheduleColumn = { id: string; display_name: string; colour: string; hex: string; dark_hex: string }
+
+/** One shift on one business-local date, as instants — converted server-side from the
+ *  weekly rule, so the shading here and the slots the server offers are one picture. */
+export type WorkingBlock = { staff_id: string; date: string; starts_at: string; ends_at: string }
+
+export type ScheduleTimeOff = {
+  id: string
+  staff_id: string
+  all_day: boolean
+  reason: string | null
+  starts_at: string
+  ends_at: string
+}
+
+export type ScheduleClosure = { id: string; date: string; name: string }
+
+export type Schedule = {
+  timezone: string
+  granularity_minutes: number
+  staff: ScheduleColumn[]
+  working_blocks: WorkingBlock[]
+  time_off: ScheduleTimeOff[]
+  closures: ScheduleClosure[]
+  appointments: Appointment[]
+}
+
+/** `from`/`to` are business-local dates, `to` inclusive, at most 31 days apart; `staff_id`
+ *  narrows every list to one column. */
+export async function fetchSchedule(query: {
+  from: string
+  to: string
+  staff_id?: string
+}): Promise<Schedule> {
+  const params = new URLSearchParams({ from: query.from, to: query.to })
+  if (query.staff_id) params.set('staff_id', query.staff_id)
+  const res = await fetch(`/api/schedule?${params}`)
+  if (!res.ok) throw await failure(res, 'Could not load the schedule')
+  return res.json()
+}
+
+/**
+ * A move (`starts_at`), a resize (`duration_minutes`), or both. The server re-runs the
+ * engine with this appointment out of its own way and refuses with 422 `not_offered` or
+ * 409 `slot_taken` — the same two answers booking gives, treated the same way.
+ */
+export async function changeAppointment(
+  id: string,
+  change: { starts_at?: string; duration_minutes?: number },
+): Promise<Appointment> {
+  const res = await send('PATCH', `/api/appointments/${id}`, change)
+  if (!res.ok) throw await failure(res, 'Could not move the appointment')
+  return res.json()
+}
