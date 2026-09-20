@@ -34,16 +34,18 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Uuid,
     func,
     text,
 )
 from sqlalchemy import (
     Date as DateColumn,
 )
-from sqlalchemy.dialects.postgresql import ExcludeConstraint
+from sqlalchemy.dialects.postgresql import TSTZRANGE, ExcludeConstraint, Range
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.db import Base
+from customers.models import Customer  # noqa: F401 — the `Appointment.customer` relationship
 
 # Commission is stored in basis points — integers, like every other money-adjacent number in
 # this application (CLAUDE.md). 45% is 4500, and 100% is the ceiling: a rate above it would
@@ -456,3 +458,118 @@ class ServiceRequirement(Base):
     # For the resource's name in the response. Joined rather than selectin: it is one row per
     # requirement and the requirements are already being loaded by their service.
     resource: Mapped["Resource | None"] = relationship(lazy="joined")
+
+
+# The four states an appointment moves through (PRD §3). A string with a CHECK rather than a
+# Postgres enum, like `resources.kind`: adding a state is an ALTER either way.
+APPOINTMENT_STATUSES = ("confirmed", "completed", "cancelled", "no_show")
+
+
+class Appointment(Base):
+    """One service, one staff member, one client, one span of time (CLAUDE.md "Domain rules").
+
+    **The service is snapshotted, never referenced** (`Service`'s SNAPSHOT CONTRACT).
+    `duration_minutes`, the two buffers and `price_cents` are copied here at booking and read
+    from here ever after — the calendar block, the invoice line, the treatment receipt. The
+    `service_id` stays for the name and for reporting, not for any number.
+
+    **`starts_at`/`ends_at` are the span the client sees**, as `timestamptz`. The buffered
+    span — what the staff member and the rooms are actually occupied for — is derived where
+    it is compared: `scheduling/slots.busy_intervals` for the engine, the trigger below for
+    the staff limit, and `AppointmentResource.period` stores it outright for the constraint.
+    Three places, one arithmetic: `[starts_at - before, ends_at + after)`.
+
+    **Staff overlap is enforced by `tg_appointments_staff_concurrency`** (migration 0014,
+    tech-stack §20), a trigger rather than a constraint because the limit is a number on
+    the staff row and constraints cannot read one. It fires before every insert and update,
+    skips cancelled rows, counts the overlapping non-cancelled ones over their buffered
+    spans, and refuses when that count has reached `staff.max_concurrent_appointments`. It
+    locks the staff row first, which is what turns two simultaneous bookings for one person
+    into one booking and one refusal.
+
+    No cascades on the three foreign keys: history must never lose its author.
+    """
+
+    __tablename__ = "appointments"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('confirmed', 'completed', 'cancelled', 'no_show')",
+            name="ck_appointments_status",
+        ),
+        CheckConstraint("starts_at < ends_at", name="ck_appointments_span"),
+        CheckConstraint(
+            "duration_minutes > 0 AND buffer_before_minutes >= 0 "
+            "AND buffer_after_minutes >= 0 AND price_cents >= 0",
+            name="ck_appointments_snapshot",
+        ),
+        Index("ix_appointments_staff_start", "staff_id", "starts_at"),
+        Index("ix_appointments_customer", "customer_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id"))
+    staff_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("staff.id"))
+    service_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("services.id"))
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ends_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    duration_minutes: Mapped[int] = mapped_column(Integer)
+    buffer_before_minutes: Mapped[int] = mapped_column(Integer)
+    buffer_after_minutes: Mapped[int] = mapped_column(Integer)
+    price_cents: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16), server_default=text("'confirmed'"))
+    # Task 18: the linked appointments of one multi-service visit share this.
+    booking_group_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_by_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    # Every reader of an appointment wants the three names on it, so they load with the row.
+    customer: Mapped["Customer"] = relationship(lazy="joined")
+    staff: Mapped["Staff"] = relationship(lazy="joined")
+    service: Mapped["Service"] = relationship(lazy="joined")
+    resources: Mapped[list["AppointmentResource"]] = relationship(
+        cascade="all, delete-orphan", lazy="selectin", passive_deletes=True
+    )
+
+
+class AppointmentResource(Base):
+    """One space or device an appointment claims, for its whole buffered span.
+
+    **`period` is the buffered span** — `[starts_at - before, ends_at + after)` — because the
+    room is occupied while it is being turned over. Stored rather than derived so that
+    `ex_appointment_resources_no_overlap` (tech-stack §15, migration 0014) can compare it:
+    `EXCLUDE USING gist (resource_id WITH =, period WITH &&)`. A chair cannot be in two
+    places, and this is the database saying so to every code path there will ever be.
+
+    **No WHERE clause on the constraint.** Cancelling an appointment (Task 18) deletes these
+    rows, so a cancelled booking frees its room by no longer claiming it. `ON DELETE CASCADE`
+    from the appointment is the same idea for a row that goes altogether.
+
+    `kind` is copied from the resource so the calendar can say "Room 1" and "Laser 2" apart
+    without a join, and so the constraint's index says which kind of clash it refused.
+    """
+
+    __tablename__ = "appointment_resources"
+    __table_args__ = (
+        CheckConstraint("kind IN ('space', 'equipment')", name="ck_appointment_resources_kind"),
+        ExcludeConstraint(
+            ("resource_id", "="),
+            ("period", "&&"),
+            name="ex_appointment_resources_no_overlap",
+            using="gist",
+        ),
+    )
+
+    appointment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("appointments.id", ondelete="CASCADE"), primary_key=True
+    )
+    resource_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("resources.id"), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    period: Mapped[Range[datetime]] = mapped_column(TSTZRANGE)
+
+    resource: Mapped["Resource"] = relationship(lazy="joined")
