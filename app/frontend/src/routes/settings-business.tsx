@@ -153,6 +153,42 @@ export function BusinessPanel() {
           />
         </Field>
 
+        <div className="grid grid-cols-2 gap-4">
+          <Field
+            label="Booking grid (minutes)"
+            htmlFor="slot_granularity_minutes"
+            error={errors.slot_granularity_minutes}
+            hint="Appointments can start every this-many minutes, counted from midnight."
+          >
+            <Input
+              id="slot_granularity_minutes"
+              type="number"
+              required
+              min={5}
+              max={60}
+              step={5}
+              value={form.slot_granularity_minutes}
+              onChange={(e) => set({ slot_granularity_minutes: e.target.valueAsNumber })}
+            />
+          </Field>
+          <Field
+            label="Booking horizon (days)"
+            htmlFor="booking_horizon_days"
+            error={errors.booking_horizon_days}
+            hint="How far ahead anything can be booked."
+          >
+            <Input
+              id="booking_horizon_days"
+              type="number"
+              required
+              min={1}
+              max={365}
+              value={form.booking_horizon_days}
+              onChange={(e) => set({ booking_horizon_days: e.target.valueAsNumber })}
+            />
+          </Field>
+        </div>
+
         <div className="flex gap-2">
           <Button type="submit" disabled={save.isPending || draft === null}>
             {save.isPending ? 'Saving…' : 'Save changes'}
@@ -354,6 +390,8 @@ function strip(form: BusinessProfile): BusinessProfile {
     pst_qst_number,
     currency_symbol,
     receipt_footer,
+    slot_granularity_minutes,
+    booking_horizon_days,
   } = form
   return {
     name,
@@ -368,6 +406,8 @@ function strip(form: BusinessProfile): BusinessProfile {
     pst_qst_number,
     currency_symbol,
     receipt_footer,
+    slot_granularity_minutes,
+    booking_horizon_days,
   }
 }
 

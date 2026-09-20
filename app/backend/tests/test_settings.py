@@ -198,6 +198,42 @@ async def test_the_database_refuses_a_postal_code_the_api_would_have(client):
             await db.commit()
 
 
+async def test_the_booking_grid_and_horizon_default_and_round_trip(client):
+    """The two numbers `scheduling/availability.py` reads (tech-stack §19)."""
+    await as_admin(client)
+
+    read = (await client.get(BUSINESS)).json()
+    assert (read["slot_granularity_minutes"], read["booking_horizon_days"]) == (15, 90)
+
+    saved = await put_profile(client, slot_granularity_minutes=30, booking_horizon_days=14)
+    assert saved.status_code == 200, saved.text
+    read = (await client.get(BUSINESS)).json()
+    assert (read["slot_granularity_minutes"], read["booking_horizon_days"]) == (30, 14)
+    assert "slot_granularity_minutes" in (await audit("business.profile_updated"))[-1]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("slot_granularity_minutes", 0),
+        ("slot_granularity_minutes", 7),  # not a five-minute step
+        ("slot_granularity_minutes", 90),
+        ("booking_horizon_days", 0),
+        ("booking_horizon_days", 366),
+    ],
+)
+async def test_a_grid_or_horizon_the_engine_could_not_use_is_refused(client, field, value):
+    await as_admin(client)
+
+    resp = await put_profile(client, **{field: value})
+
+    assert resp.status_code == 422, resp.text
+    async with session_scope() as db:
+        with pytest.raises(Exception, match="ck_businesses_"):
+            await db.execute(text(f"UPDATE businesses SET {field} = {value}"))
+            await db.commit()
+
+
 async def test_a_row_written_out_of_band_is_reported_rather_than_refused(client):
     """The read model does not re-run the input validators. A row the constraints allow but
     `BusinessProfile` would not — an address line longer than the form permits, say — has to

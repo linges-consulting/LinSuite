@@ -76,6 +76,12 @@ def _valid_hex(value: str) -> str:
     return branding.normalise(value)
 
 
+def _five_minute_step(value: int) -> int:
+    if value % 5:
+        raise ValueError("the grid goes in 5-minute steps")
+    return value
+
+
 def _canonical_zone(value: str) -> str:
     if not is_canonical(value):
         raise ValueError("not a current IANA timezone name")
@@ -123,6 +129,13 @@ class BusinessProfile(BaseModel):
     pst_qst_number: _text(64) = None  # type: ignore[valid-type]
     currency_symbol: str = Field(default="$", min_length=1, max_length=8)
     receipt_footer: _text(2000) = None  # type: ignore[valid-type]
+    # The two numbers the availability engine reads (tech-stack §19). On the profile rather
+    # than on a screen of their own because they are settings a business sets once, and the
+    # matching CHECK constraints are in migration 0013.
+    slot_granularity_minutes: Annotated[
+        int, Field(ge=5, le=60), AfterValidator(_five_minute_step)
+    ] = 15
+    booking_horizon_days: Annotated[int, Field(ge=1, le=365)] = 90
 
 
 class BusinessOut(BaseModel):
@@ -147,6 +160,8 @@ class BusinessOut(BaseModel):
     pst_qst_number: str | None
     currency_symbol: str
     receipt_footer: str | None
+    slot_granularity_minutes: int
+    booking_horizon_days: int
     # Read-only here on purpose: the country is fixed, the timezone has its own endpoint, and
     # `setup_completed_at` is written once by the wizard and never again.
     country: str

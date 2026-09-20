@@ -84,6 +84,13 @@ class Business(Base):
     brand_primary: Mapped[str] = mapped_column(String(7), server_default=text("'#1d4ed8'"))
     brand_secondary: Mapped[str] = mapped_column(String(7), server_default=text("'#0f766e'"))
 
+    # --- what the availability engine reads (tech-stack §19; `scheduling/availability.py`) --
+    # The step slot starts are offered on, from local midnight. Five-minute steps, at most an
+    # hour; the CHECK is in migration 0013.
+    slot_granularity_minutes: Mapped[int] = mapped_column(Integer, server_default="15")
+    # How far ahead anything is computed. A year at most: a horizon caps the cost of a request.
+    booking_horizon_days: Mapped[int] = mapped_column(Integer, server_default="90")
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

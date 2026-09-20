@@ -210,6 +210,10 @@ export type BusinessProfile = {
   pst_qst_number: string | null
   currency_symbol: string
   receipt_footer: string | null
+  /** The step bookable starts are offered on, from local midnight: 5–60, in fives. */
+  slot_granularity_minutes: number
+  /** How far ahead availability is computed at all: 1–365. */
+  booking_horizon_days: number
 }
 
 export type Business = BusinessProfile & {
