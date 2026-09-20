@@ -25,6 +25,7 @@ from scheduling.appointments import router as appointments_router
 from scheduling.closures import router as closures_router
 from scheduling.hours import router as hours_router
 from scheduling.resources import router as resources_router
+from scheduling.schedule import router as schedule_router
 from scheduling.services import public as catalog_router
 from scheduling.services import router as services_router
 from scheduling.slots import router as availability_router
@@ -178,6 +179,8 @@ api.include_router(availability_router)
 api.include_router(appointments_router)
 api.include_router(customers_router)
 api.include_router(roster_router)
+# The calendar's one read: roster, shifts, absences, closures and bookings together.
+api.include_router(schedule_router)
 api.include_router(business_router)
 api.include_router(branding_router)
 app.include_router(api)
