@@ -14,9 +14,11 @@ that reads the database into these inputs and serves the result.
 2. Closure dates are removed whole. Time off and busy intervals are subtracted — busy ones
    only where `max_concurrent` of them already overlap (§20: the stylist running two chairs).
 3. Every required space or device must be free for the whole span, turnaround included: the
-   room is occupied while it is being turned over. An "any" requirement is satisfied by any
-   one active resource of its kind being free for the whole span — which one is chosen at
-   booking time.
+   room is occupied while it is being turned over. Each resource's free intervals for the day
+   are derived once (the day minus its bookings) and the span has to sit inside one of them,
+   exactly as with a staff member's. An "any" requirement is satisfied by any one active
+   resource of its kind — which one is chosen at booking time. A named resource this function
+   was not given is a requirement nothing satisfies, never one that is waived.
 4. `buffer_before + duration + buffer_after` is slid across what remains, with the *start* on
    the granularity grid measured from **local midnight** — so a fifteen-minute grid is
    :00/:15/:30/:45 on the clock face even across a transition, and a forty-five-minute one
@@ -45,7 +47,11 @@ from datetime import date as Date
 from zoneinfo import ZoneInfo
 
 from scheduling.clock import local_blocks_to_instants, localize
-from scheduling.models import MINUTES_IN_DAY
+
+# The same 1440 `scheduling/models.py` declares. Spelled out here rather than imported so
+# this module stays free of the ORM: it is what lets the S2 tests import it with nothing
+# else loaded, and what keeps "pure function" a statement about the imports too.
+MINUTES_IN_DAY = 24 * 60
 
 Id = Hashable
 Interval = tuple[datetime, datetime]
@@ -117,23 +123,15 @@ def bookable_slots(
     """
     zone = ZoneInfo(timezone)
     providers = [s for s in staff if s.id in set(service.staff_ids)]
-    by_kind: dict[str, list[Id]] = {}
-    for resource in resources:
-        by_kind.setdefault(resource.kind, []).append(resource.id)
+    known = {resource.id: resource.kind for resource in resources}
+    # Which resources each requirement may be met by. A named one has to be in `resources`
+    # (active): naming a resource this function was not told about is *not* "free", it is
+    # a requirement nothing can satisfy — the catalog gate refuses that case earlier, and
+    # this keeps the engine safe without it.
+    candidates = [_candidates(requirement, known) for requirement in service.requirements]
     before = timedelta(minutes=service.buffer_before_minutes)
     length = timedelta(minutes=service.duration_minutes)
     after = timedelta(minutes=service.buffer_after_minutes)
-
-    def resources_free(span: Interval) -> bool:
-        for requirement in service.requirements:
-            candidates = (
-                [requirement.resource_id]
-                if requirement.resource_id is not None
-                else by_kind.get(requirement.kind, [])
-            )
-            if not any(_clear(span, resource_busy.get(r, ())) for r in candidates):
-                return False
-        return True
 
     result: dict[Date, list[Slot]] = {}
     for day in dates:
@@ -141,6 +139,17 @@ def bookable_slots(
         if day in closures or (horizon_ends_on is not None and day > horizon_ends_on):
             continue
 
+        # Step 3: each resource's free intervals on this local day — the whole day minus what
+        # is booked on it — derived once here, the same way a staff member's are below. A
+        # buffered span never leaves the day (blocks end at midnight at the latest), so the
+        # day window is enough.
+        day_window = local_blocks_to_instants([(0, MINUTES_IN_DAY)], day, zone)
+        resource_free = {id_: _subtract(day_window, resource_busy.get(id_, ())) for id_ in known}
+
+        def resources_free(span: Interval, free=resource_free) -> bool:
+            return all(any(_within(span, free[id_]) for id_ in ids) for ids in candidates)
+
+        grid = [start for start in _grid(day, granularity_minutes, zone) if start >= now]
         takers: dict[datetime, list[Id]] = {}
         for person in providers:
             free = _merged(local_blocks_to_instants(person.hours.get(day.weekday(), ()), day, zone))
@@ -148,9 +157,7 @@ def bookable_slots(
             free = _subtract(free, _saturated(staff_busy.get(person.id, ()), person.max_concurrent))
             if not free:
                 continue
-            for start in _grid(day, granularity_minutes, zone):
-                if start < now:
-                    continue
+            for start in grid:
                 span = (start - before, start + length + after)
                 if _within(span, free) and (start in takers or resources_free(span)):
                     takers.setdefault(start, []).append(person.id)
@@ -160,6 +167,14 @@ def bookable_slots(
             for start, ids in sorted(takers.items())
         ]
     return result
+
+
+def _candidates(requirement: Requirement, known: Mapping[Id, str]) -> list[Id]:
+    """The resources that may meet one requirement: the named one if it is known, else every
+    known one of the kind. An unknown named resource yields nothing, deliberately."""
+    if requirement.resource_id is not None:
+        return [requirement.resource_id] if requirement.resource_id in known else []
+    return [id_ for id_, kind in known.items() if kind == requirement.kind]
 
 
 # --- the grid ----------------------------------------------------------------------------------
@@ -237,8 +252,3 @@ def _saturated(intervals: Sequence[Interval], limit: int) -> list[Interval]:
 def _within(span: Interval, free: Sequence[Interval]) -> bool:
     start, end = span
     return any(free_start <= start and end <= free_end for free_start, free_end in free)
-
-
-def _clear(span: Interval, busy: Iterable[Interval]) -> bool:
-    start, end = span
-    return all(end <= busy_start or start >= busy_end for busy_start, busy_end in busy)

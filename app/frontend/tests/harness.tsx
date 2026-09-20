@@ -65,6 +65,8 @@ const EMPTY_PROFILE = {
   pst_qst_number: null,
   currency_symbol: '$',
   receipt_footer: null,
+  slot_granularity_minutes: 15,
+  booking_horizon_days: 90,
 }
 
 /**

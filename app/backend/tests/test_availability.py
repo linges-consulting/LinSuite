@@ -302,6 +302,44 @@ def test_the_turnaround_occupies_the_room_too():
     assert starts(service=service, resources=rooms, resource_busy=busy) == ["10:30"]
 
 
+def test_a_named_resource_the_engine_was_not_given_is_never_treated_as_free():
+    """The catalog refuses a deactivated named resource before the engine is reached; this is
+    the engine being safe on its own. A requirement nothing can satisfy offers nothing."""
+    service = ServiceSpec(
+        duration_minutes=60,
+        staff_ids=("ana",),
+        requirements=(Requirement(kind="equipment", resource_id="laser-9"),),
+    )
+
+    assert starts(service=service, resources=[ResourceSpec(id="laser-1", kind="equipment")]) == []
+    assert starts(service=service, resources=[]) == []
+
+
+def test_a_resource_s_bookings_across_the_window_are_applied_to_the_right_days():
+    """Free intervals are derived per day from a busy list that spans the whole window."""
+    tuesday, wednesday = date(2026, 6, 16), date(2026, 6, 17)
+    service = ServiceSpec(
+        duration_minutes=60, staff_ids=("ana",), requirements=(Requirement(kind="space"),)
+    )
+    rooms = [ResourceSpec(id="room-1", kind="space")]
+    busy = {
+        "room-1": [
+            (local(ORDINARY, "10:00"), local(ORDINARY, "11:00")),
+            (local(tuesday, "09:00"), local(tuesday, "10:00")),
+            (local(tuesday, "11:30"), local(tuesday, "12:00")),
+            (local(wednesday, "00:00"), local(wednesday + timedelta(days=1), "00:00")),
+        ]
+    }
+
+    result = compute(
+        [ORDINARY, tuesday, wednesday], service=service, resources=rooms, resource_busy=busy
+    )
+
+    assert [wall(s.starts_at) for s in result[ORDINARY]] == ["09:00", "11:00"]
+    assert [wall(s.starts_at) for s in result[tuesday]] == ["10:00", "10:15", "10:30"]
+    assert result[wednesday] == []
+
+
 def test_a_requirement_with_no_resource_of_its_kind_offers_nothing():
     service = ServiceSpec(
         duration_minutes=60, staff_ids=("ana",), requirements=(Requirement(kind="space"),)

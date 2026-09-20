@@ -7,7 +7,8 @@ plain values. Nothing in this module decides what is bookable.
 
 **Dates are business-local, `to` is inclusive**, and the range is capped at 31 days: a
 month view is the widest thing any screen asks for, and the cap is what keeps one request
-from computing a year. Dates past the booking horizon are still answered, with no slots —
+from computing a year. The horizon is **today plus `booking_horizon_days`, inclusive** — a
+horizon of 1 computes today and tomorrow. Dates past it are still answered, with no slots;
 `horizon_ends_on` in the response is how a screen knows why.
 
 **A service the catalog says is unbookable is a 409 carrying its reasons**, not an empty
@@ -76,7 +77,9 @@ class AvailabilityOut(BaseModel):
     service_id: str
     timezone: str
     granularity_minutes: int
-    # The last local date anything is computed for. Days after it come back empty.
+    # The last local date anything is computed for: today (business-local) plus
+    # `booking_horizon_days`, *inclusive* — so a horizon of N days is N + 1 computable days,
+    # today among them. Days after it come back empty.
     horizon_ends_on: str
     days: list[DayOut]
 
@@ -106,7 +109,11 @@ async def availability(
     to: Date,
     staff_id: uuid.UUID | None = None,
 ):
-    """The documented body is `AvailabilityOut`; the 409 below is a `JSONResponse` because
+    """Bookable slots for `service_id` on each business-local date from `from` to `to`
+    inclusive (at most 31 days). Days after `horizon_ends_on` — today plus the business's
+    `booking_horizon_days`, inclusive — are answered with no slots.
+
+    The documented body is `AvailabilityOut`; the 409 below is a `JSONResponse` because
     `HTTPException` carries one `detail` and this refusal has a list beside it."""
     if to < from_:
         raise refuse("to", "The last day cannot come before the first.", where="query")

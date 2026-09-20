@@ -263,9 +263,10 @@ async def test_a_staff_member_who_cannot_deliver_it_is_refused_as_a_filter(clien
 # --- the horizon and the range ----------------------------------------------------------------
 
 
-async def test_days_past_the_horizon_are_answered_empty_and_the_response_says_where_it_ends(
+async def test_the_horizon_is_today_plus_n_days_inclusive_and_the_response_says_where_it_ends(
     client,
 ):
+    """A horizon of 1 computes today and tomorrow; the day after is answered empty."""
     await as_admin(client)
     me = await me_staff_id(client)
     await put_hours(client, me, [(w, 540, 720) for w in range(7)])
@@ -282,6 +283,8 @@ async def test_days_past_the_horizon_are_answered_empty_and_the_response_says_wh
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["horizon_ends_on"] == (today + timedelta(days=1)).isoformat()
+    # Today is computable too (how many of its slots remain depends on the time of day).
+    assert body["days"][0]["date"] == today.isoformat()
     tomorrow, beyond = body["days"][1], body["days"][2]
     assert len(tomorrow["slots"]) == 9
     assert beyond["slots"] == []

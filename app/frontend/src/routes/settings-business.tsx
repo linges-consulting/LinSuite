@@ -167,7 +167,7 @@ export function BusinessPanel() {
               min={5}
               max={60}
               step={5}
-              value={form.slot_granularity_minutes}
+              value={shown(form.slot_granularity_minutes)}
               onChange={(e) => set({ slot_granularity_minutes: e.target.valueAsNumber })}
             />
           </Field>
@@ -183,14 +183,14 @@ export function BusinessPanel() {
               required
               min={1}
               max={365}
-              value={form.booking_horizon_days}
+              value={shown(form.booking_horizon_days)}
               onChange={(e) => set({ booking_horizon_days: e.target.valueAsNumber })}
             />
           </Field>
         </div>
 
         <div className="flex gap-2">
-          <Button type="submit" disabled={save.isPending || draft === null}>
+          <Button type="submit" disabled={save.isPending || draft === null || incomplete(form)}>
             {save.isPending ? 'Saving…' : 'Save changes'}
           </Button>
           {draft !== null && (
@@ -373,6 +373,19 @@ function TimezoneSection(props: { current: string; province: string | null }) {
       </Dialog>
     </section>
   )
+}
+
+/**
+ * A number input that has been cleared reports `NaN`. The draft keeps it — snapping the old
+ * value back would fight anybody deleting the digits to type new ones — and shows it as an
+ * empty field; `incomplete` below is what keeps `NaN` off the wire.
+ */
+function shown(value: number): number | '' {
+  return Number.isNaN(value) ? '' : value
+}
+
+function incomplete(form: BusinessProfile): boolean {
+  return Number.isNaN(form.slot_granularity_minutes) || Number.isNaN(form.booking_horizon_days)
 }
 
 /** Only the profile fields go to the server; `country`, `timezone` and the rest are read-only. */

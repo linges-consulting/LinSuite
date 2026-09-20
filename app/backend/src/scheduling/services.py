@@ -371,7 +371,11 @@ async def catalog(_: CurrentUser, db: SessionDep) -> dict[str, list[CatalogServi
     caller: a rule every reader has to remember is a rule one of them will forget.
     """
     services = await _roster(db, include_inactive=False)
-    return {"services": [_catalog_out(s, await _kinds_in_stock(db)) for s in services]}
+    # One query for the whole response: "does any active resource of this kind exist" has the
+    # same answer for every service in it. Read once, *outside* the comprehension — an `await`
+    # inside it would be one round trip per service.
+    kinds = await _kinds_in_stock(db)
+    return {"services": [_catalog_out(s, kinds) for s in services]}
 
 
 async def catalog_entry(db: SessionDep, service_id: uuid.UUID) -> CatalogServiceOut:

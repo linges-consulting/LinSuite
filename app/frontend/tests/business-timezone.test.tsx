@@ -122,3 +122,29 @@ test('the profile is saved in one request, and the shell re-reads the name', asy
   // The timezone is not in the profile request: it has its own, with its own confirmation.
   expect(saved()!.body).not.toHaveProperty('timezone')
 })
+
+test('the booking grid and horizon are saved as numbers, and a cleared field blocks the save', async () => {
+  const { calls } = stubApi(ADMIN)
+  renderApp('/settings')
+  const user = await openBusiness()
+
+  const grid = await screen.findByLabelText('Booking grid (minutes)')
+  const horizon = screen.getByLabelText('Booking horizon (days)')
+  expect(grid).toHaveValue(15)
+  expect(horizon).toHaveValue(90)
+
+  await user.clear(grid)
+  await user.type(grid, '30')
+  // A cleared number input reports NaN. It shows as empty, and nothing can be saved until a
+  // number is back in it — NaN never reaches the request.
+  await user.clear(horizon)
+  expect(horizon).toHaveValue(null)
+  expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled()
+  await user.type(horizon, '14')
+  await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+  const saved = () =>
+    calls.find((call) => call.url === '/api/admin/business' && call.method === 'PUT')
+  await waitFor(() => expect(saved()).toBeDefined())
+  expect(saved()!.body).toMatchObject({ slot_granularity_minutes: 30, booking_horizon_days: 14 })
+})
