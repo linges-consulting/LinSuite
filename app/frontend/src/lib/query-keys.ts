@@ -39,3 +39,5 @@ export const APPOINTMENTS = ['appointments'] as const
  *  `SERVICES`, which is the administrator's editing view. */
 export const CATALOG = ['catalog'] as const
 export const AVAILABILITY = ['availability'] as const
+/** The booking dialog's client search; takes the query string as a second element. */
+export const CUSTOMERS = ['customers'] as const

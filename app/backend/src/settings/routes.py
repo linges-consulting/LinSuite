@@ -372,9 +372,14 @@ async def remove_favicon(admin: AdminCapability, db: SessionDep) -> Response:
 
 
 class BrandingDocument(BaseModel):
-    """Everything the shell needs to look like this business, in one anonymous request."""
+    """Everything the shell needs to look like this business, in one anonymous request.
+
+    `timezone` is here because the schedule needs "today" to be the business's today before
+    it has made any other request, and the branding document is the one thing every screen
+    has already read. A zone name is not a secret."""
 
     name: str
+    timezone: str
     colors: dict[str, str]
     logo_url: str | None
     logo_etag: str | None
@@ -396,6 +401,7 @@ async def branding_document(db: SessionDep) -> BrandingDocument:
         # An unclaimed instance has no business row yet, and the setup wizard still has to be
         # called something. The product name is the honest answer until there is another.
         name=business.name if business else "LinSuite",
+        timezone=business.timezone if business else "UTC",
         colors=palette.colors(),
         logo_url=assets.url_of(LOGO, digests[LOGO]) if LOGO in digests else None,
         logo_etag=assets.etag_of(digests[LOGO]) if LOGO in digests else None,

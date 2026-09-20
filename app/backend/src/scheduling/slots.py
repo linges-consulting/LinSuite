@@ -341,6 +341,7 @@ def unbookable(service: CatalogServiceOut) -> JSONResponse:
         status_code=409,
         content={
             "detail": "This service cannot be booked until its setup is complete.",
+            "code": "not_bookable",
             "unbookable_reasons": service.unbookable_reasons,
         },
     )

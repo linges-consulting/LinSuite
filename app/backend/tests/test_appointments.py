@@ -301,6 +301,7 @@ async def test_a_slot_the_engine_does_not_offer_is_refused(client):
     for resp in (before_the_shift, off_the_grid, too_late_to_finish, a_day_nobody_works):
         assert resp.status_code == 422, resp.text
         assert resp.json()["detail"][0]["loc"] == ["body", "starts_at"]
+        assert resp.json()["code"] == "not_offered"
     async with session_scope() as db:
         assert await db.scalar(text("SELECT count(*) FROM appointments")) == 0
 
@@ -492,6 +493,7 @@ async def test_an_unbookable_service_is_a_409_with_reasons_and_a_wrong_provider_
     wrong_provider = await book(client, mine, rae, at("10:00"))
 
     assert unbookable.status_code == 409, unbookable.text
+    assert unbookable.json()["code"] == "not_bookable"
     assert unbookable.json()["unbookable_reasons"] == ["Nobody active can deliver this."]
     assert wrong_provider.status_code == 422, wrong_provider.text
     assert wrong_provider.json()["detail"][0]["loc"] == ["body", "staff_id"]
@@ -713,6 +715,39 @@ async def test_booking_is_staff_work_and_schedule_view_alone_may_only_look(clien
     assert (await book(client, service, me, at("11:00"))).status_code == 401
     anonymous = await client.get(APPOINTMENTS, params={"from": "2026-06-15", "to": "2026-06-15"})
     assert anonymous.status_code == 401
+
+
+async def test_creating_the_client_inline_needs_customers_manage_on_top(client):
+    """A scheduler who may not add customers may still book somebody who exists."""
+    await as_admin(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me, [(0, 540, 720)])
+    service = await make_service(client, [me])
+    customer = await make_customer(client)
+    role = await client.post(
+        "/api/admin/roles",
+        json={
+            "name": "Booker",
+            "description": "Books, never adds.",
+            "capabilities": ["schedule.view", "schedule.manage"],
+        },
+    )
+    assert role.status_code == 201, role.text
+    await add_colleague(client, "desk@cedar.example", OTHER_PASSWORD, role="Booker")
+    client.cookies.clear()
+    await as_staff(client, "desk@cedar.example", OTHER_PASSWORD)
+
+    existing = await book(client, service, me, at("10:00"), customer_id=customer)
+    inline = await book(
+        client, service, me, at("11:00"), customer={"first_name": "New", "last_name": "Face"}
+    )
+
+    assert existing.status_code == 201, existing.text
+    assert inline.status_code == 403, inline.text
+    assert inline.json()["code"] == "capability_required"
+    async with session_scope() as db:
+        assert await db.scalar(text("SELECT count(*) FROM appointments")) == 1
+        assert await db.scalar(text("SELECT count(*) FROM customers")) == 1
 
 
 # --- S5: the database's own rules ----------------------------------------------------------------

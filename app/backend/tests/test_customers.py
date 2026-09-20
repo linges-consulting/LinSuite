@@ -193,5 +193,24 @@ async def test_the_two_capabilities_gate_the_two_verbs(client):
     assert created.json()["code"] == "capability_required"
 
 
+async def test_a_role_that_may_only_see_the_schedule_may_not_search_customers(client):
+    await sign_in(client)
+    mode = await client.post("/api/auth/mode", json={"mode": "admin", "password": PASSWORD})
+    assert mode.status_code == 200, mode.text
+    viewer = await client.post(
+        "/api/admin/roles",
+        json={"name": "Looker", "description": "Looks.", "capabilities": ["schedule.view"]},
+    )
+    assert viewer.status_code == 201, viewer.text
+    await add_colleague("desk@cedar.example", OTHER_PASSWORD, role="Looker")
+    client.cookies.clear()
+    await sign_in(client, "desk@cedar.example", OTHER_PASSWORD)
+
+    resp = await client.get(CUSTOMERS, params={"q": "x"})
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["code"] == "capability_required"
+
+
 async def test_nobody_signed_in_is_refused(client):
     assert (await client.get(CUSTOMERS)).status_code == 401

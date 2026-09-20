@@ -30,6 +30,7 @@ export const LOW_CONTRAST = '#7a7a7a'
 /** What `GET /api/branding` answers for a business with a logo and a favicon. */
 export const BRANDING_DOCUMENT: BrandingDocument = {
   name: BUSINESS_NAME,
+  timezone: 'America/Toronto',
   colors: {
     primary: PRIMARY,
     primary_foreground: '#ffffff',

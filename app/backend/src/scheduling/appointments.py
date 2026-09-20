@@ -23,6 +23,8 @@ one — the constraint would refuse the double claim, so this is what makes a se
 two rooms bookable rather than reliably refused.
 
 `schedule.manage` to book, `schedule.view` to list: booking is staff work in either mode.
+Creating the client inline is `customers.manage` on top — the same rule as `POST
+/api/customers`, checked here because the request is one request.
 The list is the read Task 16's calendar draws from; `AppointmentOut` is its shape and
 `tests/test_appointments.py` pins the keys.
 """
@@ -38,16 +40,19 @@ from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_val
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import Range
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.capabilities import Requires
+from auth.capabilities import BY_KEY, Requires
 from auth.models import User
 from core.audit import record_event
 from core.db import SessionDep
+from core.errors import CAPABILITY_REQUIRED, Forbidden
+from customers.models import Customer
 from customers.routes import CustomerIn, create_customer
 from scheduling._admin_forms import blank_to_none, refuse
 from scheduling.availability import Interval, Slot
 from scheduling.clock import localize
-from scheduling.models import Appointment, AppointmentResource, Customer, Staff
+from scheduling.models import Appointment, AppointmentResource, Staff
 from scheduling.services import CatalogServiceOut, RequirementOut, catalog_entry
 from scheduling.slots import Computed, ResourceRow, check_range, compute, unbookable, utc
 from scheduling.time_off import business_zone
@@ -191,7 +196,7 @@ class BookingIn(BaseModel):
 
 
 async def offered_slot(
-    db: SessionDep, service: CatalogServiceOut, staff_ids: list[uuid.UUID], starts_at
+    db: AsyncSession, service: CatalogServiceOut, staff_ids: list[uuid.UUID], starts_at
 ) -> tuple[Computed, Slot | None]:
     """The engine's answer for the local day `starts_at` falls on, and the slot at exactly
     that instant if it is offered to one of `staff_ids`. Its own function so a test can hold
@@ -245,6 +250,25 @@ def assign_resources(
     return chosen
 
 
+def not_offered() -> JSONResponse:
+    """The engine does not offer that start. FastAPI's 422 shape, plus a code the screen can
+    switch on without reading `loc`: it means the same as `slot_taken` to a person — what
+    you were looking at is out of date — and a screen should treat both alike."""
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {
+                    "type": "value_error",
+                    "loc": ["body", "starts_at"],
+                    "msg": "That time is no longer available. Pick another.",
+                }
+            ],
+            "code": "not_offered",
+        },
+    )
+
+
 def _is_slot_taken(error: IntegrityError) -> bool:
     """Whether the database refused because the time is taken, rather than for any other
     reason. asyncpg carries `constraint_name`; SQLAlchemy's wrapper may keep it a cause
@@ -257,8 +281,9 @@ def _is_slot_taken(error: IntegrityError) -> bool:
 
 @router.post("", status_code=201, response_model=AppointmentOut)
 async def book_appointment(payload: BookingIn, actor: Scheduler, db: SessionDep):
-    """The documented body is `AppointmentOut`; the two 409s are `JSONResponse`s because each
-    carries something beside `detail` — the catalog's reasons, or the `slot_taken` code."""
+    """The documented body is `AppointmentOut`; the coded refusals are `JSONResponse`s
+    because each carries something beside `detail` — the catalog's reasons and
+    `not_bookable`, `not_offered`, or `slot_taken`."""
     service = await catalog_entry(db, payload.service_id)
     if not service.bookable:
         return unbookable(service)
@@ -269,7 +294,7 @@ async def book_appointment(payload: BookingIn, actor: Scheduler, db: SessionDep)
 
     computed, slot = await offered_slot(db, service, candidates, payload.starts_at)
     if slot is None:
-        raise refuse("starts_at", "That time is no longer available. Pick another.")
+        return not_offered()
 
     staff_id = payload.staff_id or await db.scalar(
         select(Staff.id)
@@ -286,9 +311,15 @@ async def book_appointment(payload: BookingIn, actor: Scheduler, db: SessionDep)
         service.requirements, computed.resources, computed.resource_busy, span
     )
     if claimed is None:
-        raise refuse("starts_at", "That time is no longer available. Pick another.")
+        return not_offered()
 
     if payload.customer is not None:
+        # The same door `POST /api/customers` has, in the same words `Requires` would use.
+        if "customers.manage" not in actor.capabilities:
+            raise Forbidden(
+                CAPABILITY_REQUIRED,
+                f"Your role does not allow this: {BY_KEY['customers.manage'].description}",
+            )
         customer = await create_customer(db, payload.customer, actor.id)
     else:
         customer = await db.get(Customer, payload.customer_id)
@@ -345,7 +376,7 @@ async def book_appointment(payload: BookingIn, actor: Scheduler, db: SessionDep)
     return _out(await _load(db, appointment.id))
 
 
-async def _load(db: SessionDep, appointment_id: uuid.UUID) -> Appointment:
+async def _load(db: AsyncSession, appointment_id: uuid.UUID) -> Appointment:
     # `populate_existing` for the same reason `services._load` uses it: the sessions are
     # `expire_on_commit=False`, and the relationships on a row this request just inserted
     # were never loaded.

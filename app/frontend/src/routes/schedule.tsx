@@ -37,7 +37,9 @@ import {
   type Customer,
   type RosterEntry,
 } from '@/lib/api'
-import { APPOINTMENTS, AVAILABILITY, CATALOG, ROSTER } from '@/lib/query-keys'
+import { useBranding } from '@/lib/branding'
+import { formatPhone } from '@/lib/phone'
+import { APPOINTMENTS, AVAILABILITY, CATALOG, CUSTOMERS, ROSTER } from '@/lib/query-keys'
 import { useTheme } from '@/lib/theme'
 import { cn } from '@/lib/utils'
 
@@ -49,24 +51,31 @@ import { cn } from '@/lib/utils'
  * **The slots come from the server, and so does the decision.** The dialog never computes a
  * time: it shows what `/api/availability` offered and sends back the instant it was given.
  * Two people can still pick the same slot in the same minute; the database refuses the second
- * and the screen says "just taken" and refreshes, because that is the honest answer.
+ * and the screen says so and refreshes, because that is the honest answer.
  *
- * Dates are the browser's local calendar — staff are standing in the business — and the
- * times are printed in the business's zone, which the appointment list carries.
+ * **"Today" is the business's today.** The zone comes from the branding document the shell
+ * has already read, so the first request this screen makes is for the right day — a
+ * receptionist checking from home at 23:30 in another zone sees the day the clinic is in.
+ * Times are printed in that zone too.
  */
 export function SchedulePage() {
-  const [date, setDate] = useState(today())
+  const branding = useBranding()
+  const zone = branding.data?.timezone
+  const [chosen, setChosen] = useState<string | null>(null)
   const [booking, setBooking] = useState(false)
   const roster = useQuery({ queryKey: ROSTER, queryFn: fetchRoster })
+  // Until the zone is known there is no "today" to ask for.
+  const date = chosen ?? (zone ? today(zone) : null)
   const day = useQuery({
     queryKey: [...APPOINTMENTS, date],
-    queryFn: () => fetchAppointments({ from: date, to: date }),
+    queryFn: () => fetchAppointments({ from: date as string, to: date as string }),
+    enabled: date !== null,
     // Stepping a day is a different query; keep the columns up rather than flashing a skeleton.
     placeholderData: (previous) => previous,
   })
 
-  if (roster.isPending || day.isPending) return <Skeleton className="h-64 w-full" />
-  const failed = [roster, day].find((q) => q.isError)
+  if (!date || roster.isPending || day.isPending) return <Skeleton className="h-64 w-full" />
+  const failed = [branding, roster, day].find((q) => q.isError)
   if (failed) {
     return (
       <p role="alert" className="text-sm text-destructive">
@@ -75,10 +84,10 @@ export function SchedulePage() {
     )
   }
 
-  const shift = (days: number) => setDate(addDays(date, days))
+  const shift = (days: number) => setChosen(addDays(date, days))
   const columns = roster.data ?? []
   const appointments = day.data?.appointments ?? []
-  const timezone = day.data?.timezone
+  const timezone = day.data?.timezone ?? zone
 
   return (
     <div className="flex flex-col gap-4">
@@ -92,12 +101,12 @@ export function SchedulePage() {
             aria-label="Day"
             className="w-40"
             value={date}
-            onChange={(e) => e.target.value && setDate(e.target.value)}
+            onChange={(e) => e.target.value && setChosen(e.target.value)}
           />
           <Button variant="outline" size="icon-sm" aria-label="Next day" onClick={() => shift(1)}>
             <ChevronRight />
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => setDate(today())}>
+          <Button variant="ghost" size="sm" onClick={() => setChosen(null)}>
             Today
           </Button>
         </div>
@@ -114,15 +123,21 @@ export function SchedulePage() {
           description="Staff members appear here as columns once they are added in Settings."
         />
       ) : (
-        <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(14rem, 1fr))` }}>
-          {columns.map((member) => (
-            <StaffColumn
-              key={member.id}
-              member={member}
-              timezone={timezone}
-              appointments={appointments.filter((a) => a.staff.id === member.id)}
-            />
-          ))}
+        // The columns scroll sideways inside this box; the page itself never does (DESIGN.md).
+        <div className="overflow-x-auto" data-testid="columns">
+          <div
+            className="grid gap-4"
+            style={{ gridTemplateColumns: `repeat(${columns.length}, minmax(14rem, 1fr))` }}
+          >
+            {columns.map((member) => (
+              <StaffColumn
+                key={member.id}
+                member={member}
+                timezone={timezone}
+                appointments={appointments.filter((a) => a.staff.id === member.id)}
+              />
+            ))}
+          </div>
         </div>
       )}
 
@@ -186,24 +201,18 @@ function ColourDot({ member }: { member: RosterEntry }) {
 /** Radix refuses an empty `SelectItem` value; ids are UUIDs, so nothing collides with this. */
 const ANY = 'any'
 
-/** A booking refused because the chosen time is gone: the lost race (`slot_taken`) or the
- *  engine's own refusal of `starts_at`. Both mean "what you were looking at is out of date". */
-function stalePick(error: unknown): boolean {
-  if (!(error instanceof ApiError)) return false
-  if (error.code === 'slot_taken') return true
-  const detail = (error.body as { detail?: unknown } | null)?.detail
-  return (
-    error.status === 422 &&
-    Array.isArray(detail) &&
-    detail.some((d) => Array.isArray(d?.loc) && d.loc.at(-1) === 'starts_at')
-  )
+/** A booking refused because the chosen time is gone — the lost race (`slot_taken`, the
+ *  database refused) or the engine's own refusal (`not_offered`). Both mean "what you were
+ *  looking at is out of date", and the screen answers both the same way. */
+function stalePick(error: unknown): error is ApiError {
+  return error instanceof ApiError && (error.code === 'slot_taken' || error.code === 'not_offered')
 }
 
 /**
  * Service → provider (or any) → day → a slot the server offered → the client → notes → book.
  *
  * The slots are re-read whenever the three inputs above them change, and again after a
- * `slot_taken` — the one refusal that means "what you were looking at is out of date".
+ * stale pick — the one refusal that means "what you were looking at is out of date".
  */
 function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: () => void }) {
   const queryClient = useQueryClient()
@@ -235,7 +244,7 @@ function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: ()
   const slots = availability.data?.days[0]?.slots ?? []
   const timezone = availability.data?.timezone
   const matches = useQuery({
-    queryKey: ['customers', search],
+    queryKey: [...CUSTOMERS, search],
     queryFn: () => searchCustomers(search),
     enabled: existing && search.trim().length > 0,
   })
@@ -250,6 +259,13 @@ function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: ()
     }
     if (next.staff !== undefined) setStaffId(next.staff)
     if (next.date !== undefined) setDate(next.date)
+  }
+  // A slot picked under a person's name is a pick of that person too: the provider becomes
+  // them, so the booking honours the choice rather than handing it to whoever is first in
+  // column order. The slot survives, because it is in their own list as well.
+  const pickUnder = (member: RosterEntry, picked: AvailabilitySlot) => {
+    setStaffId(member.id)
+    setSlot(picked)
   }
 
   const customerReady = existing
@@ -287,9 +303,6 @@ function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: ()
     },
     onError: (error) => {
       if (stalePick(error)) {
-        // Somebody got there first — inside the race window (409 `slot_taken`, the database
-        // refused) or just before it (422 on `starts_at`, the engine had already seen their
-        // booking). Either way what was on offer is stale: drop the pick, read the day again.
         // Longer than the default: this is the one message that changes what to do next.
         toast.error(error.message, { duration: 8000 })
         setSlot(null)
@@ -301,7 +314,7 @@ function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: ()
 
   const problem = book.error && !stalePick(book.error) ? book.error.message : null
   const unbookable =
-    availability.error instanceof ApiError && availability.error.status === 409
+    availability.error instanceof ApiError && availability.error.code === 'not_bookable'
       ? ((availability.error.body as { unbookable_reasons?: string[] })?.unbookable_reasons ?? [])
       : service && !service.bookable
         ? service.unbookable_reasons
@@ -375,21 +388,34 @@ function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: ()
             ) : slots.length === 0 ? (
               <p className="text-xs text-muted-foreground">Nothing free on this day.</p>
             ) : staffId === ANY ? (
-              // Grouped by who could take each start. The pick is still the *time*: the
-              // server assigns whoever is first in column order, and the toast names them.
-              providers.map((m) => {
-                const theirs = slots.filter((s) => s.staff_ids.includes(m.id))
-                if (theirs.length === 0) return null
-                return (
-                  <div key={m.id} className="flex flex-col gap-1">
-                    <span className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
-                      <ColourDot member={m} />
-                      {m.display_name}
-                    </span>
-                    <SlotButtons slots={theirs} chosen={slot} timezone={timezone} onPick={setSlot} />
-                  </div>
-                )
-              })
+              // An "Any" row for a true don't-care pick — every start somebody could take,
+              // once; the server assigns whoever is first in column order — then each person's
+              // own starts, where a pick is a pick of them.
+              <>
+                <div className="flex flex-col gap-1">
+                  <span className="text-xs font-medium text-muted-foreground">Any available</span>
+                  <SlotButtons group="Any available" slots={slots} chosen={slot} timezone={timezone} onPick={setSlot} />
+                </div>
+                {providers.map((m) => {
+                  const theirs = slots.filter((s) => s.staff_ids.includes(m.id))
+                  if (theirs.length === 0) return null
+                  return (
+                    <div key={m.id} className="flex flex-col gap-1">
+                      <span className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                        <ColourDot member={m} />
+                        {m.display_name}
+                      </span>
+                      <SlotButtons
+                        group={m.display_name}
+                        slots={theirs}
+                        chosen={null}
+                        timezone={timezone}
+                        onPick={(picked) => pickUnder(m, picked)}
+                      />
+                    </div>
+                  )
+                })}
+              </>
             ) : (
               <SlotButtons slots={slots} chosen={slot} timezone={timezone} onPick={setSlot} />
             )}
@@ -419,12 +445,14 @@ function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: ()
             </div>
             {existing ? (
               customer ? (
-                <div className="flex items-center justify-between rounded-lg border px-3 py-2 text-sm">
-                  <span>
+                <div className="flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-sm">
+                  <span className="flex flex-wrap items-baseline gap-x-2">
                     <span className="font-medium">
                       {customer.first_name} {customer.last_name}
                     </span>
-                    {customer.phone && <span className="ml-2 text-muted-foreground">{customer.phone}</span>}
+                    {customer.phone && (
+                      <span className="tabular-nums text-muted-foreground">{formatPhone(customer.phone)}</span>
+                    )}
                   </span>
                   <Button type="button" variant="ghost" size="sm" onClick={() => setCustomer(null)}>
                     Change
@@ -447,13 +475,15 @@ function BookingDialog(props: { date: string; roster: RosterEntry[]; onClose: ()
                         <li key={c.id}>
                           <button
                             type="button"
-                            className="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-accent"
+                            className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm hover:bg-accent"
                             onClick={() => setCustomer(c)}
                           >
                             <span className="font-medium">
                               {c.first_name} {c.last_name}
                             </span>
-                            <span className="text-muted-foreground">{c.phone ?? c.email ?? ''}</span>
+                            <span className="tabular-nums text-muted-foreground">
+                              {c.phone ? formatPhone(c.phone) : (c.email ?? '')}
+                            </span>
                           </button>
                         </li>
                       ))}
@@ -531,10 +561,12 @@ function SlotButtons(props: {
   slots: AvailabilitySlot[]
   chosen: AvailabilitySlot | null
   timezone?: string
+  /** Named when several lists share a dialog, so "10:00 AM under Ana" is its own control. */
+  group?: string
   onPick: (slot: AvailabilitySlot) => void
 }) {
   return (
-    <div className="flex flex-wrap gap-1.5">
+    <div className="flex flex-wrap gap-1.5" role="group" aria-label={props.group}>
       {props.slots.map((s) => (
         <Button
           key={s.starts_at}
@@ -552,21 +584,23 @@ function SlotButtons(props: {
   )
 }
 
-// --- dates and clocks ---------------------------------------------------------------------
+// --- dates, clocks and numbers ---------------------------------------------------------------
 
-/** Today as `YYYY-MM-DD` on the browser's calendar. */
-function today(): string {
-  return toIsoDate(new Date())
+/** Today as `YYYY-MM-DD` on the business's calendar, whatever the browser's clock says. The
+ *  `en-CA` locale is the one whose default date format *is* ISO. */
+function today(timezone: string): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date())
 }
 
-function toIsoDate(d: Date): string {
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
-}
-
+/** Calendar arithmetic on the string itself — no zone, no DST, no browser clock. */
 function addDays(iso: string, days: number): string {
   const [y, m, d] = iso.split('-').map(Number)
-  return toIsoDate(new Date(y, m - 1, d + days))
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10)
 }
 
 /** An instant as a wall-clock time in the business's zone (or the browser's, before the

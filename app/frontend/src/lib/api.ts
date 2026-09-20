@@ -330,6 +330,8 @@ export async function removeBrandingAsset(kind: BrandingAssetKind): Promise<void
  *  the browser tab are branded before anybody has signed in. */
 export type BrandingDocument = {
   name: string
+  /** The business's IANA zone — what "today" means on the schedule. */
+  timezone: string
   colors: Record<string, string>
   logo_url: string | null
   logo_etag: string | null

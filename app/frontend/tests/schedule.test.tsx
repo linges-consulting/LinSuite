@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { toast } from 'sonner'
-import { beforeEach, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { Toaster } from '@/components/ui/sonner'
 import { createQueryClient } from '@/lib/query-client'
 import { ThemeProvider } from '@/lib/theme'
@@ -73,6 +73,7 @@ function fakeServer({
   firstBookingTaken = false,
   firstBookingGone = false,
   appointments = [] as any[],
+  timezone = 'America/Toronto',
 } = {}) {
   const calls: Call[] = []
   let bookings = 0
@@ -82,6 +83,17 @@ function fakeServer({
       const method = init?.method ?? 'GET'
       const body = init?.body ? JSON.parse(init.body as string) : undefined
       calls.push({ url, method, body })
+      if (url === '/api/branding') {
+        return Response.json({
+          name: 'Cedar Lane Clinic',
+          timezone,
+          colors: {},
+          logo_url: null,
+          logo_etag: null,
+          favicon_url: null,
+          favicon_etag: null,
+        })
+      }
       if (url === '/api/staff') return Response.json({ staff: ROSTER })
       if (url === '/api/catalog/services') return Response.json({ services: CATALOG })
       if (url.startsWith('/api/appointments?')) {
@@ -126,6 +138,7 @@ function fakeServer({
                   msg: 'That time is no longer available. Pick another.',
                 },
               ],
+              code: 'not_offered',
             },
             { status: 422 },
           )
@@ -165,6 +178,32 @@ async function pickServiceProviderAndSlot(user: ReturnType<typeof userEvent.setu
 beforeEach(() => {
   vi.unstubAllGlobals()
   toast.dismiss()
+})
+
+afterEach(() => vi.useRealTimers())
+
+test('the page opens on the business\'s today, whatever the browser\'s clock says', async () => {
+  // 22:00 UTC on the 15th: still the 15th anywhere west of UTC+2, already the 16th on
+  // Kiritimati (UTC+14) — the business's calendar wins.
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(new Date('2026-06-15T22:00:00Z'))
+  fakeServer({ timezone: 'Pacific/Kiritimati' })
+  const user = userEvent.setup()
+  renderSchedule()
+
+  expect(await screen.findByLabelText('Day')).toHaveValue('2026-06-16')
+  await user.click(screen.getByRole('button', { name: 'Next day' }))
+  expect(screen.getByLabelText('Day')).toHaveValue('2026-06-17')
+  await user.click(screen.getByRole('button', { name: 'Today' }))
+  expect(screen.getByLabelText('Day')).toHaveValue('2026-06-16')
+})
+
+test('the columns scroll inside their own box, never the page', async () => {
+  fakeServer()
+  renderSchedule()
+
+  await screen.findByRole('region', { name: 'Bo Chen' })
+  expect(screen.getByTestId('columns')).toHaveClass('overflow-x-auto')
 })
 
 test('the day lists each appointment under its staff column', async () => {
@@ -217,10 +256,13 @@ test('"any available" sends no staff id and an inline client goes as a customer 
   await user.click(await screen.findByRole('button', { name: 'New appointment' }))
   await user.click(await screen.findByRole('combobox', { name: 'Service' }))
   await user.click(await screen.findByRole('option', { name: /Swedish Massage/ }))
-  // Grouped by who could take each start: 10:00 under both names, 10:15 under Bo only.
-  expect(await screen.findAllByRole('button', { name: '10:00 AM' })).toHaveLength(2)
-  expect(screen.getAllByRole('button', { name: '10:15 AM' })).toHaveLength(1)
-  await user.click(screen.getAllByRole('button', { name: '10:00 AM' })[0])
+  // An "Any" row with every start once, then each person's own: 10:00 under both names,
+  // 10:15 under Bo only.
+  const any = await screen.findByRole('group', { name: 'Any available' })
+  expect(within(any).getAllByRole('button')).toHaveLength(2)
+  expect(within(screen.getByRole('group', { name: 'Ana Rossi' })).getAllByRole('button')).toHaveLength(1)
+  expect(within(screen.getByRole('group', { name: 'Bo Chen' })).getAllByRole('button')).toHaveLength(2)
+  await user.click(within(any).getByRole('button', { name: '10:00 AM' }))
   await user.click(screen.getByRole('button', { name: 'New client' }))
   await user.type(screen.getByLabelText('First name'), 'Sam')
   await user.type(screen.getByLabelText('Last name'), 'Okonkwo')
@@ -235,6 +277,36 @@ test('"any available" sends no staff id and an inline client goes as a customer 
     starts_at: TEN,
     customer: { first_name: 'Sam', last_name: 'Okonkwo', email: null, phone: '647-555-0100' },
     notes: 'Prefers firm pressure',
+  })
+})
+
+test('a slot picked under a person\'s name books that person', async () => {
+  const calls = fakeServer()
+  const user = userEvent.setup()
+  renderSchedule()
+
+  await user.click(await screen.findByRole('button', { name: 'New appointment' }))
+  await user.click(await screen.findByRole('combobox', { name: 'Service' }))
+  await user.click(await screen.findByRole('option', { name: /Swedish Massage/ }))
+  const bo = await screen.findByRole('group', { name: 'Bo Chen' })
+  await user.click(within(bo).getByRole('button', { name: '10:00 AM' }))
+
+  // The provider is now Bo, the pick survives, and the slots are his own list.
+  expect(screen.getByRole('combobox', { name: 'Provider' })).toHaveTextContent('Bo Chen')
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: '10:00 AM' })).toHaveAttribute('aria-pressed', 'true'),
+  )
+  await user.type(screen.getByRole('textbox', { name: 'Find a client' }), 'pri')
+  await user.click(await screen.findByRole('button', { name: /Priya Nair/ }))
+  // The chosen client's number reads as a person writes it, clear of the name.
+  expect(screen.getByText('(416) 555-0199')).toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Book' }))
+
+  await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true))
+  expect(calls.find((c) => c.method === 'POST')!.body).toMatchObject({
+    staff_id: 's2',
+    starts_at: TEN,
+    customer_id: 'c1',
   })
 })
 
