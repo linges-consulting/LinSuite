@@ -41,7 +41,7 @@ from sqlalchemy import (
     Date as DateColumn,
 )
 from sqlalchemy.dialects.postgresql import ExcludeConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.db import Base
 
@@ -300,3 +300,153 @@ class Closure(Base):
     name: Mapped[str] = mapped_column(String(200))
     source: Mapped[str] = mapped_column(String(16), server_default=text("'manual'"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# The catalog's own step and floor. Five-minute steps for the same reason the weekly matrix
+# uses them — a 47-minute service is a typo — and a floor of one step, because a service of
+# no length is not something the engine can slide across a day.
+MIN_DURATION = 5
+
+
+class Service(Base):
+    """What the business sells, and what delivering one costs in time, money and things.
+
+    **This row is the availability engine's input** (tech-stack §19). `duration_minutes` plus
+    `buffer_before_minutes` and `buffer_after_minutes` is the width slid across a staff
+    member's free intervals; `ServiceRequirement` says which rooms' and devices' free
+    intervals that has to be intersected with; `ServiceStaff` says whose day to look at.
+    Buffers are stored separately from the duration rather than baked into it because the
+    appointment block a client sees is the duration, and the turnaround either side of it is
+    not time anybody booked.
+
+    **Money is integer cents** (CLAUDE.md, tech-stack §21). The screen shows dollars and
+    converts; nothing between here and the invoice ever holds a float.
+
+    **SNAPSHOT CONTRACT — Task 15 must copy, never reference.** Editing a service must never
+    alter an appointment already booked against it (PRD §2). So booking copies
+    `duration_minutes`, `buffer_before_minutes`, `buffer_after_minutes` and `price_cents`
+    onto the appointment row at the moment it is made, and every later read — the calendar
+    block, the invoice line, the treatment receipt — reads the copy. An appointment that
+    joined back to this table for its price would silently rewrite last month's takings the
+    first time somebody raised a rate. This is the same rule as the commission rate
+    snapshotted on an invoice line, for the same reason.
+
+    **Names are unique case-insensitively** — `ux_services_name` — because "Swedish Massage"
+    and "swedish massage" are one service entered twice, and a booking screen offering both
+    is a coin flip over which one the reports add up.
+
+    **No hard delete** (tech-stack §15, §20): `active` going false takes it off every picker
+    and leaves every appointment that already claimed it pointing at something real.
+
+    **Not here, deliberately:** packages and bundles (M4), per-item tax components (out of
+    M1), pricing tiers. Each is a table of its own when it arrives, not a column added here.
+    """
+
+    __tablename__ = "services"
+    __table_args__ = (
+        CheckConstraint(
+            f"duration_minutes >= {MIN_DURATION} AND duration_minutes % {MINUTE_STEP} = 0",
+            name="ck_services_duration",
+        ),
+        CheckConstraint(
+            f"buffer_before_minutes >= 0 AND buffer_before_minutes % {MINUTE_STEP} = 0 "
+            f"AND buffer_after_minutes >= 0 AND buffer_after_minutes % {MINUTE_STEP} = 0",
+            name="ck_services_buffers",
+        ),
+        # Integer cents, and never negative. A discount is a line on an invoice, not a
+        # service priced below nothing.
+        CheckConstraint("price_cents >= 0", name="ck_services_price"),
+        Index("ux_services_name", text("lower(name)"), unique=True),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str | None] = mapped_column(Text)
+    duration_minutes: Mapped[int] = mapped_column(Integer)
+    buffer_before_minutes: Mapped[int] = mapped_column(Integer, server_default="0")
+    buffer_after_minutes: Mapped[int] = mapped_column(Integer, server_default="0")
+    price_cents: Mapped[int] = mapped_column(Integer, server_default="0")
+    # False is "staff may book it, the public portal may not offer it" — a consultation a
+    # receptionist schedules by hand, not a service that has been withdrawn.
+    bookable_online: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    sort_order: Mapped[int] = mapped_column(Integer, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    # Both sets are loaded with the service, always: every caller of this table wants them,
+    # and an unloaded relationship on an async session is an error rather than a second
+    # query. `delete-orphan` is what makes "replace the whole set" one assignment.
+    eligible_staff: Mapped[list["ServiceStaff"]] = relationship(
+        cascade="all, delete-orphan", lazy="selectin", passive_deletes=True
+    )
+    requirements: Mapped[list["ServiceRequirement"]] = relationship(
+        cascade="all, delete-orphan", lazy="selectin", passive_deletes=True
+    )
+
+
+class ServiceStaff(Base):
+    """Who may deliver a service — a direct many-to-many, with no category layer.
+
+    The PRD words this as "staff categories permitted to deliver a service". A category table
+    between the two would be a second thing to maintain for a business with four
+    practitioners, and the question every caller actually asks is "can Ana do this?" — which
+    a direct pair answers without a join nobody asked for. If a business ever has enough
+    staff for categories to save work, they are a grouping *over* these rows rather than a
+    replacement for them.
+
+    Composite primary key, so the same pair cannot be stored twice; the API replaces the
+    whole set rather than adding to it, which is what makes that a sufficient rule.
+    """
+
+    __tablename__ = "service_staff"
+
+    service_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("services.id", ondelete="CASCADE"), primary_key=True
+    )
+    staff_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("staff.id", ondelete="CASCADE"), primary_key=True
+    )
+
+
+class ServiceRequirement(Base):
+    """One thing delivering a service needs: a kind of resource, or one exact resource.
+
+    `resource_id IS NULL` means **any active resource of that kind** — "a treatment room, any
+    of them", which is what most services want. A set `resource_id` means that one device or
+    that one room, and its `kind` has to agree with this row's. Several rows are the normal
+    case: any space *and* laser unit 2 is two rows, and that is precisely the requirement the
+    availability engine needs in order to refuse a slot when the device is busy though the
+    practitioner and every room are free (tech-stack §19 step 3).
+
+    **Why the kind is on the row at all** when a named resource already carries one: without
+    it there would be no way to say "any space", which is the majority case. With it, a named
+    resource's row says the same thing twice — so the API checks they agree and refuses when
+    they do not. A composite foreign key onto `(resources.id, kind)` would let the database
+    enforce that, at the cost of a second unique constraint on `resources` and a rule stated
+    in two places; the API is already the only writer here, and it has to reject an *inactive*
+    resource in the same breath, which no constraint can express.
+    """
+
+    __tablename__ = "service_requirements"
+    __table_args__ = (
+        CheckConstraint("kind IN ('space', 'equipment')", name="ck_service_requirements_kind"),
+        Index("ix_service_requirements_service", "service_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    service_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("services.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(16))
+    resource_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("resources.id", ondelete="CASCADE")
+    )
+
+    # For the resource's name in the response. Joined rather than selectin: it is one row per
+    # requirement and the requirements are already being loaded by their service.
+    resource: Mapped["Resource | None"] = relationship(lazy="joined")

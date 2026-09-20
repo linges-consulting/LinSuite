@@ -23,6 +23,8 @@ from core.redis import get_redis
 from scheduling.closures import router as closures_router
 from scheduling.hours import router as hours_router
 from scheduling.resources import router as resources_router
+from scheduling.services import public as catalog_router
+from scheduling.services import router as services_router
 from scheduling.staff import router as staff_router
 from scheduling.time_off import router as time_off_router
 from settings.images import FAVICON_MAX_BYTES, LOGO_MAX_BYTES
@@ -161,6 +163,10 @@ api.include_router(resources_router)
 api.include_router(hours_router)
 api.include_router(time_off_router)
 api.include_router(closures_router)
+api.include_router(services_router)
+# The read side of the catalog, on its own prefix: `/admin` is administration, `/catalog` is
+# what the availability engine and the booking screen read with no capability at all.
+api.include_router(catalog_router)
 api.include_router(business_router)
 api.include_router(branding_router)
 app.include_router(api)
