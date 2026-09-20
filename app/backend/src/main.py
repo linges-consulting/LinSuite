@@ -20,9 +20,11 @@ from core.db import SessionDep, get_engine, get_purge_engine, session_scope
 from core.errors import UPLOAD_ORIGIN_REQUIRED, Forbidden
 from core.logging import configure_logging
 from core.redis import get_redis
-from scheduling.availability import router as availability_router
+from scheduling.closures import router as closures_router
+from scheduling.hours import router as hours_router
 from scheduling.resources import router as resources_router
 from scheduling.staff import router as staff_router
+from scheduling.time_off import router as time_off_router
 from settings.images import FAVICON_MAX_BYTES, LOGO_MAX_BYTES
 from settings.routes import public as branding_router
 from settings.routes import router as business_router
@@ -154,7 +156,11 @@ api.include_router(roles_router)
 api.include_router(admin_users_router)
 api.include_router(staff_router)
 api.include_router(resources_router)
-api.include_router(availability_router)
+# Mounted after `staff_router`, which owns `/admin/staff`: these two hang off a staff member
+# rather than describing one, so they are their own routers on the same prefix.
+api.include_router(hours_router)
+api.include_router(time_off_router)
+api.include_router(closures_router)
 api.include_router(business_router)
 api.include_router(branding_router)
 app.include_router(api)

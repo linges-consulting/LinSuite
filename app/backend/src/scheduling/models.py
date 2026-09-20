@@ -33,12 +33,14 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
 from sqlalchemy import (
     Date as DateColumn,
 )
+from sqlalchemy.dialects.postgresql import ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
@@ -182,6 +184,30 @@ class WorkingHours(Base):
     """
 
     __tablename__ = "working_hours"
+    __table_args__ = (
+        CheckConstraint("weekday BETWEEN 0 AND 6", name="ck_working_hours_weekday"),
+        # 1440 is allowed on the end: a block may run to midnight.
+        CheckConstraint(
+            f"start_minute >= 0 AND end_minute <= {MINUTES_IN_DAY} AND start_minute < end_minute",
+            name="ck_working_hours_within_the_day",
+        ),
+        CheckConstraint(
+            f"start_minute % {MINUTE_STEP} = 0 AND end_minute % {MINUTE_STEP} = 0",
+            name="ck_working_hours_five_minute_steps",
+        ),
+        # The rule the API never has to trust itself about. Declared here as well as in
+        # migration 0011 so the metadata is not a smaller schema than the database: a model
+        # that omits it would have `--autogenerate` emitting a DROP for it on the next
+        # revision somebody writes. `tests/test_hours.py` compares the two.
+        ExcludeConstraint(
+            ("staff_id", "="),
+            ("weekday", "="),
+            (text("int4range(start_minute, end_minute)"), "&&"),
+            name="ex_working_hours_no_overlap",
+            using="gist",
+        ),
+        Index("ix_working_hours_staff_week", "staff_id", "weekday", "start_minute"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True, server_default=text("gen_random_uuid()")
@@ -216,6 +242,16 @@ class TimeOff(Base):
     """
 
     __tablename__ = "time_off"
+    __table_args__ = (
+        CheckConstraint("starts_at < ends_at", name="ck_time_off_span"),
+        ExcludeConstraint(
+            ("staff_id", "="),
+            (text("tstzrange(starts_at, ends_at)"), "&&"),
+            name="ex_time_off_no_overlap",
+            using="gist",
+        ),
+        Index("ix_time_off_staff_start", "staff_id", "starts_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True, server_default=text("gen_random_uuid()")
@@ -247,13 +283,20 @@ class Closure(Base):
     """
 
     __tablename__ = "closures"
+    __table_args__ = (
+        CheckConstraint("source IN ('manual', 'statutory')", name="ck_closures_source"),
+        # Named rather than left to `unique=True` on the column: Postgres would call it
+        # `closures_date_key`, which is a name no file in this repository contains, and the
+        # drift test compares by name. Everything else here is named too.
+        UniqueConstraint("date", name="uq_closures_date"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True, server_default=text("gen_random_uuid()")
     )
     # A local calendar date, not an instant: "Canada Day" is a day, and which instants it
     # covers is a question for `Business.timezone` at the moment it is asked.
-    date: Mapped[Date] = mapped_column(DateColumn, unique=True)
+    date: Mapped[Date] = mapped_column(DateColumn)
     name: Mapped[str] = mapped_column(String(200))
     source: Mapped[str] = mapped_column(String(16), server_default=text("'manual'"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

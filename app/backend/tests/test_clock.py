@@ -68,6 +68,20 @@ def test_a_nine_oclock_rule_still_starts_at_nine_across_spring_forward():
         assert start.astimezone(_zone(TORONTO)).strftime("%H:%M") == "09:00"
 
 
+def test_a_time_inside_the_gap_resolves_through_the_offset_before_the_transition():
+    """02:30 on 8 March does not happen. It still has to become *an* instant, and which one is
+    a decision Task 14 inherits — so it is asserted rather than left to `zoneinfo`'s default
+    quietly changing under us.
+
+    `fold=0` means the pre-transition offset (EST, −5), which puts 02:30 at 07:30Z — 03:30
+    EDT on the clock. The alternative reading would land it before the block's own start, so
+    this is also the only choice that keeps a block ordered.
+    """
+    start, _ = one([(150, 300)], SPRING_FORWARD)
+
+    assert start.isoformat() == "2026-03-08T07:30:00+00:00"
+
+
 # --- fall back: the hour that happens twice ----------------------------------------------------
 
 
@@ -81,6 +95,19 @@ def test_a_nine_oclock_rule_still_starts_at_nine_across_fall_back():
     for day in (date(2026, 10, 31), FALL_BACK, date(2026, 11, 2)):
         start, _ = one([(540, 720)], day)
         assert start.astimezone(_zone(TORONTO)).strftime("%H:%M") == "09:00"
+
+
+def test_an_ambiguous_time_resolves_to_its_first_occurrence():
+    """01:30 on 1 November happens twice. `fold=0` takes the first — the one somebody writing
+    "01:30" on a shift means, and the earlier of the two, so a block starting then is not
+    shortened by the choice.
+
+    Pinned for the same reason as the gap above: a flip to `fold=1` would move every early
+    shift on that one day by an hour and nothing else in the suite would notice.
+    """
+    start, _ = one([(90, 300)], FALL_BACK)
+
+    assert start.isoformat() == "2026-11-01T05:30:00+00:00"
 
 
 # --- a zone that never moves --------------------------------------------------------------------

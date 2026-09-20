@@ -28,24 +28,39 @@ from datetime import UTC, datetime, time, timedelta
 from datetime import date as Date
 from zoneinfo import ZoneInfo
 
-# Minutes in a day. `end_minute` may equal it — a block that runs to midnight — so the pair
-# below is built from a plain `timedelta` rather than by constructing a `time`, which has no
-# 24:00.
-MINUTES_IN_DAY = 1440
+
+def localize(moment: datetime, tz: str | ZoneInfo) -> datetime:
+    """A naive local wall-clock datetime → the UTC instant it names in `tz`.
+
+    The primitive both public conversions in this application are built from: the recurring
+    matrix below, and `scheduling/time_off.py` turning a `datetime-local` field into an
+    instant. One implementation, so the gap and the repeated hour are resolved the same way
+    on both paths — two `.replace(tzinfo=...)` calls in two modules is how they would come to
+    differ without anybody deciding that they should.
+
+    `moment` must be naive. An aware one is a caller that already has an instant and does not
+    need this; the API refuses those at its boundary rather than reinterpreting them.
+    """
+    zone = tz if isinstance(tz, ZoneInfo) else ZoneInfo(tz)
+    return moment.replace(tzinfo=zone).astimezone(UTC)
 
 
 def local_blocks_to_instants(
-    blocks: Iterable[tuple[int, int]], day: Date, tz: str
+    blocks: Iterable[tuple[int, int]], day: Date, tz: str | ZoneInfo
 ) -> list[tuple[datetime, datetime]]:
     """Turn one local date's `(start_minute, end_minute)` blocks into UTC instants.
 
     `day` is a date in `tz`, not a UTC one — the rule is being read against a local calendar.
     The result is in the order given; a caller that wants them sorted sorts them.
+
+    Minutes are added to local midnight as a `timedelta` rather than built into a `time`,
+    because `end_minute` may be 1440 and there is no 24:00.
     """
-    zone = ZoneInfo(tz)
     midnight = datetime.combine(day, time.min)
-
-    def instant(minute: int) -> datetime:
-        return (midnight + timedelta(minutes=minute)).replace(tzinfo=zone).astimezone(UTC)
-
-    return [(instant(start), instant(end)) for start, end in blocks]
+    return [
+        (
+            localize(midnight + timedelta(minutes=start), tz),
+            localize(midnight + timedelta(minutes=end), tz),
+        )
+        for start, end in blocks
+    ]

@@ -31,6 +31,7 @@ import {
 import {
   dayProblem,
   minutesToTime,
+  nextBlock,
   STEP_SECONDS,
   timeToMinutes,
   WEEKDAYS,
@@ -97,8 +98,9 @@ export function HoursDialog({ member, onClose }: { member: StaffRow; onClose: ()
   }
   const addBlock = (weekday: number) => {
     if (!current) return
-    // A sensible first block, and afterwards the afternoon half of a split shift.
-    const fresh = current[weekday].length === 0 ? { start: '09:00', end: '17:00' } : LATER
+    // Derived from where this day already ends — see `nextBlock`. A fixed afternoon draft
+    // would land inside an existing 09:00–17:00 and warn about an overlap nobody made.
+    const fresh = nextBlock(current[weekday])
     edit(current.map((day, d) => (d === weekday ? [...day, fresh] : day)))
   }
   const removeBlock = (weekday: number, index: number) => {
@@ -216,7 +218,6 @@ export function HoursDialog({ member, onClose }: { member: StaffRow; onClose: ()
   )
 }
 
-const LATER: Draft = { start: '15:00', end: '18:00' }
 
 /**
  * Time off and vacation: the absences that override the weekly matrix.

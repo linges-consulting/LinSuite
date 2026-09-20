@@ -64,3 +64,33 @@ export function dayProblem(blocks: Draft[]): string | null {
   return null
 }
 
+/** A first block: the ordinary working day, for a weekday that had none. */
+const FIRST: Draft = { start: '09:00', end: '17:00' }
+/** The gap a split shift leaves, and how long the afternoon half starts out. */
+const BREAK_MINUTES = 60
+const SECOND_BLOCK_MINUTES = 180
+
+/**
+ * The block "Add block" should insert into a day that already has some.
+ *
+ * Derived from where the day currently ends rather than fixed, because a fixed afternoon
+ * draft is only ever right for one shape of day: dropped onto somebody working 09:00–17:00 it
+ * lands *inside* their shift, and the editor greets the click with an overlap warning the
+ * person did not cause. Starting a break after the latest end means the common case — set
+ * 09:00–12:00, press Add — produces 13:00–16:00 and no warning at all.
+ *
+ * `end` is the latest in the day rather than the last in the array: nothing sorts these, and
+ * a day edited out of order would otherwise stack a new block on top of an earlier one.
+ */
+export function nextBlock(day: Draft[]): Draft {
+  if (day.length === 0) return FIRST
+  const latest = Math.max(...day.map((b) => timeToMinutes(b.end, true)))
+  // Never past midnight. A day already running to 24:00 has nowhere to put another block, and
+  // the overlap warning saying so is more honest than silently refusing the click.
+  const start = Math.min(latest + BREAK_MINUTES, MINUTES_IN_DAY - STEP_SECONDS / 60)
+  return {
+    start: minutesToTime(start),
+    end: minutesToTime(Math.min(start + SECOND_BLOCK_MINUTES, MINUTES_IN_DAY)),
+  }
+}
+

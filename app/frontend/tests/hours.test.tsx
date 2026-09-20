@@ -5,7 +5,7 @@ import { MemoryRouter } from 'react-router'
 import { toast } from 'sonner'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Toaster } from '@/components/ui/sonner'
-import { dayProblem, minutesToTime, timeToMinutes } from '@/lib/hours'
+import { dayProblem, minutesToTime, nextBlock, timeToMinutes } from '@/lib/hours'
 import { createQueryClient } from '@/lib/query-client'
 import { ThemeProvider } from '@/lib/theme'
 import { SettingsPage } from '@/routes/settings'
@@ -233,6 +233,34 @@ describe('minutes and clock faces', () => {
     expect(minutesToTime(1440)).toBe('00:00')
   })
 
+  it('derives an added block from where the day already ends', () => {
+    // The whole point: dropped onto an existing 09:00–17:00, a fixed afternoon draft would
+    // land inside it and warn about an overlap the person did not make.
+    expect(nextBlock([])).toEqual({ start: '09:00', end: '17:00' })
+    expect(nextBlock([{ start: '09:00', end: '17:00' }])).toEqual({
+      start: '18:00',
+      end: '21:00',
+    })
+    expect(nextBlock([{ start: '09:00', end: '12:00' }])).toEqual({
+      start: '13:00',
+      end: '16:00',
+    })
+    // The latest end, not the last in the array — nothing sorts these.
+    expect(
+      nextBlock([
+        { start: '14:00', end: '18:00' },
+        { start: '09:00', end: '12:00' },
+      ]),
+    ).toEqual({ start: '19:00', end: '22:00' })
+    // Never past midnight.
+    expect(nextBlock([{ start: '09:00', end: '00:00' }]).end).toBe('00:00')
+  })
+
+  it('adds a block that does not immediately warn', () => {
+    const day = [{ start: '09:00', end: '17:00' }]
+    expect(dayProblem([...day, nextBlock(day)])).toBeNull()
+  })
+
   it('names what is wrong with a day before the request is made', () => {
     expect(dayProblem([{ start: '09:00', end: '12:00' }])).toBeNull()
     // Touching is not overlapping: somebody who does not take lunch.
@@ -287,7 +315,8 @@ describe('working hours', () => {
       const put = server.calls.find((c) => c.method === 'PUT')
       expect(put?.body.blocks).toEqual([
         { weekday: 0, start_minute: 540, end_minute: 720 },
-        { weekday: 0, start_minute: 900, end_minute: 1080 },
+        // 13:00–16:00: a break after the morning block's end, not a fixed afternoon.
+        { weekday: 0, start_minute: 780, end_minute: 960 },
       ])
     })
   })

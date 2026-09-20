@@ -813,8 +813,9 @@ export async function addClosure(draft: { date: string; name: string }): Promise
   return res.json()
 }
 
-/** A year of the business province's statutory holidays. Dates already present are skipped,
- *  so pressing it twice is free and a deleted holiday stays deleted. */
+/** A year of the business province's statutory holidays. The only skip rule is "a row for
+ *  this date already exists", so pressing it twice is free — and a statutory day somebody
+ *  deleted comes back. There are no tombstones; the delete confirmation says so. */
 export async function importStatutoryClosures(
   year: number,
 ): Promise<{ added: number; skipped: number; closures: Closure[] }> {

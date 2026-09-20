@@ -533,6 +533,20 @@ async def _business_name(db: SessionDep) -> str:
     return await db.scalar(select(Business.name).where(Business.id == 1)) or "LinSuite"
 
 
+async def load_staff(db: SessionDep, staff_id: uuid.UUID) -> Staff:
+    """The staff row, or the 404 every caller would otherwise write for itself.
+
+    Public and here rather than in each of them, because this module owns the table:
+    `scheduling/hours.py` and `scheduling/time_off.py` both hang off a staff member and must
+    refuse an unknown one identically. `_load` below stays private — it also fetches the
+    account, which only this screen needs.
+    """
+    staff = await db.get(Staff, staff_id)
+    if staff is None:
+        raise HTTPException(status_code=404, detail="No such staff member.")
+    return staff
+
+
 async def _load(db: SessionDep, staff_id: uuid.UUID) -> tuple[Staff, User]:
     row = (
         await db.execute(

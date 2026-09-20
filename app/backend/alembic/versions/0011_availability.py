@@ -98,13 +98,16 @@ def upgrade() -> None:
     op.create_table(
         "closures",
         sa.Column("id", sa.Uuid(), primary_key=True, server_default=sa.text("gen_random_uuid()")),
-        sa.Column("date", sa.Date(), nullable=False, unique=True),
+        sa.Column("date", sa.Date(), nullable=False),
         sa.Column("name", sa.String(200), nullable=False),
         sa.Column("source", sa.String(16), server_default=sa.text("'manual'"), nullable=False),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.CheckConstraint("source IN ('manual', 'statutory')", name="ck_closures_source"),
+        # Named, not `unique=True` on the column: that would leave Postgres to call it
+        # `closures_date_key`, a name nothing in this repository says out loud.
+        sa.UniqueConstraint("date", name="uq_closures_date"),
     )
 
 
