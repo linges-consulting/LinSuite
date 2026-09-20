@@ -97,7 +97,12 @@ class AvailabilityOut(BaseModel):
 
 
 async def busy_intervals(
-    db: SessionDep, staff_ids: Iterable[Id], resource_ids: Iterable[Id], window: Interval
+    db: SessionDep,
+    staff_ids: Iterable[Id],
+    resource_ids: Iterable[Id],
+    window: Interval,
+    *,
+    excluding: uuid.UUID | None = None,
 ) -> tuple[dict[Id, list[Interval]], dict[Id, list[Interval]]]:
     """The intervals already taken inside `window`, per staff member and per resource.
 
@@ -109,6 +114,9 @@ async def busy_intervals(
     are the same arithmetic the trigger and the constraint compare; the engine honours what
     comes back (`tests/test_availability.py`, "buffers", "spaces and equipment",
     "concurrency").
+
+    `excluding` leaves one appointment out — its staff span and its resource claims — which
+    is how a move asks "where could this go?" without the appointment standing in its own way.
     """
     staff_ids, resource_ids = list(staff_ids), list(resource_ids)
     staff_busy: dict[Id, list[Interval]] = {}
@@ -122,6 +130,7 @@ async def busy_intervals(
                 Appointment.status != "cancelled",
                 starts < window[1],
                 ends > window[0],
+                *([Appointment.id != excluding] if excluding else []),
             )
         ):
             staff_busy.setdefault(row[0], []).append((row[1], row[2]))
@@ -131,6 +140,7 @@ async def busy_intervals(
             select(AppointmentResource.resource_id, func.lower(period), func.upper(period)).where(
                 AppointmentResource.resource_id.in_(resource_ids),
                 period.op("&&")(func.tstzrange(window[0], window[1], "[)")),
+                *([AppointmentResource.appointment_id != excluding] if excluding else []),
             )
         ):
             resource_busy.setdefault(row[0], []).append((row[1], row[2]))
@@ -172,10 +182,13 @@ async def compute(
     staff_ids: list[uuid.UUID],
     from_: Date,
     to: Date,
+    *,
+    excluding: uuid.UUID | None = None,
 ) -> Computed:
     """The engine's inputs, read for `staff_ids` over the local dates `from_`..`to`, and its
     answer. `service` is already the catalog's bookable view; `staff_ids` is the eligible set
-    or one member of it — the caller has checked which."""
+    or one member of it — the caller has checked which. `excluding` is the appointment being
+    moved, left out of what is busy (see `busy_intervals`)."""
     business = (
         await db.execute(
             select(
@@ -233,7 +246,7 @@ async def compute(
         await db.scalars(select(Closure.date).where(Closure.date >= from_, Closure.date <= to))
     )
     staff_busy, resource_busy = await busy_intervals(
-        db, staff_ids, [r.id for r in resources], window
+        db, staff_ids, [r.id for r in resources], window, excluding=excluding
     )
 
     now = datetime.now(UTC)

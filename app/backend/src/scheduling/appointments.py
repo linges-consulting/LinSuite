@@ -34,7 +34,7 @@ from datetime import date as Date
 from datetime import datetime, time, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
@@ -387,7 +387,146 @@ async def _load(db: AsyncSession, appointment_id: uuid.UUID) -> Appointment:
     )
 
 
+# --- moving and resizing --------------------------------------------------------------------
+
+
+class ChangeIn(BaseModel):
+    """A move (`starts_at`), a resize (`duration_minutes`), or both. Nothing else about an
+    appointment changes here: the price stays what was agreed, the service stays the service.
+    An empty body is a request for nothing and is refused as one."""
+
+    starts_at: AwareDatetime | None = None
+    duration_minutes: Annotated[int | None, Field(gt=0, le=24 * 60)] = None
+
+    @model_validator(mode="after")
+    def _something(self):
+        if self.starts_at is None and self.duration_minutes is None:
+            raise ValueError("send a new starts_at, a new duration_minutes, or both")
+        return self
+
+
+@router.patch("/{appointment_id}", response_model=AppointmentOut)
+async def change_appointment(
+    appointment_id: uuid.UUID, payload: ChangeIn, actor: Scheduler, db: SessionDep
+):
+    """The calendar's drag: a move by the body, a resize by the bottom edge, or a keyboard
+    doing either. The rule is the booking rule — **the engine decides what is offered, the
+    database decides what is booked** — with one addition: the engine is run with this
+    appointment left out of what is busy, so it never stands in its own way (a fifteen-minute
+    nudge overlaps the old span, and that must be fine).
+
+    Rooms are handed out afresh under the booking rules. A named requirement keeps its
+    resource; an "any" one keeps the resource it had when that is still free and re-picks
+    when it is not — the old rooms go first in the pick order, which is all that takes.
+    Buffers and price are the row's own snapshot; a resize changes the duration and the end
+    and nothing else. Shift-end and time-off overrides are Task 17's; this refuses them.
+    """
+    appointment = await _load(db, appointment_id)
+    if appointment is None:
+        raise HTTPException(status_code=404, detail="No such appointment.")
+    if appointment.status != "confirmed":
+        raise HTTPException(
+            status_code=409, detail=f"A {appointment.status} appointment cannot be moved."
+        )
+    old_start, old_duration = appointment.starts_at, appointment.duration_minutes
+    starts_at = payload.starts_at or old_start
+    duration = payload.duration_minutes or old_duration
+
+    # The catalog's view of the service for its requirements and eligibility; the
+    # appointment's own snapshot for the numbers the engine slides across the day.
+    catalog = await catalog_entry(db, appointment.service_id, include_inactive=True)
+    service = catalog.model_copy(
+        update={
+            "duration_minutes": duration,
+            "buffer_before_minutes": appointment.buffer_before_minutes,
+            "buffer_after_minutes": appointment.buffer_after_minutes,
+        }
+    )
+    day = starts_at.astimezone(await business_zone(db)).date()
+    computed = await compute(
+        db, service, [appointment.staff_id], day, day, excluding=appointment.id
+    )
+    slot = next((s for s in computed.days[day] if s.starts_at == starts_at), None)
+    if slot is None:
+        return not_offered()
+
+    span = (
+        slot.starts_at - timedelta(minutes=appointment.buffer_before_minutes),
+        slot.ends_at + timedelta(minutes=appointment.buffer_after_minutes),
+    )
+    held = {r.resource_id for r in appointment.resources}
+    claimed = assign_resources(
+        service.requirements,
+        sorted(computed.resources, key=lambda r: r.id not in held),
+        computed.resource_busy,
+        span,
+    )
+    if claimed is None:
+        return not_offered()
+
+    appointment.starts_at = slot.starts_at
+    appointment.ends_at = slot.ends_at
+    appointment.duration_minutes = duration
+    appointment.resources = [
+        AppointmentResource(
+            resource_id=r.id, kind=r.kind, period=Range(span[0], span[1], bounds="[)")
+        )
+        for r in claimed
+    ]
+    try:
+        await db.flush()
+    except IntegrityError as error:
+        await db.rollback()
+        if not _is_slot_taken(error):
+            raise
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "That time was just taken. Pick another.", "code": "slot_taken"},
+        )
+    if slot.starts_at != old_start:
+        record_event(
+            db,
+            "appointment.rescheduled",
+            target_type="appointment",
+            target_id=str(appointment.id),
+            actor_user_id=actor.id,
+            metadata={"from": utc(old_start), "to": utc(slot.starts_at)},
+        )
+    if duration != old_duration:
+        record_event(
+            db,
+            "appointment.resized",
+            target_type="appointment",
+            target_id=str(appointment.id),
+            actor_user_id=actor.id,
+            metadata={"from": old_duration, "to": duration},
+        )
+    await db.commit()
+    return _out(await _load(db, appointment.id))
+
+
 # --- listing ------------------------------------------------------------------------------
+
+
+async def appointments_between(
+    db: AsyncSession, from_: Date, to: Date, zone, staff_id: uuid.UUID | None = None
+) -> list[AppointmentOut]:
+    """Every appointment starting on a business-local date from `from_` to `to` inclusive,
+    in start order; `staff_id` narrows to one column. Shared with `/api/schedule`, so the
+    two reads can never disagree about which day an instant is on."""
+    window = (
+        _local_midnight(from_, zone),
+        _local_midnight(to + timedelta(days=1), zone),
+    )
+    query = (
+        select(Appointment)
+        .join(Staff)
+        .where(Appointment.starts_at >= window[0], Appointment.starts_at < window[1])
+        .order_by(Appointment.starts_at, Staff.sort_order, Staff.display_name)
+    )
+    if staff_id is not None:
+        query = query.where(Appointment.staff_id == staff_id)
+    return [_out(a) for a in await db.scalars(query)]
 
 
 @router.get("")
@@ -403,20 +542,9 @@ async def list_appointments(
     included — the calendar decides how to draw them — with their `status` saying so."""
     check_range(from_, to)
     zone = await business_zone(db)
-    window = (
-        _local_midnight(from_, zone),
-        _local_midnight(to + timedelta(days=1), zone),
+    return AppointmentsOut(
+        timezone=str(zone), appointments=await appointments_between(db, from_, to, zone, staff_id)
     )
-    query = (
-        select(Appointment)
-        .join(Staff)
-        .where(Appointment.starts_at >= window[0], Appointment.starts_at < window[1])
-        .order_by(Appointment.starts_at, Staff.sort_order, Staff.display_name)
-    )
-    if staff_id is not None:
-        query = query.where(Appointment.staff_id == staff_id)
-    rows = await db.scalars(query)
-    return AppointmentsOut(timezone=str(zone), appointments=[_out(a) for a in rows])
 
 
 def _local_midnight(day: Date, zone):

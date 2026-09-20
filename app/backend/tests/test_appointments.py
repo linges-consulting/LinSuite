@@ -515,7 +515,7 @@ async def test_a_stale_picture_of_the_day_is_refused_by_the_database_as_slot_tak
 
     from scheduling import slots
 
-    async def nothing_busy(db, staff_ids, resource_ids, window):
+    async def nothing_busy(db, staff_ids, resource_ids, window, **kwargs):
         return {}, {}
 
     monkeypatch.setattr(slots, "busy_intervals", nothing_busy)
@@ -924,3 +924,242 @@ async def test_the_models_declare_every_constraint_the_database_actually_has(cli
                 f"{table}: only in the database {sorted(database - declared)}, "
                 f"only in the model {sorted(declared - database)}"
             )
+
+
+# --- moving and resizing (Task 16) ---------------------------------------------------------------
+
+
+async def move(client, appointment_id: str, **changes):
+    return await client.patch(f"{APPOINTMENTS}/{appointment_id}", json=changes)
+
+
+async def resource_periods(appointment_id: str) -> list[tuple[str, str, str]]:
+    async with session_scope() as db:
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT resource_id, lower(period), upper(period) FROM appointment_resources "
+                    "WHERE appointment_id = :a ORDER BY resource_id"
+                ),
+                {"a": appointment_id},
+            )
+        ).all()
+
+    def z(moment):
+        return moment.isoformat().replace("+00:00", "Z")
+
+    return [(str(r[0]), z(r[1]), z(r[2])) for r in rows]
+
+
+async def test_a_move_to_a_free_slot_moves_the_resource_rows_with_it_and_is_audited(client):
+    await as_admin(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me, [(0, 540, 1020)])
+    room = await make_resource(client, "space", "Room 1")
+    service = await make_service(
+        client, [me], requirements=[{"kind": "space"}], buffer_after_minutes=15
+    )
+    booked = await book(client, service, me, at("10:00"))
+    assert booked.status_code == 201, booked.text
+    appointment = booked.json()["id"]
+
+    moved = await move(client, appointment, starts_at=at("14:00"))
+
+    assert moved.status_code == 200, moved.text
+    body = moved.json()
+    assert body["starts_at"] == at("14:00")
+    assert body["ends_at"] == at("15:00")
+    assert body["duration_minutes"] == 60
+    assert body["price_cents"] == 12000
+    assert body["resources"] == [{"id": room, "name": "Room 1", "kind": "space"}]
+    assert await resource_periods(appointment) == [(room, at("14:00"), at("15:15"))]
+    # The old hour is on offer again; the new one is not.
+    slots = await slots_on(client, service)
+    assert "10:00" in slots and "14:00" not in slots and "13:15" not in slots
+    events = [e for e in await audit_events() if e[0] == "appointment.rescheduled"]
+    assert events == [
+        (
+            "appointment.rescheduled",
+            "appointment",
+            appointment,
+            {"from": at("10:00"), "to": at("14:00")},
+        )
+    ]
+
+
+async def test_a_move_never_blocks_itself_but_is_refused_on_another_appointments_buffer(client):
+    await as_admin(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me, [(0, 540, 1020)])
+    service = await make_service(client, [me], buffer_after_minutes=15)
+    first = await book(client, service, me, at("10:00"))  # busy until 11:15
+    second = await book(client, service, me, at("12:00"))
+    assert first.status_code == 201 and second.status_code == 201
+    appointment = second.json()["id"]
+
+    # Overlapping its own old span is fine: the appointment does not stand in its own way.
+    nudged = await move(client, appointment, starts_at=at("12:15"))
+    # 11:00–12:15 lands on the first appointment's turnaround.
+    on_the_buffer = await move(client, appointment, starts_at=at("11:00"))
+    # 11:15 merely touches it.
+    touching = await move(client, appointment, starts_at=at("11:15"))
+    off_the_grid = await move(client, appointment, starts_at=at("13:07"))
+    past_the_shift = await move(client, appointment, starts_at=at("16:30"))
+
+    assert nudged.status_code == 200, nudged.text
+    assert on_the_buffer.status_code == 422, on_the_buffer.text
+    assert on_the_buffer.json()["code"] == "not_offered"
+    assert touching.status_code == 200, touching.text
+    assert off_the_grid.status_code == 422, off_the_grid.text
+    assert past_the_shift.status_code == 422, past_the_shift.text
+    listed = await client.get(
+        APPOINTMENTS, params={"from": MONDAY.isoformat(), "to": MONDAY.isoformat()}
+    )
+    assert [a["starts_at"] for a in listed.json()["appointments"]] == [at("10:00"), at("11:15")]
+
+
+async def test_a_move_onto_a_taken_room_is_refused_and_the_old_claim_kept(client):
+    await as_admin(client)
+    me = await me_staff_id(client)
+    rae = await add_colleague(client, "rae@cedar.example", OTHER_PASSWORD)
+    await put_hours(client, me, [(0, 540, 1020)])
+    await put_hours(client, rae, [(0, 540, 1020)])
+    room = await make_resource(client, "space", "Room 1")
+    service = await make_service(client, [me, rae], requirements=[{"kind": "space"}])
+    mine = await book(client, service, me, at("10:00"))
+    raes = await book(client, service, rae, at("12:00"))
+    assert mine.status_code == 201 and raes.status_code == 201
+    appointment = raes.json()["id"]
+
+    refused = await move(client, appointment, starts_at=at("10:00"))
+
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["code"] == "not_offered"
+    assert await resource_periods(appointment) == [(room, at("12:00"), at("13:00"))]
+
+
+async def test_a_named_requirement_keeps_its_room_and_any_keeps_its_old_one_when_free(client):
+    await as_admin(client)
+    me = await me_staff_id(client)
+    rae = await add_colleague(client, "rae@cedar.example", OTHER_PASSWORD)
+    desk = await add_colleague(client, "desk@cedar.example", OTHER_PASSWORD)
+    for who in (me, rae, desk):
+        await put_hours(client, who, [(0, 540, 1020)])
+    room_a = await make_resource(client, "space", "Room A", sort_order=1)
+    room_b = await make_resource(client, "space", "Room B", sort_order=2)
+    any_room = await make_service(client, [me, rae], requirements=[{"kind": "space"}])
+    named_b = await make_service(
+        client, [desk], name="In B", requirements=[{"kind": "space", "resource_id": room_b}]
+    )
+    # At 10:00: me in A (first by sort order), Rae in B. At 13:00: the desk, in B by name.
+    assert (await book(client, any_room, me, at("10:00"))).json()["resources"][0]["id"] == room_a
+    raes = await book(client, any_room, rae, at("10:00"))
+    assert raes.json()["resources"][0]["id"] == room_b
+    desks = await book(client, named_b, desk, at("13:00"))
+    assert desks.status_code == 201, desks.text
+
+    # Rae to 11:00: both rooms free, and she keeps B rather than being handed A.
+    kept = await move(client, raes.json()["id"], starts_at=at("11:00"))
+    # Rae to 13:00: B is the desk's, so A it is.
+    repicked = await move(client, raes.json()["id"], starts_at=at("13:00"))
+    # The desk to 14:00: named is named.
+    named = await move(client, desks.json()["id"], starts_at=at("14:00"))
+
+    assert kept.status_code == 200 and kept.json()["resources"][0]["id"] == room_b, kept.text
+    assert repicked.status_code == 200, repicked.text
+    assert repicked.json()["resources"][0]["id"] == room_a
+    assert named.status_code == 200 and named.json()["resources"][0]["id"] == room_b, named.text
+
+
+async def test_a_resize_changes_duration_and_end_only_and_is_audited(client):
+    await as_admin(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me, [(0, 540, 1020)])
+    room = await make_resource(client, "space", "Room 1")
+    service = await make_service(
+        client, [me], requirements=[{"kind": "space"}], buffer_after_minutes=15
+    )
+    first = await book(client, service, me, at("10:00"))
+    later = await book(client, service, me, at("12:00"))
+    assert first.status_code == 201 and later.status_code == 201
+    appointment = first.json()["id"]
+
+    longer = await move(client, appointment, duration_minutes=90)
+    # 10:00–12:15 with the turnaround, onto the 12:00 booking.
+    too_long = await move(client, appointment, duration_minutes=120)
+    nothing = await move(client, appointment, duration_minutes=0)
+
+    assert longer.status_code == 200, longer.text
+    assert longer.json()["starts_at"] == at("10:00")
+    assert longer.json()["ends_at"] == at("11:30")
+    assert longer.json()["duration_minutes"] == 90
+    assert longer.json()["price_cents"] == 12000
+    assert await resource_periods(appointment) == [(room, at("10:00"), at("11:45"))]
+    assert too_long.status_code == 422, too_long.text
+    assert too_long.json()["code"] == "not_offered"
+    assert nothing.status_code == 422, nothing.text
+    events = [e for e in await audit_events() if e[0] == "appointment.resized"]
+    assert events == [("appointment.resized", "appointment", appointment, {"from": 60, "to": 90})]
+
+
+async def test_a_move_the_database_refuses_is_slot_taken_and_changes_nothing(client, monkeypatch):
+    await as_admin(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me, [(0, 540, 1020)])
+    room = await make_resource(client, "space", "Room 1")
+    service = await make_service(client, [me], requirements=[{"kind": "space"}])
+    first = await book(client, service, me, at("10:00"))
+    second = await book(client, service, me, at("12:00"))
+    assert first.status_code == 201 and second.status_code == 201
+    appointment = second.json()["id"]
+
+    from scheduling import slots
+
+    async def nothing_busy(db, staff_ids, resource_ids, window, **kwargs):
+        return {}, {}
+
+    monkeypatch.setattr(slots, "busy_intervals", nothing_busy)
+
+    resp = await move(client, appointment, starts_at=at("10:00"))
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["code"] == "slot_taken"
+    listed = await client.get(
+        APPOINTMENTS, params={"from": MONDAY.isoformat(), "to": MONDAY.isoformat()}
+    )
+    starts = sorted(a["starts_at"] for a in listed.json()["appointments"])
+    assert starts == [at("10:00"), at("12:00")]
+    assert await resource_periods(appointment) == [(room, at("12:00"), at("13:00"))]
+
+
+async def test_only_a_confirmed_appointment_moves_and_only_a_scheduler_may(client):
+    await as_admin(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me, [(0, 540, 1020)])
+    service = await make_service(client, [me])
+    booked = await book(client, service, me, at("10:00"))
+    assert booked.status_code == 201, booked.text
+    appointment = booked.json()["id"]
+    role = await client.post(
+        "/api/admin/roles",
+        json={"name": "Viewer", "description": "Looks.", "capabilities": ["schedule.view"]},
+    )
+    assert role.status_code == 201, role.text
+    await add_colleague(client, "desk@cedar.example", OTHER_PASSWORD, role="Viewer")
+
+    missing = await move(client, "00000000-0000-0000-0000-000000000000", starts_at=at("11:00"))
+    empty = await move(client, appointment)
+    async with session_scope() as db:
+        await db.execute(
+            text("UPDATE appointments SET status = 'cancelled' WHERE id = :a"), {"a": appointment}
+        )
+        await db.commit()
+    cancelled = await move(client, appointment, starts_at=at("11:00"))
+    client.cookies.clear()
+    await as_staff(client, "desk@cedar.example", OTHER_PASSWORD)
+    looker = await move(client, appointment, starts_at=at("11:00"))
+
+    assert missing.status_code == 404, missing.text
+    assert empty.status_code == 422, empty.text
+    assert cancelled.status_code == 409, cancelled.text
+    assert looker.status_code == 403, looker.text

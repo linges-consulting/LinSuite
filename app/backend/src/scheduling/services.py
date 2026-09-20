@@ -378,15 +378,19 @@ async def catalog(_: CurrentUser, db: SessionDep) -> dict[str, list[CatalogServi
     return {"services": [_catalog_out(s, kinds) for s in services]}
 
 
-async def catalog_entry(db: SessionDep, service_id: uuid.UUID) -> CatalogServiceOut:
+async def catalog_entry(
+    db: SessionDep, service_id: uuid.UUID, *, include_inactive: bool = False
+) -> CatalogServiceOut:
     """One service in the engine's shape, or a 404 — what `scheduling/slots.py` starts from.
 
     An inactive service is a 404 here, exactly as it is absent from the list above: nothing
     downstream has a use for one, and "deactivated" is not something a booking screen should
-    have to branch on separately from "gone".
+    have to branch on separately from "gone". The one caller that wants it anyway is a move
+    of an appointment already booked under it — the appointment exists whatever the catalog
+    says now — and asks with `include_inactive`.
     """
     service = await _load(db, service_id)
-    if not service.active:
+    if not service.active and not include_inactive:
         raise HTTPException(status_code=404, detail="No such service.")
     return _catalog_out(service, await _kinds_in_stock(db))
 
