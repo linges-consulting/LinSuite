@@ -13,6 +13,7 @@ Fixtures and helpers are the same ones `test_appointments.py` already built — 
 one service, one staff member with hours — imported rather than re-invented.
 """
 
+import asyncio
 import json
 from datetime import date, timedelta
 
@@ -263,6 +264,164 @@ async def test_a_failed_bump_does_not_fail_the_mutation(client, monkeypatch):
     resp = await book(client, service, me, at("10:00"))
 
     assert resp.status_code == 201, resp.text
+
+
+# --- each of `cached()`'s three Redis calls, failing on its own (fix round 1) -------------------
+#
+# `_DeadRedis` above proves the whole-outage case, but every call it makes raises — so the
+# generation read fails first and `cached()` never reaches its entry-`get` or its `set`. These
+# three wrap the *real* client (the one `client` and `book` already talk to) and fail exactly
+# one call each, so every branch in `cache.cached()` is actually exercised once.
+
+
+class _FailingEntryGet:
+    """The generation read succeeds; the cache-entry read — a second, different `get` — does
+    not. `cached()` must fall through to computing directly rather than trusting a `None`."""
+
+    def __init__(self, real):
+        self._real = real
+
+    async def get(self, key):
+        if key == avail_cache._GENERATION_KEY:
+            return await self._real.get(key)
+        raise ConnectionError("redis is down")
+
+    async def set(self, *a, **kw):
+        return await self._real.set(*a, **kw)
+
+    async def incr(self, *a, **kw):
+        return await self._real.incr(*a, **kw)
+
+
+class _FailingSet:
+    """Both reads succeed (a clean miss); writing the answer back does not."""
+
+    def __init__(self, real):
+        self._real = real
+
+    async def get(self, key):
+        return await self._real.get(key)
+
+    async def set(self, *a, **kw):
+        raise ConnectionError("redis is down")
+
+    async def incr(self, *a, **kw):
+        return await self._real.incr(*a, **kw)
+
+
+class _FailingIncr:
+    """Reads and writes succeed; only the post-commit generation bump fails."""
+
+    def __init__(self, real):
+        self._real = real
+
+    async def get(self, key):
+        return await self._real.get(key)
+
+    async def set(self, *a, **kw):
+        return await self._real.set(*a, **kw)
+
+    async def incr(self, *a, **kw):
+        raise ConnectionError("redis is down")
+
+
+async def test_a_failing_cache_entry_read_falls_back_to_computing_directly(client, monkeypatch):
+    await as_admin(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me, [(0, 540, 720)])
+    service = await make_service(client, [me])
+    real = avail_cache.get_redis()
+
+    monkeypatch.setattr(avail_cache, "get_redis", lambda: _FailingEntryGet(real))
+
+    resp = await ask(client, service, MONDAY)
+
+    assert resp.status_code == 200, resp.text
+    assert len(resp.json()["days"][0]["slots"]) == 9
+
+
+async def test_a_failing_cache_write_still_answers_correctly_and_caches_nothing(
+    client, monkeypatch
+):
+    await as_admin(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me, [(0, 540, 720)])
+    service = await make_service(client, [me])
+    real = avail_cache.get_redis()
+    calls = spy_on_compute(monkeypatch)
+
+    monkeypatch.setattr(avail_cache, "get_redis", lambda: _FailingSet(real))
+
+    first = await ask(client, service, MONDAY)
+    second = await ask(client, service, MONDAY)
+
+    assert first.status_code == second.status_code == 200, (first.text, second.text)
+    assert len(first.json()["days"][0]["slots"]) == 9
+    assert first.json() == second.json()
+    # Nothing ever landed in the cache (the write kept failing), so both reads computed fresh.
+    assert len(calls) == 2
+
+
+async def test_a_failing_generation_bump_does_not_fail_the_mutation(client, monkeypatch):
+    await as_admin(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me, [(0, 540, 720)])
+    service = await make_service(client, [me])
+    real = avail_cache.get_redis()
+
+    monkeypatch.setattr(avail_cache, "get_redis", lambda: _FailingIncr(real))
+
+    resp = await book(client, service, me, at("10:00"))
+
+    assert resp.status_code == 201, resp.text
+
+
+# --- a genuinely hanging Redis is also bounded (fix round 1) -------------------------------------
+
+
+async def test_a_redis_that_accepts_but_never_answers_still_returns_within_a_bound(
+    client, monkeypatch
+):
+    """Not `ConnectionRefusedError` — a listener that takes the TCP connection and then says
+    nothing, the case `core/redis.py`'s `socket_timeout`/`socket_connect_timeout` exist for.
+    Without them this request would hang indefinitely instead of degrading."""
+    import time
+
+    from redis.asyncio import from_url
+
+    from core.redis import SOCKET_CONNECT_TIMEOUT, SOCKET_TIMEOUT
+
+    await as_admin(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me, [(0, 540, 720)])
+    service = await make_service(client, [me])
+
+    async def _swallow(reader, writer):
+        # Never answer; leave once the client gives up. The writer must be closed, or
+        # `async with server` waits on this connection forever (3.12's `wait_closed`).
+        await reader.read()
+        writer.close()
+
+    server = await asyncio.start_server(_swallow, "127.0.0.1", 0)
+    async with server:
+        host, port = server.sockets[0].getsockname()[:2]
+        hanging = from_url(
+            f"redis://{host}:{port}/0",
+            decode_responses=True,
+            socket_connect_timeout=SOCKET_CONNECT_TIMEOUT,
+            socket_timeout=SOCKET_TIMEOUT,
+        )
+        monkeypatch.setattr(avail_cache, "get_redis", lambda: hanging)
+
+        started = time.monotonic()
+        resp = await ask(client, service, MONDAY)
+        elapsed = time.monotonic() - started
+
+        assert resp.status_code == 200, resp.text
+        assert len(resp.json()["days"][0]["slots"]) == 9
+        # Bounded by the bounded timeouts, not by nothing — well under the old "forever".
+        assert elapsed < SOCKET_CONNECT_TIMEOUT + SOCKET_TIMEOUT + 2
+        await hanging.aclose()
 
 
 # --- invalidation, one per mutation class --------------------------------------------------------
