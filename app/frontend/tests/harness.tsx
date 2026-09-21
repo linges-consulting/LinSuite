@@ -500,6 +500,8 @@ export function stubApi({
           return Response.json(branding(wanted as typeof brandColours))
         }
       }
+      // An instance with nobody on its books yet; a test with clients answers via `respond`.
+      if (url.startsWith('/api/customers?')) return Response.json({ customers: [], total: 0 })
       return Response.json({ status: 'ok', database: 'ok' })
     }),
   )

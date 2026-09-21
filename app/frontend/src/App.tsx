@@ -5,6 +5,7 @@ import { fetchSetupStatus } from '@/lib/api'
 import { useSession } from '@/lib/auth'
 import { useApplyBranding } from '@/lib/branding'
 import { ChangePasswordPage } from '@/routes/change-password'
+import { ClientPage, ClientsPage } from '@/routes/clients'
 import { ForgotPasswordPage } from '@/routes/forgot-password'
 import { HomePage } from '@/routes/home'
 import { LoginPage } from '@/routes/login'
@@ -147,7 +148,8 @@ function AppRoutes() {
       <Route element={gate}>
         <Route index element={<HomePage />} />
         <Route path="schedule" element={<SchedulePage />} />
-        <Route path="clients" element={<PlaceholderPage title="Clients" />} />
+        <Route path="clients" element={<ClientsPage />} />
+        <Route path="clients/:id" element={<ClientPage />} />
         <Route path="catalog" element={<PlaceholderPage title="Catalog" />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="security" element={<SecurityPage />} />

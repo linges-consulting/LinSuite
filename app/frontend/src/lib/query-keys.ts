@@ -39,7 +39,9 @@ export const APPOINTMENTS = ['appointments'] as const
  *  `SERVICES`, which is the administrator's editing view. */
 export const CATALOG = ['catalog'] as const
 export const AVAILABILITY = ['availability'] as const
-/** The booking dialog's client search; takes the query string as a second element. */
+/** The customer list, in both its shapes: the booking dialog's search takes the query string
+ *  as a second element; the Clients page takes the query, then the page. One prefix, so a
+ *  client created in the dialog reaches the list too. */
 export const CUSTOMERS = ['customers'] as const
 /** The grid's one read (`/api/schedule`); takes the range and the staff filter after it.
  *  Booking, moving and resizing invalidate the prefix. */

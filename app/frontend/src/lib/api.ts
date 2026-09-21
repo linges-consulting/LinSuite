@@ -1059,11 +1059,62 @@ export type CustomerDraft = {
   phone?: string | null
 }
 
-/** Prefix matches on either name, the email, or the digits of a phone number. */
+/** Prefix matches on either name, the email, or the digits of a phone number. The booking
+ *  dialog's picker: the first page is all it wants. */
 export async function searchCustomers(q: string): Promise<Customer[]> {
   const res = await fetch(`/api/customers?${new URLSearchParams({ q })}`)
   if (!res.ok) throw await failure(res, 'Could not search the customers')
   return (await res.json()).customers
+}
+
+/** A customer as the Clients list and profile show one: the picker's fields plus when the
+ *  record was made. */
+export type CustomerRecord = Customer & { created_at: string }
+
+export type CustomerList = { customers: CustomerRecord[]; total: number }
+
+/** The Clients list: alphabetical by last name, a page at a time (`page_size` ≤ 100), with
+ *  the total; `q` narrows it the same way `searchCustomers` does. Never logged as an access
+ *  on the server (ADR-0002 §4) — opening a profile is. */
+export async function fetchCustomers(query: {
+  q?: string
+  page?: number
+  page_size?: number
+}): Promise<CustomerList> {
+  const params = new URLSearchParams()
+  if (query.q) params.set('q', query.q)
+  if (query.page) params.set('page', String(query.page))
+  if (query.page_size) params.set('page_size', String(query.page_size))
+  const res = await fetch(`/api/customers?${params}`)
+  if (!res.ok) throw await failure(res, 'Could not load the clients')
+  return res.json()
+}
+
+/** One row of a client's history. Instants are UTC; `timezone` on the profile is what to
+ *  print them in. */
+export type Visit = {
+  id: string
+  starts_at: string
+  ends_at: string
+  status: Appointment['status']
+  booking_group_id: string | null
+  service: { id: string; name: string }
+  staff: { id: string; display_name: string; colour: string }
+}
+
+export type CustomerProfile = {
+  customer: CustomerRecord
+  timezone: string
+  /** Newest first, upcoming included, cancelled and no-shows too. */
+  appointments: Visit[]
+}
+
+/** The profile and its visits in one response — one request, because on the server it is
+ *  exactly one PHI access-log row. Every call is an audited access: make it on purpose. */
+export async function fetchCustomerProfile(id: string): Promise<CustomerProfile> {
+  const res = await fetch(`/api/customers/${encodeURIComponent(id)}`)
+  if (!res.ok) throw await failure(res, 'Could not load this client')
+  return res.json()
 }
 
 /**

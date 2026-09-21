@@ -22,6 +22,8 @@ function stubApi(health: Response) {
           capabilities: ['admin', 'roles.manage', 'users.manage', 'catalog.manage'],
           mfa: NO_MFA,
         })
+      // The shell test lands on /clients, which reads the (empty) list.
+      if (url.startsWith('/api/customers')) return Response.json({ customers: [], total: 0 })
       return health.clone()
     }),
   )
