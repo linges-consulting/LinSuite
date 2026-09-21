@@ -368,7 +368,8 @@ Reporting only. **No payroll, no payouts, no tax withholding, no pay periods** �
 * **Room, equipment and chair conflicts** → hard block. The conflict is physical, so no override exists.
 * Applies to **booked appointments as well as walk-ins** — a client phoning at 16:30 to request 17:00 is the same situation, and special-casing walk-ins would mean two code paths for one rule.
 * Gated by an RBAC capability `override_availability`: staff may override their own schedule, administrators may override anyone's. The reason is labour rather than security — front desk unilaterally committing a barber's evening is a different act from the barber choosing to stay.
-* **Staff-side only.** The public booking portal never offers slots outside shift hours; clients cannot self-serve into someone's evening.
+* **Staff-side only.** The public booking portal never offers slots outside shift hours; clients cannot self-serve into someone's evening. Concretely: the client-facing booking endpoint (M3) accepts no `override` field and never runs the availability engine with `relax_advisory` — that switch is reached only from the staff-side booking and move endpoints, to diagnose and to make an override.
+* **The booking horizon is advisory too**, and treated the same way: a start past it is diagnosed as `beyond_horizon` and may be confirmed like a shift end.
 
 This extends the physics-versus-policy split already applied to concurrency in §20.
 

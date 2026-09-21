@@ -41,7 +41,7 @@ from sqlalchemy import (
 from sqlalchemy import (
     Date as DateColumn,
 )
-from sqlalchemy.dialects.postgresql import TSTZRANGE, ExcludeConstraint, Range
+from sqlalchemy.dialects.postgresql import JSONB, TSTZRANGE, ExcludeConstraint, Range
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.db import Base
@@ -522,6 +522,11 @@ class Appointment(Base):
     # Task 18: the linked appointments of one multi-service visit share this.
     booking_group_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     notes: Mapped[str | None] = mapped_column(Text)
+    # The advisory rules (`availability.ADVISORY_RULES`) this booking — or its last move —
+    # was confirmed past, and why; null when it needed no override (migration 0015). The
+    # authorizer is in the audit log, which is the record; this is the calendar's marker.
+    overridden_rules: Mapped[list[str] | None] = mapped_column(JSONB)
+    override_reason: Mapped[str | None] = mapped_column(Text)
     created_by_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

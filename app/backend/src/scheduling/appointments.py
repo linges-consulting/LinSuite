@@ -27,12 +27,25 @@ Creating the client inline is `customers.manage` on top — the same rule as `PO
 /api/customers`, checked here because the request is one request.
 The list is the read Task 16's calendar draws from; `AppointmentOut` is its shape and
 `tests/test_appointments.py` pins the keys.
+
+**Advisory rules may be overridden; physical ones may not (tech-stack §22).** When the
+engine does not offer a start for a named staff member, it is run once more *relaxed* — the
+shift, time off, closures and the horizon set aside — purely to diagnose. Offered that way,
+the answer is 422 `override_available` naming the `rules` the start breaks, and the screen
+asks a human to confirm. Not offered even then, the conflict is a busy room or device or a
+staff member at their limit, and the answer stays `not_offered`: there is nothing to
+confirm. `override: true` books past the advisory rules — for one's own schedule with
+`schedule.override_availability`, for anybody else's with `admin` in Admin Mode on top —
+and is recorded as `appointment.availability_overridden` with the rules, the reason and the
+authorizer. **The relaxed engine is reached from nowhere but these two places**, and the
+client-facing booking endpoint (M3) must accept no `override` and run nothing relaxed.
 """
 
 import uuid
 from datetime import date as Date
 from datetime import datetime, time, timedelta
 from typing import Annotated
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
@@ -42,15 +55,17 @@ from sqlalchemy.dialects.postgresql import Range
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from auth.capabilities import BY_KEY, Requires
+from auth import modes
+from auth.capabilities import ADMIN, BY_KEY, Requires
 from auth.models import User
+from auth.session import ClaimsDep
 from core.audit import record_event
 from core.db import SessionDep
 from core.errors import CAPABILITY_REQUIRED, Forbidden
 from customers.models import Customer
 from customers.routes import CustomerIn, create_customer
 from scheduling._admin_forms import blank_to_none, refuse
-from scheduling.availability import Interval, Slot
+from scheduling.availability import Interval, Slot, advisory_breaches
 from scheduling.clock import localize
 from scheduling.models import Appointment, AppointmentResource, Staff
 from scheduling.services import CatalogServiceOut, RequirementOut, catalog_entry
@@ -61,6 +76,8 @@ router = APIRouter(prefix="/appointments", tags=["appointments"])
 
 Scheduler = Annotated[User, Depends(Requires("schedule.manage"))]
 Viewer = Annotated[User, Depends(Requires("schedule.view"))]
+
+OVERRIDE = "schedule.override_availability"
 
 # The two names migration 0014 gives the database's refusals. Either is "just taken".
 SLOT_TAKEN_CONSTRAINTS = (
@@ -111,6 +128,10 @@ class AppointmentOut(BaseModel):
     price_cents: int
     notes: str | None
     booking_group_id: str | None
+    # The advisory rules this was confirmed past, and why — null when none were. The card's
+    # marker; the authorizer is in the audit log.
+    overridden_rules: list[str] | None
+    override_reason: str | None
     customer: CustomerRef
     service: ServiceRef
     staff: StaffRef
@@ -138,6 +159,8 @@ def _out(appointment: Appointment) -> AppointmentOut:
         booking_group_id=str(appointment.booking_group_id)
         if appointment.booking_group_id
         else None,
+        overridden_rules=appointment.overridden_rules,
+        override_reason=appointment.override_reason,
         customer=CustomerRef(
             id=str(appointment.customer.id),
             first_name=appointment.customer.first_name,
@@ -166,14 +189,29 @@ def _out(appointment: Appointment) -> AppointmentOut:
 # --- what comes in ------------------------------------------------------------------------
 
 
-class BookingIn(BaseModel):
+class OverrideIn(BaseModel):
+    """The two fields a confirmed override adds to a booking or a move. `override` without
+    a rule to override is a no-op, and without the right to override it is a 403 whether or
+    not one was needed: asking for a power is refused, not ignored."""
+
+    override: bool = False
+    override_reason: Annotated[str | None, Field(max_length=500)] = None
+
+    @field_validator("override_reason", mode="after")
+    @classmethod
+    def _reason_trimmed(cls, value: str | None) -> str | None:
+        return blank_to_none(value)
+
+
+class BookingIn(OverrideIn):
     """`starts_at` is the instant `/api/availability` offered — aware, so a naive local time
     is refused at the boundary rather than guessed at. Exactly one of `customer_id` and an
     inline `customer`."""
 
     service_id: uuid.UUID
     # None is "any available": the engine's slot names who could take it, and the first by
-    # `sort_order` does.
+    # `sort_order` does. An override names one person: the rules and the right to set them
+    # aside are both about a particular schedule.
     staff_id: uuid.UUID | None = None
     starts_at: AwareDatetime
     customer_id: uuid.UUID | None = None
@@ -202,15 +240,60 @@ async def offered_slot(
     starts_at,
     *,
     excluding: uuid.UUID | None = None,
+    relax_advisory: bool = False,
 ) -> tuple[Computed, Slot | None]:
     """The engine's answer for the local day `starts_at` falls on, and the slot at exactly
     that instant if it is offered to one of `staff_ids`. Its own function so a test can hold
     the door open between the check and the insert (`test_two_concurrent_bookings...`).
-    `excluding` is the appointment being moved, left out of what is busy."""
+    `excluding` is the appointment being moved, left out of what is busy; `relax_advisory`
+    is the override question (module docstring), asked here and nowhere else."""
     day = starts_at.astimezone(await business_zone(db)).date()
-    computed = await compute(db, service, staff_ids, day, day, excluding=excluding)
+    computed = await compute(
+        db, service, staff_ids, day, day, excluding=excluding, relax_advisory=relax_advisory
+    )
     slot = next((s for s in computed.days[day] if s.starts_at == starts_at), None)
     return computed, slot
+
+
+def broken_rules(
+    computed: Computed, staff_id: uuid.UUID, slot: Slot, before: int, after: int
+) -> list[str]:
+    """The advisory rules `slot`, buffered, breaks for `staff_id` — empty when the start
+    would have been offered without relaxing anything."""
+    zone = ZoneInfo(computed.timezone)
+    return advisory_breaches(
+        timezone=computed.timezone,
+        staff=computed.staff[staff_id],
+        day=slot.starts_at.astimezone(zone).date(),
+        span=(slot.starts_at - timedelta(minutes=before), slot.ends_at + timedelta(minutes=after)),
+        closures=computed.closures,
+        horizon_ends_on=computed.horizon_ends_on,
+    )
+
+
+async def authorize_override(
+    db: AsyncSession, actor: User, claims: dict, staff_id: uuid.UUID
+) -> None:
+    """Who may set the advisory rules aside for `staff_id`'s schedule (§22): the capability
+    for one's own; `admin`, *in Admin Mode*, for anybody else's. Committing somebody else's
+    evening is the administrative act, so it takes the administrative window, checked and
+    slid exactly as `require_admin_mode` does."""
+    if OVERRIDE not in actor.capabilities:
+        raise Forbidden(
+            CAPABILITY_REQUIRED, f"Your role does not allow this: {BY_KEY[OVERRIDE].description}"
+        )
+    own = await db.scalar(select(Staff.id).where(Staff.user_id == actor.id))
+    if own == staff_id:
+        return
+    if ADMIN not in actor.capabilities:
+        raise Forbidden(
+            CAPABILITY_REQUIRED,
+            "Only an administrator may book outside another staff member's availability.",
+        )
+    state = await modes.read_state(claims)
+    if not state.in_admin_mode:
+        raise modes.ADMIN_MODE_REQUIRED
+    await modes.slide(claims, state.hard_limit_at)
 
 
 def assign_resources(
@@ -275,6 +358,49 @@ def not_offered() -> JSONResponse:
     )
 
 
+def override_available(rules: list[str]) -> JSONResponse:
+    """The engine does not offer that start, but a human may: the same 422 shape as
+    `not_offered` with the advisory rules the start breaks beside it, for the screen to
+    put into words and ask about."""
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {
+                    "type": "value_error",
+                    "loc": ["body", "starts_at"],
+                    "msg": "That time is outside availability. It can be booked with an override.",
+                }
+            ],
+            "code": "override_available",
+            "rules": rules,
+        },
+    )
+
+
+def slot_taken() -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={"detail": "That time was just taken. Pick another.", "code": "slot_taken"},
+    )
+
+
+def record_override(db: AsyncSession, appointment: Appointment, actor: User) -> None:
+    record_event(
+        db,
+        "appointment.availability_overridden",
+        target_type="appointment",
+        target_id=str(appointment.id),
+        actor_user_id=actor.id,
+        metadata={
+            "appointment_id": str(appointment.id),
+            "rules": appointment.overridden_rules,
+            "reason": appointment.override_reason,
+            "authorizer_user_id": str(actor.id),
+        },
+    )
+
+
 def _is_slot_taken(error: IntegrityError) -> bool:
     """Whether the database refused because the time is taken, rather than for any other
     reason. asyncpg carries `constraint_name`; SQLAlchemy's wrapper may keep it a cause
@@ -286,10 +412,13 @@ def _is_slot_taken(error: IntegrityError) -> bool:
 
 
 @router.post("", status_code=201, response_model=AppointmentOut)
-async def book_appointment(payload: BookingIn, actor: Scheduler, db: SessionDep):
+async def book_appointment(payload: BookingIn, actor: Scheduler, claims: ClaimsDep, db: SessionDep):
     """The documented body is `AppointmentOut`; the coded refusals are `JSONResponse`s
     because each carries something beside `detail` — the catalog's reasons and
-    `not_bookable`, `not_offered`, or `slot_taken`."""
+    `not_bookable`, `not_offered`, `override_available`, or `slot_taken`.
+
+    Staff-side only. The client-facing booking endpoint (M3) is a different route: it must
+    accept no `override` and never run the engine relaxed."""
     service = await catalog_entry(db, payload.service_id)
     if not service.bookable:
         return unbookable(service)
@@ -297,9 +426,25 @@ async def book_appointment(payload: BookingIn, actor: Scheduler, db: SessionDep)
     if payload.staff_id is not None and payload.staff_id not in eligible:
         raise refuse("staff_id", "That staff member cannot deliver this service.")
     candidates = [payload.staff_id] if payload.staff_id else eligible
+    if payload.override:
+        if payload.staff_id is None:
+            raise refuse("staff_id", "Name the staff member whose availability is overridden.")
+        await authorize_override(db, actor, claims, payload.staff_id)
 
-    computed, slot = await offered_slot(db, service, candidates, payload.starts_at)
+    computed, slot = await offered_slot(
+        db, service, candidates, payload.starts_at, relax_advisory=payload.override
+    )
     if slot is None:
+        if not payload.override and payload.staff_id is not None:
+            # The diagnosis: reachable with the advisory rules lifted, or not at all?
+            relaxed, reachable = await offered_slot(
+                db, service, candidates, payload.starts_at, relax_advisory=True
+            )
+            if reachable is not None:
+                before, after = service.buffer_before_minutes, service.buffer_after_minutes
+                return override_available(
+                    broken_rules(relaxed, payload.staff_id, reachable, before, after)
+                )
         return not_offered()
 
     staff_id = payload.staff_id or await db.scalar(
@@ -318,6 +463,14 @@ async def book_appointment(payload: BookingIn, actor: Scheduler, db: SessionDep)
     )
     if claimed is None:
         return not_offered()
+    # What the override actually set aside — nothing, when the start was offered anyway.
+    rules = (
+        broken_rules(
+            computed, staff_id, slot, service.buffer_before_minutes, service.buffer_after_minutes
+        )
+        if payload.override
+        else []
+    )
 
     if payload.customer is not None:
         # The same door `POST /api/customers` has, in the same words `Requires` would use.
@@ -346,6 +499,8 @@ async def book_appointment(payload: BookingIn, actor: Scheduler, db: SessionDep)
         price_cents=service.price_cents,
         status="confirmed",
         notes=payload.notes,
+        overridden_rules=rules or None,
+        override_reason=payload.override_reason if rules else None,
         created_by_user_id=actor.id,
         resources=[
             AppointmentResource(
@@ -361,10 +516,7 @@ async def book_appointment(payload: BookingIn, actor: Scheduler, db: SessionDep)
         await db.rollback()
         if not _is_slot_taken(error):
             raise
-        return JSONResponse(
-            status_code=409,
-            content={"detail": "That time was just taken. Pick another.", "code": "slot_taken"},
-        )
+        return slot_taken()
     record_event(
         db,
         "appointment.booked",
@@ -378,6 +530,8 @@ async def book_appointment(payload: BookingIn, actor: Scheduler, db: SessionDep)
             "customer_id": str(customer.id),
         },
     )
+    if rules:
+        record_override(db, appointment, actor)
     await db.commit()
     return _out(await _load(db, appointment.id))
 
@@ -396,7 +550,7 @@ async def _load(db: AsyncSession, appointment_id: uuid.UUID) -> Appointment:
 # --- moving and resizing --------------------------------------------------------------------
 
 
-class ChangeIn(BaseModel):
+class ChangeIn(OverrideIn):
     """A move (`starts_at`), a resize (`duration_minutes`), or both. Nothing else about an
     appointment changes here: the price stays what was agreed, the service stays the service.
     An empty body is a request for nothing and is refused as one."""
@@ -413,7 +567,11 @@ class ChangeIn(BaseModel):
 
 @router.patch("/{appointment_id}", response_model=AppointmentOut)
 async def change_appointment(
-    appointment_id: uuid.UUID, payload: ChangeIn, actor: Scheduler, db: SessionDep
+    appointment_id: uuid.UUID,
+    payload: ChangeIn,
+    actor: Scheduler,
+    claims: ClaimsDep,
+    db: SessionDep,
 ):
     """The calendar's drag: a move by the body, a resize by the bottom edge, or a keyboard
     doing either. The rule is the booking rule — **the engine decides what is offered, the
@@ -425,7 +583,9 @@ async def change_appointment(
     resource; an "any" one keeps the resource it had when that is still free and re-picks
     when it is not — the old rooms go first in the pick order, which is all that takes.
     Buffers and price are the row's own snapshot; a resize changes the duration and the end
-    and nothing else. Shift-end and time-off overrides are Task 17's; this refuses them.
+    and nothing else. The override rules are booking's (module docstring), for the
+    appointment's own staff member; the marker follows the appointment — set by a confirmed
+    override, cleared by a move that needed none.
     """
     appointment = await _load(db, appointment_id)
     if appointment is None:
@@ -434,6 +594,8 @@ async def change_appointment(
         raise HTTPException(
             status_code=409, detail=f"A {appointment.status} appointment cannot be moved."
         )
+    if payload.override:
+        await authorize_override(db, actor, claims, appointment.staff_id)
     old_start, old_duration = appointment.starts_at, appointment.duration_minutes
     starts_at = payload.starts_at or old_start
     duration = payload.duration_minutes or old_duration
@@ -448,16 +610,32 @@ async def change_appointment(
             "buffer_after_minutes": appointment.buffer_after_minutes,
         }
     )
+    before, after = appointment.buffer_before_minutes, appointment.buffer_after_minutes
     computed, slot = await offered_slot(
-        db, service, [appointment.staff_id], starts_at, excluding=appointment.id
+        db,
+        service,
+        [appointment.staff_id],
+        starts_at,
+        excluding=appointment.id,
+        relax_advisory=payload.override,
     )
     if slot is None:
+        if not payload.override:
+            relaxed, reachable = await offered_slot(
+                db,
+                service,
+                [appointment.staff_id],
+                starts_at,
+                excluding=appointment.id,
+                relax_advisory=True,
+            )
+            if reachable is not None:
+                return override_available(
+                    broken_rules(relaxed, appointment.staff_id, reachable, before, after)
+                )
         return not_offered()
 
-    span = (
-        slot.starts_at - timedelta(minutes=appointment.buffer_before_minutes),
-        slot.ends_at + timedelta(minutes=appointment.buffer_after_minutes),
-    )
+    span = (slot.starts_at - timedelta(minutes=before), slot.ends_at + timedelta(minutes=after))
     held = {r.resource_id for r in appointment.resources}
     claimed = assign_resources(
         service.requirements,
@@ -467,10 +645,17 @@ async def change_appointment(
     )
     if claimed is None:
         return not_offered()
+    rules = (
+        broken_rules(computed, appointment.staff_id, slot, before, after)
+        if payload.override
+        else []
+    )
 
     appointment.starts_at = slot.starts_at
     appointment.ends_at = slot.ends_at
     appointment.duration_minutes = duration
+    appointment.overridden_rules = rules or None
+    appointment.override_reason = payload.override_reason if rules else None
     appointment.resources = [
         AppointmentResource(
             resource_id=r.id, kind=r.kind, period=Range(span[0], span[1], bounds="[)")
@@ -483,10 +668,9 @@ async def change_appointment(
         await db.rollback()
         if not _is_slot_taken(error):
             raise
-        return JSONResponse(
-            status_code=409,
-            content={"detail": "That time was just taken. Pick another.", "code": "slot_taken"},
-        )
+        return slot_taken()
+    if rules:
+        record_override(db, appointment, actor)
     if slot.starts_at != old_start:
         record_event(
             db,

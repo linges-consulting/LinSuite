@@ -52,6 +52,8 @@ class ColumnOut(BaseModel):
     colour: str
     hex: str
     dark_hex: str
+    # The column header's "×2": how many appointments this person may run at once (§20).
+    max_concurrent_appointments: int
 
 
 class BlockOut(BaseModel):
@@ -155,6 +157,7 @@ async def read_schedule(
                 colour=s.colour,
                 hex=BY_KEY[s.colour].hex,
                 dark_hex=BY_KEY[s.colour].dark_hex,
+                max_concurrent_appointments=s.max_concurrent_appointments,
             )
             for s in roster
         ],

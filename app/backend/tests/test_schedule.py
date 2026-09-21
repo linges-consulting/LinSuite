@@ -85,7 +85,15 @@ async def test_one_read_carries_roster_blocks_absences_closures_and_appointments
     assert body["timezone"] == "America/Toronto"
     assert body["granularity_minutes"] == 15
     assert [s["id"] for s in body["staff"]] == [me, rae]
-    assert set(body["staff"][0]) == {"id", "display_name", "colour", "hex", "dark_hex"}
+    assert set(body["staff"][0]) == {
+        "id",
+        "display_name",
+        "colour",
+        "hex",
+        "dark_hex",
+        "max_concurrent_appointments",
+    }
+    assert body["staff"][0]["max_concurrent_appointments"] == 1
     assert body["staff"][0]["hex"].startswith("#") and body["staff"][0]["dark_hex"].startswith("#")
 
     # The blocks are instants, converted from the local rule for each date — never stored.

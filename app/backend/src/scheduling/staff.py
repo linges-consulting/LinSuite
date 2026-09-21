@@ -277,6 +277,9 @@ class RosterEntry(BaseModel):
     hex: str
     dark_hex: str
     sort_order: int
+    # The account behind the column — how a screen tells *its own* column from the others,
+    # which is the line between overriding one's own evening and somebody else's (§22).
+    user_id: str
 
 
 @public.get("")
@@ -295,6 +298,7 @@ async def roster(_: Scheduler, db: SessionDep) -> dict[str, list[RosterEntry]]:
                 hex=BY_KEY[s.colour].hex,
                 dark_hex=BY_KEY[s.colour].dark_hex,
                 sort_order=s.sort_order,
+                user_id=str(s.user_id),
             )
             for s in rows
         ]

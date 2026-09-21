@@ -301,7 +301,12 @@ async def test_a_slot_the_engine_does_not_offer_is_refused(client):
     for resp in (before_the_shift, off_the_grid, too_late_to_finish, a_day_nobody_works):
         assert resp.status_code == 422, resp.text
         assert resp.json()["detail"][0]["loc"] == ["body", "starts_at"]
-        assert resp.json()["code"] == "not_offered"
+    # Off the grid is simply not a start. The other three are the shift's rule, which a
+    # human may override (tests/test_overrides.py) — and the answer says so.
+    assert off_the_grid.json()["code"] == "not_offered"
+    for resp in (before_the_shift, too_late_to_finish, a_day_nobody_works):
+        assert resp.json()["code"] == "override_available"
+        assert resp.json()["rules"] == ["outside_shift"]
     async with session_scope() as db:
         assert await db.scalar(text("SELECT count(*) FROM appointments")) == 0
 
@@ -628,6 +633,8 @@ async def test_the_list_is_by_local_date_inclusive_and_filterable_by_staff(clien
         "price_cents",
         "notes",
         "booking_group_id",
+        "overridden_rules",
+        "override_reason",
         "customer",
         "service",
         "staff",
@@ -679,7 +686,15 @@ async def test_the_roster_every_scheduler_reads_is_active_staff_in_column_order(
     assert resp.status_code == 200, resp.text
     roster = resp.json()["staff"]
     assert [row["id"] for row in roster] == [rae, me]
-    assert set(roster[0]) == {"id", "display_name", "colour", "hex", "dark_hex", "sort_order"}
+    assert set(roster[0]) == {
+        "id",
+        "display_name",
+        "colour",
+        "hex",
+        "dark_hex",
+        "sort_order",
+        "user_id",
+    }
 
 
 async def test_booking_is_staff_work_and_schedule_view_alone_may_only_look(client):
