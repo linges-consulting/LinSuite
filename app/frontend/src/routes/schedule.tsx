@@ -2,12 +2,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { CalendarDays, ChevronLeft, ChevronRight, Plus } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
+import { CancelConfirm } from '@/components/calendar/cancel-confirm'
 import { Grid } from '@/components/calendar/grid'
 import { OverrideConfirm } from '@/components/calendar/override-confirm'
 import type { Change, Column, Prefill } from '@/components/calendar/types'
 import { EmptyState } from '@/components/empty-state'
 import { Field, Form, FormError } from '@/components/form'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   Dialog,
   DialogContent,
@@ -30,17 +32,26 @@ import { Textarea } from '@/components/ui/textarea'
 import {
   ApiError,
   bookAppointment,
+  bookGroup,
+  cancelAppointment,
+  cancelGroup,
   changeAppointment,
+  completeAppointment,
   fetchAvailability,
   fetchCatalog,
+  fetchGroupAvailability,
   fetchRoster,
   fetchSchedule,
+  markNoShow,
   overridableRules,
+  refusedLinkIndex,
   searchCustomers,
   type Appointment,
   type AvailabilitySlot,
   type BookingDraft,
   type Customer,
+  type GroupLinkDraft,
+  type GroupSlot,
   type Override,
   type OverrideRule,
   type RosterEntry,
@@ -91,19 +102,58 @@ export function SchedulePage() {
   const [staffFilter, setStaffFilter] = useState<string>(EVERYONE)
   const [booking, setBooking] = useState<Prefill | 'blank' | null>(null)
   const [override, setOverride] = useState<PendingMove | null>(null)
+  const [showCancelled, setShowCancelled] = useState(false)
+  const [cancelling, setCancelling] = useState<CancelTarget | null>(null)
   const roster = useQuery({ queryKey: ROSTER, queryFn: fetchRoster })
   const ownStaffId = roster.data?.find((m) => m.user_id === user?.id)?.id ?? null
   // Until the zone is known there is no "today" to ask for.
   const date = chosen ?? (zone ? today(zone) : null)
   const range = date ? (view === 'day' ? [date, date] : weekOf(date)) : null
   const filter = view === 'week' && staffFilter !== EVERYONE ? staffFilter : undefined
-  const key = range ? [...SCHEDULE, range[0], range[1], filter ?? null] : SCHEDULE
+  const key = range ? [...SCHEDULE, range[0], range[1], filter ?? null, showCancelled] : SCHEDULE
   const schedule = useQuery({
     queryKey: key,
-    queryFn: () => fetchSchedule({ from: range![0], to: range![1], staff_id: filter }),
+    queryFn: () =>
+      fetchSchedule({
+        from: range![0],
+        to: range![1],
+        staff_id: filter,
+        include_cancelled: showCancelled,
+      }),
     enabled: range !== null,
     // Stepping a day is a different query; keep the grid up rather than flashing a skeleton.
     placeholderData: (previous) => previous,
+  })
+
+  const refreshAfterStatusChange = () => {
+    queryClient.invalidateQueries({ queryKey: SCHEDULE })
+    queryClient.invalidateQueries({ queryKey: APPOINTMENTS })
+    queryClient.invalidateQueries({ queryKey: AVAILABILITY })
+  }
+  const complete = useMutation({
+    mutationFn: completeAppointment,
+    onSuccess: (a) => toast.success(`Completed ${a.customer.first_name} ${a.customer.last_name}`),
+    onError: (error) => toast.error(`Not completed: ${error.message}`),
+    onSettled: refreshAfterStatusChange,
+  })
+  const noShow = useMutation({
+    mutationFn: markNoShow,
+    onSuccess: (a) => toast.success(`Marked ${a.customer.first_name} ${a.customer.last_name} a no-show`),
+    onError: (error) => toast.error(`Not marked: ${error.message}`),
+    onSettled: refreshAfterStatusChange,
+  })
+  const cancelOne = useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string | null }) => cancelAppointment(id, reason),
+    onSuccess: (a) => toast.success(`Cancelled ${a.customer.first_name} ${a.customer.last_name}`),
+    onError: (error) => toast.error(`Not cancelled: ${error.message}`),
+    onSettled: refreshAfterStatusChange,
+  })
+  const cancelWholeGroup = useMutation({
+    mutationFn: ({ groupId, reason }: { groupId: string; reason: string | null }) =>
+      cancelGroup(groupId, reason),
+    onSuccess: () => toast.success('Visit cancelled'),
+    onError: (error) => toast.error(`Not cancelled: ${error.message}`),
+    onSettled: refreshAfterStatusChange,
   })
 
   const change = useMutation({
@@ -209,6 +259,13 @@ export function SchedulePage() {
               </SelectContent>
             </Select>
           )}
+          <label className="flex items-center gap-1.5 text-sm text-muted-foreground">
+            <Checkbox
+              checked={showCancelled}
+              onCheckedChange={(checked) => setShowCancelled(checked === true)}
+            />
+            Show cancelled
+          </label>
         </div>
         <Button onClick={() => setBooking('blank')} disabled={!canManage || columns.length === 0}>
           <Plus aria-hidden />
@@ -229,6 +286,33 @@ export function SchedulePage() {
           canManage={canManage}
           onCreate={setBooking}
           onChange={(appointment, next) => change.mutate({ appointment, change: next })}
+          onComplete={(a) => complete.mutate(a.id)}
+          onNoShow={(a) => noShow.mutate(a.id)}
+          onCancel={(a) => setCancelling({ kind: 'appointment', appointment: a })}
+          onCancelGroup={(a) =>
+            a.booking_group_id && setCancelling({ kind: 'group', groupId: a.booking_group_id })
+          }
+        />
+      )}
+
+      {cancelling && (
+        <CancelConfirm
+          title={cancelling.kind === 'group' ? 'Cancel this visit?' : 'Cancel this appointment?'}
+          description={
+            cancelling.kind === 'group'
+              ? 'Every confirmed service in this visit is cancelled; anything already completed stays that way.'
+              : 'This frees its time and any room or equipment it was holding.'
+          }
+          pending={cancelOne.isPending || cancelWholeGroup.isPending}
+          onConfirm={(reason) => {
+            if (cancelling.kind === 'group') {
+              cancelWholeGroup.mutate({ groupId: cancelling.groupId, reason })
+            } else {
+              cancelOne.mutate({ id: cancelling.appointment.id, reason })
+            }
+            setCancelling(null)
+          }}
+          onCancel={() => setCancelling(null)}
         />
       )}
 
@@ -282,6 +366,10 @@ type MoveVariables = { appointment: Appointment; change: Change; before?: Schedu
 /** A move the server answered `override_available`: what was asked, the rules, and the
  *  picture from before it, for Cancel. */
 type PendingMove = MoveVariables & { rules: OverrideRule[] }
+
+/** What the cancel dialog is about: one appointment, or (from "Cancel visit") its whole
+ *  booking group. */
+type CancelTarget = { kind: 'appointment'; appointment: Appointment } | { kind: 'group'; groupId: string }
 
 /** Radix refuses an empty `SelectItem` value; ids are UUIDs, so nothing collides with this. */
 const EVERYONE = 'everyone'
@@ -403,6 +491,11 @@ function BookingDialog(props: {
   const [draft, setDraft] = useState({ first_name: '', last_name: '', email: '', phone: '' })
   const [notes, setNotes] = useState('')
   const [override, setOverride] = useState<OverrideRule[] | null>(null)
+  // "Add another service" (Task 18): the chain beyond the first link. Each has its own
+  // service and provider (or "any"); the whole visit shares one customer and one start.
+  const [links, setLinks] = useState<{ serviceId: string; staffId: string }[]>([])
+  const [groupPicked, setGroupPicked] = useState<GroupSlot | null>(null)
+  const chained = links.length > 0
 
   const catalog = useQuery({ queryKey: CATALOG, queryFn: fetchCatalog })
   const service = catalog.data?.find((s) => s.id === serviceId)
@@ -416,11 +509,24 @@ function BookingDialog(props: {
         to: date,
         staff_id: staffId === ANY ? undefined : staffId,
       }),
-    enabled: Boolean(service?.bookable && date),
+    enabled: Boolean(service?.bookable && date) && !chained,
     retry: false,
   })
+  const chainServiceIds = chained ? [serviceId, ...links.map((l) => l.serviceId)] : []
+  const chainStaffIds = chained
+    ? [staffId, ...links.map((l) => l.staffId)].map((s) => (s === ANY ? null : s))
+    : []
+  const chainReady = chained && chainServiceIds.every((id) => id !== '')
+  const groupAvailability = useQuery({
+    queryKey: [...AVAILABILITY, 'group', ...chainServiceIds, ...chainStaffIds, date],
+    queryFn: () =>
+      fetchGroupAvailability({ serviceIds: chainServiceIds, staffIds: chainStaffIds, from: date, to: date }),
+    enabled: chainReady && Boolean(date),
+    retry: false,
+  })
+  const groupSlots = groupAvailability.data?.days[0]?.slots ?? []
   const slots = availability.data?.days[0]?.slots ?? []
-  const timezone = availability.data?.timezone ?? props.schedule.timezone
+  const timezone = (chained ? groupAvailability.data?.timezone : availability.data?.timezone) ?? props.schedule.timezone
   const provider = providers.find((m) => m.id === staffId) ?? null
   // The drawn time is the pick as soon as a service makes it an offer — and again after
   // every change of service or provider — until a slot is picked by hand.
@@ -472,7 +578,60 @@ function BookingDialog(props: {
   const customerReady = existing
     ? customer !== null
     : draft.first_name.trim() !== '' && draft.last_name.trim() !== ''
-  const ready = Boolean(service && slot && customerReady)
+  const ready = chained
+    ? Boolean(service && groupPicked && chainReady && customerReady)
+    : Boolean(service && slot && customerReady)
+
+  const addLink = () => {
+    setLinks([...links, { serviceId: '', staffId: ANY }])
+    setGroupPicked(null)
+  }
+  const removeLink = (i: number) => {
+    setLinks(links.filter((_, index) => index !== i))
+    setGroupPicked(null)
+  }
+  const changeLink = (i: number, next: Partial<{ serviceId: string; staffId: string }>) => {
+    setLinks(links.map((l, index) => (index === i ? { ...l, ...next } : l)))
+    setGroupPicked(null)
+  }
+
+  const bookChain = useMutation({
+    mutationFn: () => {
+      const draftLinks: GroupLinkDraft[] = [
+        { service_id: serviceId, staff_id: staffId === ANY ? null : staffId },
+        ...links.map((l) => ({ service_id: l.serviceId, staff_id: l.staffId === ANY ? null : l.staffId })),
+      ]
+      const body = {
+        starts_at: (groupPicked as GroupSlot).starts_at,
+        links: draftLinks,
+        notes: notes.trim() || null,
+      } as Parameters<typeof bookGroup>[0]
+      if (existing) body.customer_id = (customer as Customer).id
+      else {
+        body.customer = {
+          first_name: draft.first_name.trim(),
+          last_name: draft.last_name.trim(),
+          email: draft.email.trim() || null,
+          phone: draft.phone.trim() || null,
+        }
+      }
+      return bookGroup(body)
+    },
+    onSuccess: (made) => {
+      toast.success(`Booked the visit — ${made.appointments.length} appointments linked`)
+      queryClient.invalidateQueries({ queryKey: SCHEDULE })
+      queryClient.invalidateQueries({ queryKey: APPOINTMENTS })
+      queryClient.invalidateQueries({ queryKey: AVAILABILITY })
+      props.onClose()
+    },
+    onError: (error) => {
+      if (stalePick(error)) {
+        toast.error(error.message, { duration: 8000 })
+        setGroupPicked(null)
+        queryClient.invalidateQueries({ queryKey: AVAILABILITY })
+      }
+    },
+  })
 
   const book = useMutation({
     mutationFn: (confirmed: Override) => {
@@ -521,8 +680,15 @@ function BookingDialog(props: {
     },
   })
 
-  const problem =
-    book.error && !stalePick(book.error) && !overridableRules(book.error) ? book.error.message : null
+  const problem = chained
+    ? bookChain.error && !stalePick(bookChain.error)
+      ? `${bookChain.error.message}${
+          refusedLinkIndex(bookChain.error) !== null ? ` (service ${refusedLinkIndex(bookChain.error)! + 1})` : ''
+        }`
+      : null
+    : book.error && !stalePick(book.error) && !overridableRules(book.error)
+      ? book.error.message
+      : null
   const unbookable =
     availability.error instanceof ApiError && availability.error.code === 'not_bookable'
       ? ((availability.error.body as { unbookable_reasons?: string[] })?.unbookable_reasons ?? [])
@@ -540,7 +706,7 @@ function BookingDialog(props: {
           </DialogDescription>
         </DialogHeader>
 
-        <Form onSubmit={() => ready && book.mutate({})}>
+        <Form onSubmit={() => ready && (chained ? bookChain.mutate() : book.mutate({}))}>
           <Field label="Service" htmlFor="booking-service">
             <Select value={serviceId} onValueChange={(id) => choose({ service: id })}>
               <SelectTrigger id="booking-service" aria-label="Service" className="w-full">
@@ -583,9 +749,102 @@ function BookingDialog(props: {
             </Field>
           </div>
 
+          {links.map((link, i) => {
+            const linkService = catalog.data?.find((s) => s.id === link.serviceId)
+            const linkProviders = props.roster.filter((m) => linkService?.staff_ids.includes(m.id))
+            return (
+              <div key={i} className="grid grid-cols-[1fr_1fr_auto] items-end gap-2 rounded-lg border p-2">
+                <Field label={`Service ${i + 2}`} htmlFor={`booking-service-${i}`}>
+                  <Select
+                    value={link.serviceId}
+                    onValueChange={(id) => changeLink(i, { serviceId: id, staffId: ANY })}
+                  >
+                    <SelectTrigger id={`booking-service-${i}`} aria-label={`Service ${i + 2}`} className="w-full">
+                      <SelectValue placeholder="Choose a service" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(catalog.data ?? []).map((s) => (
+                        <SelectItem key={s.id} value={s.id}>
+                          {s.name} · {s.duration_minutes} min
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Field label="Provider" htmlFor={`booking-provider-${i}`}>
+                  <Select
+                    value={link.staffId}
+                    onValueChange={(id) => changeLink(i, { staffId: id })}
+                    disabled={!linkService}
+                  >
+                    <SelectTrigger id={`booking-provider-${i}`} aria-label={`Provider for service ${i + 2}`} className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={ANY}>Any available</SelectItem>
+                      {linkProviders.map((m) => (
+                        <SelectItem key={m.id} value={m.id}>
+                          {m.display_name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  aria-label={`Remove service ${i + 2}`}
+                  onClick={() => removeLink(i)}
+                >
+                  Remove
+                </Button>
+              </div>
+            )
+          })}
+          <Button type="button" variant="outline" size="sm" className="self-start" onClick={addLink}>
+            <Plus aria-hidden />
+            Add another service
+          </Button>
+
           <fieldset className="flex flex-col gap-2">
             <legend className="mb-2 text-sm font-medium">Time</legend>
-            {!service ? (
+            {chained ? (
+              !chainReady ? (
+                <p className="text-xs text-muted-foreground">Choose every service to see times.</p>
+              ) : groupAvailability.isPending ? (
+                <Skeleton className="h-9 w-full" />
+              ) : groupAvailability.isError ? (
+                <p role="alert" className="text-xs text-destructive">
+                  {groupAvailability.error.message}
+                </p>
+              ) : groupSlots.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  Nothing free for the whole visit, back to back, on this day.
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-1.5" role="group" aria-label="Visit start">
+                  {groupSlots.map((s) => (
+                    <Button
+                      key={s.starts_at}
+                      type="button"
+                      size="sm"
+                      variant={groupPicked?.starts_at === s.starts_at ? 'default' : 'outline'}
+                      aria-pressed={groupPicked?.starts_at === s.starts_at}
+                      className="flex h-auto flex-col items-start px-2.5 py-1.5"
+                      onClick={() => setGroupPicked(s)}
+                    >
+                      <span className="tabular-nums">{clock(s.starts_at, timezone)}</span>
+                      <span className="text-[10px] font-normal opacity-80">
+                        {s.staff_ids
+                          .map((id) => props.roster.find((m) => m.id === id)?.display_name ?? '?')
+                          .join(' → ')}
+                      </span>
+                    </Button>
+                  ))}
+                </div>
+              )
+            ) : !service ? (
               <p className="text-xs text-muted-foreground">
                 {wanted
                   ? `Drawn for ${clock(wanted, timezone)}. Choose a service to book it.`
@@ -768,7 +1027,7 @@ function BookingDialog(props: {
             <Button type="button" variant="outline" onClick={props.onClose}>
               Cancel
             </Button>
-            <Button type="submit" disabled={!ready || book.isPending}>
+            <Button type="submit" disabled={!ready || book.isPending || bookChain.isPending}>
               Book
             </Button>
           </DialogFooter>

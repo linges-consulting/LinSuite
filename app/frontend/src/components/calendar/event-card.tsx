@@ -1,6 +1,7 @@
 import { useDraggable } from '@dnd-kit/core'
-import { CircleAlert } from 'lucide-react'
+import { CircleAlert, CircleCheck, Link2, UserX } from 'lucide-react'
 import type { ReactNode } from 'react'
+import { StatusMenu } from '@/components/calendar/status-menu'
 import type { Appointment } from '@/lib/api'
 import { readableOn } from '@/lib/calendar/contrast'
 import { overrideSummary } from '@/lib/calendar/overrides'
@@ -49,6 +50,7 @@ export function EventBody(
   // Two lines need 36 px; under that there is one, clipped — a 15-minute card included.
   const tiny = height < 36
   const overridden = overrideSummary(a)
+  const grouped = a.booking_group_id !== null
   return (
     <div
       className={cn('absolute', props.className)}
@@ -87,12 +89,16 @@ export function EventBody(
         }}
       >
         {tiny ? (
-          <span className="truncate font-medium">
+          <span className="flex items-center gap-1 truncate font-medium">
+            <StatusIcons appointment={a} grouped={grouped} />
             {title} · {props.startLabel}
           </span>
         ) : (
           <>
-            <span className="truncate font-semibold">{title}</span>
+            <span className="flex items-center gap-1 truncate font-semibold">
+              <StatusIcons appointment={a} grouped={grouped} />
+              {title}
+            </span>
             <span className="truncate tabular-nums opacity-90">
               {props.startLabel} – {props.endLabel}
             </span>
@@ -117,11 +123,40 @@ export function EventBody(
   )
 }
 
-/** Only `confirmed` moves. Task 18's lifecycle adds the rest; the gate is here already. */
+/** The small marks beside the title: linked (part of a group), completed, no-show. The
+ *  override marker stays where it was, top-right — these sit inline so a tiny card still
+ *  reads left to right instead of stacking badges in corners. */
+function StatusIcons(props: { appointment: Appointment; grouped: boolean }) {
+  const { appointment: a } = props
+  return (
+    <>
+      {props.grouped && (
+        <Link2 className="size-3 shrink-0" aria-label="Part of a linked visit" role="img" />
+      )}
+      {a.status === 'completed' && (
+        <CircleCheck className="size-3 shrink-0" aria-label="Completed" role="img" />
+      )}
+      {a.status === 'no_show' && (
+        <UserX className="size-3 shrink-0" aria-label="No-show" role="img" />
+      )}
+    </>
+  )
+}
+
+/** Only `confirmed` moves. Every other status is terminal (Task 18's ruling) — no reopen. */
 export const MOVABLE = new Set(['confirmed'])
 
 export function EventCard(
-  props: Placed & Look & { column: number; canManage: boolean; dragging: boolean },
+  props: Placed &
+    Look & {
+      column: number
+      canManage: boolean
+      dragging: boolean
+      onComplete?: (appointment: Appointment) => void
+      onCancel?: (appointment: Appointment) => void
+      onNoShow?: (appointment: Appointment) => void
+      onCancelGroup?: (appointment: Appointment) => void
+    },
 ) {
   const { appointment: a, column, top, height } = props
   const disabled = !props.canManage || !MOVABLE.has(a.status)
@@ -156,6 +191,19 @@ export function EventCard(
           disabled ? 'cursor-default' : 'cursor-grab touch-none active:cursor-grabbing',
         )}
       />
+      {props.canManage &&
+        a.status === 'confirmed' &&
+        props.onComplete &&
+        props.onCancel &&
+        props.onNoShow && (
+          <StatusMenu
+            appointment={a}
+            onComplete={() => props.onComplete!(a)}
+            onCancel={() => props.onCancel!(a)}
+            onNoShow={() => props.onNoShow!(a)}
+            onCancelGroup={a.booking_group_id && props.onCancelGroup ? () => props.onCancelGroup!(a) : undefined}
+          />
+        )}
       {!disabled && (
         /* oxlint-disable react/refs -- same: dnd-kit callbacks, no ref read in render */
         <div

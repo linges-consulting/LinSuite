@@ -44,6 +44,23 @@ const CATALOG = [
     bookable: true,
     unbookable_reasons: [],
   },
+  // The second link of a chain (Task 18) — Ana only, so the chain builder's provider list
+  // for it is a single name rather than Bo's too.
+  {
+    id: 'v2',
+    name: 'Hot Stone Add-on',
+    description: null,
+    duration_minutes: 30,
+    buffer_before_minutes: 0,
+    buffer_after_minutes: 0,
+    price_cents: 5000,
+    bookable_online: true,
+    sort_order: 1,
+    requirements: [],
+    staff_ids: ['s1'],
+    bookable: true,
+    unbookable_reasons: [],
+  },
 ]
 
 // 10:00 and 10:15 Toronto on a summer day, as the server sends them.
@@ -107,6 +124,22 @@ const SHORT = {
   customer: { ...PRIYA, id: 'c3', first_name: 'Quick', last_name: 'Trim' },
 }
 
+// One link of a two-service visit (Task 18) — its own staff, sharing `booking_group_id`.
+// The other link, and the transitions themselves, are `tests/schedule-lifecycle-*.test.tsx`.
+const LINK_A = { ...BOOKED, id: 'ga0', booking_group_id: 'g1' }
+
+const CANCELLED = {
+  ...BOOKED,
+  id: 'a5',
+  status: 'cancelled',
+  cancelled_at: '2026-06-15T13:00:00Z',
+  cancel_reason: 'Client called it off',
+  starts_at: TEN_FIFTEEN,
+  ends_at: '2026-06-15T15:15:00Z',
+  resources: [],
+  customer: { ...PRIYA, id: 'c5', first_name: 'Gone', last_name: 'Cancelled' },
+}
+
 type Call = { url: string; method: string; body?: any }
 
 function fakeServer({
@@ -123,6 +156,9 @@ function fakeServer({
   timeOff = [] as any[],
   closures = [] as any[],
   timezone = 'America/Toronto',
+  groupSlots = [] as any[],
+  /** `POST /api/appointments/group` refuses with this instead of booking. */
+  groupBookingRefused = null as null | { status: number; body: any },
 } = {}) {
   const overridable = (detail: string) =>
     Response.json(
@@ -169,6 +205,7 @@ function fakeServer({
       if (url.startsWith('/api/schedule?')) {
         const params = new URLSearchParams(url.split('?')[1])
         const staff = params.get('staff_id')
+        const includeCancelled = params.get('include_cancelled') === 'true'
         const from = params.get('from')!
         const dates = [from]
         while (dates[dates.length - 1] < params.get('to')!) {
@@ -197,7 +234,19 @@ function fakeServer({
           ),
           time_off: timeOff,
           closures,
-          appointments: appointments.filter((a) => !staff || a.staff.id === staff),
+          appointments: appointments.filter(
+            (a) => (!staff || a.staff.id === staff) && (includeCancelled || a.status !== 'cancelled'),
+          ),
+        })
+      }
+      if (url.startsWith('/api/availability/group?')) {
+        const params = new URLSearchParams(url.split('?')[1])
+        return Response.json({
+          service_ids: params.get('services')!.split(','),
+          timezone: 'America/Toronto',
+          granularity_minutes: 15,
+          horizon_ends_on: '2026-09-13',
+          days: [{ date: params.get('from'), slots: groupSlots }],
         })
       }
       if (url.startsWith('/api/availability?')) {
@@ -287,6 +336,66 @@ function fakeServer({
           )
         }
         return Response.json(BOOKED, { status: 201 })
+      }
+      // --- booking groups and the status lifecycle (Task 18) -----------------------------
+      if (url === '/api/appointments/group' && method === 'POST') {
+        if (groupBookingRefused) return Response.json(groupBookingRefused.body, { status: groupBookingRefused.status })
+        const groupId = 'g1'
+        const made = (body.links as any[]).map((l, i) => {
+          const catalogService = CATALOG.find((s) => s.id === l.service_id)!
+          const staffId = l.staff_id ?? catalogService.staff_ids[0]
+          const member = ROSTER.find((s) => s.id === staffId)!
+          return {
+            ...BOOKED,
+            id: `ga${i}`,
+            booking_group_id: groupId,
+            service: { id: catalogService.id, name: catalogService.name },
+            staff: { id: member.id, display_name: member.display_name, colour: member.colour },
+          }
+        })
+        return Response.json({ booking_group_id: groupId, appointments: made }, { status: 201 })
+      }
+      if (url.startsWith('/api/appointments/group/') && url.endsWith('/cancel') && method === 'POST') {
+        const groupId = url.split('/')[4]
+        const members = appointments.filter((a) => a.booking_group_id === groupId)
+        for (const m of members) {
+          if (m.status !== 'confirmed') continue
+          Object.assign(m, {
+            status: 'cancelled',
+            cancelled_at: new Date().toISOString(),
+            cancel_reason: body?.reason ?? null,
+            resources: [],
+          })
+        }
+        return Response.json({ booking_group_id: groupId, appointments: members })
+      }
+      if (url.startsWith('/api/appointments/') && method === 'POST') {
+        const [, , , id, action] = url.split('/')
+        const a = appointments.find((x) => x.id === id)
+        if (!a) return Response.json({}, { status: 404 })
+        if (a.status !== 'confirmed') {
+          return Response.json(
+            { detail: `A ${a.status} appointment cannot be changed that way.`, code: 'invalid_transition' },
+            { status: 409 },
+          )
+        }
+        if (action === 'complete') {
+          Object.assign(a, { status: 'completed', completed_at: new Date().toISOString() })
+          return Response.json(a)
+        }
+        if (action === 'no-show') {
+          Object.assign(a, { status: 'no_show', no_show_at: new Date().toISOString(), resources: [] })
+          return Response.json(a)
+        }
+        if (action === 'cancel') {
+          Object.assign(a, {
+            status: 'cancelled',
+            cancelled_at: new Date().toISOString(),
+            cancel_reason: body?.reason ?? null,
+            resources: [],
+          })
+          return Response.json(a)
+        }
       }
       return Response.json({}, { status: 404 })
     }),
@@ -989,4 +1098,130 @@ test('a column whose person may run two at once is headed with ×2', async () =>
   const marker = screen.getByLabelText('Up to 2 appointments at once')
   expect(marker).toHaveTextContent('×2')
   expect(screen.getAllByLabelText(/Up to \d+ appointments at once/)).toHaveLength(1)
+})
+
+// --- the status lifecycle (Task 18) ----------------------------------------------------------
+
+// The card menu's transitions (Complete, No-show, Cancel-with-reason, "Cancel visit" for a
+// group) are in `tests/schedule-lifecycle.test.tsx` — its own file because a Radix
+// `DropdownMenu` opened on `pointerdown` stops responding to a second `userEvent.setup()`'s
+// pointerdown once this file's many drag tests have run (see `tests/user-menu.test.tsx`'s
+// own note on the same class of bug). Isolating them in a fresh module sidesteps it.
+
+test('a terminal appointment has no menu at all', async () => {
+  onTheFifteenth()
+  fakeServer({ appointments: [{ ...BOOKED, status: 'completed', completed_at: TEN }] })
+  renderSchedule()
+
+  await screen.findByRole('region', { name: 'Bo Chen' })
+  expect(screen.queryByRole('button', { name: 'Actions for Priya Nair' })).not.toBeInTheDocument()
+})
+
+test('"Show cancelled" is off by default; toggling it fetches and packs the cancelled card too', async () => {
+  onTheFifteenth()
+  // BOOKED and CANCELLED overlap (10:00-11:15, 10:15-11:15) on Bo's column.
+  fakeServer({ appointments: [BOOKED, CANCELLED] })
+  const user = userEvent.setup()
+  renderSchedule()
+
+  const bo = await screen.findByRole('region', { name: 'Bo Chen' })
+  await waitFor(() => expect(within(bo).getByTestId(`event-${BOOKED.id}`)).toBeInTheDocument())
+  expect(within(bo).queryByTestId(`event-${CANCELLED.id}`)).not.toBeInTheDocument()
+  // Alone, the confirmed card takes the full column width.
+  expect(within(bo).getByTestId(`event-${BOOKED.id}`).parentElement).toHaveStyle({
+    width: 'calc(100% - 2px)',
+  })
+
+  await user.click(screen.getByRole('checkbox', { name: 'Show cancelled' }))
+
+  const cancelledCard = (await within(bo).findByTestId(`event-${CANCELLED.id}`)).parentElement!
+  expect(cancelledCard.className).toMatch(/line-through/)
+  // Now packed side by side: half the column each, not full width.
+  expect(within(bo).getByTestId(`event-${BOOKED.id}`).parentElement).toHaveStyle({
+    width: 'calc(50% - 2px)',
+  })
+  expect(cancelledCard).toHaveStyle({ width: 'calc(50% - 2px)' })
+})
+
+test('a card in a linked visit carries a link marker', async () => {
+  onTheFifteenth()
+  fakeServer({ appointments: [LINK_A] })
+  renderSchedule()
+
+  const bo = await screen.findByRole('region', { name: 'Bo Chen' })
+  expect(within(bo).getByRole('img', { name: 'Part of a linked visit' })).toBeInTheDocument()
+})
+
+// --- booking groups: the chain builder and the group slot picker (Task 18) --------------------
+
+test('"Add another service" switches the picker to chain-valid starts and books the group', async () => {
+  onTheFifteenth()
+  const calls = fakeServer({ groupSlots: [{ starts_at: TEN, staff_ids: ['s2', 's1'] }] })
+  const user = userEvent.setup()
+  renderSchedule()
+
+  await user.click(await screen.findByRole('button', { name: 'New appointment' }))
+  const dialog = await screen.findByRole('dialog', { name: 'New appointment' })
+  await user.click(within(dialog).getByRole('combobox', { name: 'Service' }))
+  await user.click(await screen.findByRole('option', { name: /Swedish Massage/ }))
+  await user.click(within(dialog).getByRole('combobox', { name: 'Provider' }))
+  await user.click(await screen.findByRole('option', { name: 'Bo Chen' }))
+
+  await user.click(within(dialog).getByRole('button', { name: 'Add another service' }))
+  await user.click(within(dialog).getByRole('combobox', { name: 'Service 2' }))
+  await user.click(await screen.findByRole('option', { name: /Hot Stone Add-on/ }))
+
+  // The single-service picker is gone; the visit-start picker offers the chain's own start.
+  expect(within(dialog).queryByRole('group', { name: 'Any available' })).not.toBeInTheDocument()
+  const startButton = await within(dialog).findByRole('button', { name: /10:00 AM/ })
+  await user.click(startButton)
+
+  await user.type(within(dialog).getByRole('textbox', { name: 'Find a client' }), 'pri')
+  await user.click(await screen.findByRole('button', { name: /Priya Nair/ }))
+  await user.click(within(dialog).getByRole('button', { name: 'Book' }))
+
+  await waitFor(() => expect(calls.some((c) => c.url === '/api/appointments/group')).toBe(true))
+  const posted = calls.find((c) => c.url === '/api/appointments/group')!
+  expect(posted.body).toMatchObject({
+    starts_at: TEN,
+    links: [
+      { service_id: 'v1', staff_id: 's2' },
+      { service_id: 'v2', staff_id: null },
+    ],
+    customer_id: 'c1',
+  })
+  expect(await screen.findByText('Booked the visit — 2 appointments linked')).toBeInTheDocument()
+})
+
+test('a group booking refused at the second link names it in the error', async () => {
+  onTheFifteenth()
+  fakeServer({
+    groupSlots: [{ starts_at: TEN, staff_ids: ['s2', 's1'] }],
+    groupBookingRefused: {
+      status: 422,
+      body: {
+        detail: [{ type: 'value_error', loc: ['body', 'links', 1, 'staff_id'], msg: 'That staff member cannot deliver this service.' }],
+        code: 'invalid_link',
+        link_index: 1,
+      },
+    },
+  })
+  const user = userEvent.setup()
+  renderSchedule()
+
+  await user.click(await screen.findByRole('button', { name: 'New appointment' }))
+  const dialog = await screen.findByRole('dialog', { name: 'New appointment' })
+  await user.click(within(dialog).getByRole('combobox', { name: 'Service' }))
+  await user.click(await screen.findByRole('option', { name: /Swedish Massage/ }))
+  await user.click(within(dialog).getByRole('combobox', { name: 'Provider' }))
+  await user.click(await screen.findByRole('option', { name: 'Bo Chen' }))
+  await user.click(within(dialog).getByRole('button', { name: 'Add another service' }))
+  await user.click(within(dialog).getByRole('combobox', { name: 'Service 2' }))
+  await user.click(await screen.findByRole('option', { name: /Hot Stone Add-on/ }))
+  await user.click(await within(dialog).findByRole('button', { name: /10:00 AM/ }))
+  await user.type(within(dialog).getByRole('textbox', { name: 'Find a client' }), 'pri')
+  await user.click(await screen.findByRole('button', { name: /Priya Nair/ }))
+  await user.click(within(dialog).getByRole('button', { name: 'Book' }))
+
+  expect(await within(dialog).findByText(/service 2/)).toBeInTheDocument()
 })

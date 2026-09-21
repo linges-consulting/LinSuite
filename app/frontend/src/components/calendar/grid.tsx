@@ -51,6 +51,10 @@ export function Grid(props: {
   canManage: boolean
   onCreate: (prefill: Prefill) => void
   onChange: (appointment: Appointment, change: Change) => void
+  onComplete?: (appointment: Appointment) => void
+  onCancel?: (appointment: Appointment) => void
+  onNoShow?: (appointment: Appointment) => void
+  onCancelGroup?: (appointment: Appointment) => void
 }) {
   const { schedule, columns, canManage } = props
   const zone = schedule.timezone
@@ -435,6 +439,10 @@ export function Grid(props: {
                     colour={colour(p.appointment.staff.id)}
                     startLabel={clock(p.appointment.starts_at, zone)}
                     endLabel={clock(p.appointment.ends_at, zone)}
+                    onComplete={props.onComplete}
+                    onCancel={props.onCancel}
+                    onNoShow={props.onNoShow}
+                    onCancelGroup={props.onCancelGroup}
                   />
                 ))}
                 <DragLayer

@@ -1078,6 +1078,12 @@ export type Appointment = {
   price_cents: number
   notes: string | null
   booking_group_id: string | null
+  /** When each terminal state was reached — null until it is. `completed_at` is the event
+   *  later phases (treatment receipts, package credits, commission) key off. */
+  completed_at: string | null
+  cancelled_at: string | null
+  cancel_reason: string | null
+  no_show_at: string | null
   /** The advisory rules this was confirmed past, and why — null when none were. */
   overridden_rules: OverrideRule[] | null
   override_reason: string | null
@@ -1087,16 +1093,44 @@ export type Appointment = {
   resources: { id: string; name: string; kind: ResourceKind }[]
 }
 
-/** `from`/`to` are business-local dates, `to` inclusive, at most 31 days apart. */
+/** `from`/`to` are business-local dates, `to` inclusive, at most 31 days apart. Cancelled
+ *  appointments are left out unless `include_cancelled` — the calendar's toggle. */
 export async function fetchAppointments(query: {
   from: string
   to: string
   staff_id?: string
+  include_cancelled?: boolean
 }): Promise<{ timezone: string; appointments: Appointment[] }> {
   const params = new URLSearchParams({ from: query.from, to: query.to })
   if (query.staff_id) params.set('staff_id', query.staff_id)
+  if (query.include_cancelled) params.set('include_cancelled', 'true')
   const res = await fetch(`/api/appointments?${params}`)
   if (!res.ok) throw await failure(res, 'Could not load the appointments')
+  return res.json()
+}
+
+/**
+ * The status lifecycle (Task 18): `confirmed → completed | cancelled | no_show`, every one
+ * terminal — no reopen in M1. Each is its own request rather than a generic "set status" so
+ * the network tab already says what happened. A 409 `invalid_transition` is an appointment
+ * that is not `confirmed` any more; a no-show attempted before `starts_at` is 422
+ * `not_yet_started`.
+ */
+export async function completeAppointment(id: string): Promise<Appointment> {
+  const res = await send('POST', `/api/appointments/${id}/complete`, {})
+  if (!res.ok) throw await failure(res, 'Could not complete the appointment')
+  return res.json()
+}
+
+export async function cancelAppointment(id: string, reason?: string | null): Promise<Appointment> {
+  const res = await send('POST', `/api/appointments/${id}/cancel`, { reason: reason || null })
+  if (!res.ok) throw await failure(res, 'Could not cancel the appointment')
+  return res.json()
+}
+
+export async function markNoShow(id: string): Promise<Appointment> {
+  const res = await send('POST', `/api/appointments/${id}/no-show`, {})
+  if (!res.ok) throw await failure(res, 'Could not mark this a no-show')
   return res.json()
 }
 
@@ -1181,14 +1215,17 @@ export type Schedule = {
 }
 
 /** `from`/`to` are business-local dates, `to` inclusive, at most 31 days apart; `staff_id`
- *  narrows every list to one column. */
+ *  narrows every list to one column. Cancelled appointments are left out unless
+ *  `include_cancelled` — the grid's "Show cancelled" toggle. */
 export async function fetchSchedule(query: {
   from: string
   to: string
   staff_id?: string
+  include_cancelled?: boolean
 }): Promise<Schedule> {
   const params = new URLSearchParams({ from: query.from, to: query.to })
   if (query.staff_id) params.set('staff_id', query.staff_id)
+  if (query.include_cancelled) params.set('include_cancelled', 'true')
   const res = await fetch(`/api/schedule?${params}`)
   if (!res.ok) throw await failure(res, 'Could not load the schedule')
   return res.json()
@@ -1206,5 +1243,76 @@ export async function changeAppointment(
 ): Promise<Appointment> {
   const res = await send('PATCH', `/api/appointments/${id}`, change)
   if (!res.ok) throw await failure(res, 'Could not move the appointment')
+  return res.json()
+}
+
+// --- booking groups (Task 18) ----------------------------------------------------------------
+
+/** One start of a chain, with the staff resolved per link — in the same order the services
+ *  were asked in, so the picker can label each with the service it belongs to. */
+export type GroupSlot = { starts_at: string; staff_ids: string[] }
+
+export type GroupAvailability = {
+  service_ids: string[]
+  timezone: string
+  granularity_minutes: number
+  horizon_ends_on: string
+  days: { date: string; slots: GroupSlot[] }[]
+}
+
+/**
+ * Chain-valid starts for an ordered visit: every start of the first service from which
+ * every following one is offered, back to back. `staffIds` is one per service, in order —
+ * a person, or `null` for "any" — and defaults to "any" for every link when left out.
+ */
+export async function fetchGroupAvailability(query: {
+  serviceIds: string[]
+  from: string
+  to: string
+  staffIds?: (string | null)[]
+}): Promise<GroupAvailability> {
+  const params = new URLSearchParams({
+    services: query.serviceIds.join(','),
+    from: query.from,
+    to: query.to,
+  })
+  if (query.staffIds) params.set('staff', query.staffIds.map((s) => s ?? 'any').join(','))
+  const res = await fetch(`/api/availability/group?${params}`)
+  if (!res.ok) throw await failure(res, 'Could not load the available times')
+  return res.json()
+}
+
+export type GroupLinkDraft = { service_id: string; staff_id: string | null } & Override
+
+export type GroupBookingDraft = {
+  starts_at: string
+  links: GroupLinkDraft[]
+  customer_id?: string
+  customer?: CustomerDraft
+  notes?: string | null
+}
+
+export type Group = { booking_group_id: string; appointments: Appointment[] }
+
+/** A refusal from `POST /appointments/group`: the same code a single booking would send for
+ *  that link, plus which one. `overridableRules` and `stalePick`-style checks still work on
+ *  the error directly; this reads the extra field. */
+export function refusedLinkIndex(error: unknown): number | null {
+  if (!(error instanceof ApiError)) return null
+  const index = (error.body as { link_index?: unknown })?.link_index
+  return typeof index === 'number' ? index : null
+}
+
+export async function bookGroup(draft: GroupBookingDraft): Promise<Group> {
+  const res = await send('POST', '/api/appointments/group', draft)
+  if (!res.ok) throw await failure(res, 'Could not book the visit')
+  return res.json()
+}
+
+export async function cancelGroup(groupId: string, reason?: string | null): Promise<Group> {
+  const res = await send('POST', `/api/appointments/group/${groupId}/cancel`, {
+    reason: reason || null,
+  })
+  if (!res.ok) throw await failure(res, 'Could not cancel the visit')
   return res.json()
 }
