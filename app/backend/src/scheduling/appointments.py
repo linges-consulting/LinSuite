@@ -65,7 +65,7 @@ from core.errors import CAPABILITY_REQUIRED, Forbidden
 from customers.models import Customer
 from customers.routes import CustomerIn, create_customer
 from scheduling._admin_forms import blank_to_none, refuse
-from scheduling.availability import Interval, Slot, advisory_breaches
+from scheduling.availability import Interval, Occupant, Slot, advisory_breaches, waive_handover
 from scheduling.clock import localize
 from scheduling.models import Appointment, AppointmentResource, Staff
 from scheduling.services import CatalogServiceOut, RequirementOut, catalog_entry
@@ -249,16 +249,26 @@ async def offered_slot(
     starts_at,
     *,
     excluding: uuid.UUID | None = None,
+    handover_group_id: uuid.UUID | None = None,
     relax_advisory: bool = False,
 ) -> tuple[Computed, Slot | None]:
     """The engine's answer for the local day `starts_at` falls on, and the slot at exactly
     that instant if it is offered to one of `staff_ids`. Its own function so a test can hold
     the door open between the check and the insert (`test_two_concurrent_bookings...`).
-    `excluding` is the appointment being moved, left out of what is busy; `relax_advisory`
-    is the override question (module docstring), asked here and nowhere else."""
+    `excluding` is the appointment being moved, left out of what is busy; `handover_group_id`
+    is the same visit's own buffer waiver (fix round 2), threaded straight through to
+    `compute`; `relax_advisory` is the override question (module docstring), asked here and
+    nowhere else."""
     day = starts_at.astimezone(await business_zone(db)).date()
     computed = await compute(
-        db, service, staff_ids, day, day, excluding=excluding, relax_advisory=relax_advisory
+        db,
+        service,
+        staff_ids,
+        day,
+        day,
+        excluding=excluding,
+        handover_group_id=handover_group_id,
+        relax_advisory=relax_advisory,
     )
     slot = next((s for s in computed.days[day] if s.starts_at == starts_at), None)
     return computed, slot
@@ -346,6 +356,87 @@ def assign_resources(
             return None
         chosen.append(pick)
     return chosen
+
+
+async def recompute_group_periods(
+    db: AsyncSession, booking_group_id: uuid.UUID, *, also_consider: Occupant | None = None
+) -> None:
+    """Keep every occupying member's resource claims in sync with the group's *current*
+    adjacency (fix round 2) — call this after booking, cancelling, no-showing, moving or
+    resizing any member. `appointment_resources.period` is the one place the handover waiver
+    is actually stored, because a GiST exclusion constraint has no conditional form the way
+    `waive_handover` and the staff-concurrency trigger do; everything about *which* period is
+    correct is still derived fresh, every call, from the members' own snapshot buffers
+    (never mutated) and their current status and position — this function's only job is to
+    make the stored column agree with that answer.
+
+    `also_consider` is one appointment not yet in the database — `book_group`'s next link,
+    already known (its start is the previous link's own `ends_at`) but not yet inserted —
+    folded into the adjacency check without a query pretending it exists.
+
+    Narrower periods are written first, in their own statement, and only then anything that
+    widens: the exclusion constraint is not deferred, so a member growing back into space a
+    sibling has just vacated must never be checked before that vacancy actually lands. A
+    widen that still collides — an outsider now legitimately holds part of that space — is
+    caught in its own savepoint and left at its current, narrower period: **cancelling,
+    no-showing or moving a member out of a handover never fails** because some other member
+    could not fully spring back to its catalog buffer.
+    """
+    members = list(
+        await db.scalars(
+            select(Appointment)
+            .where(
+                Appointment.booking_group_id == booking_group_id,
+                Appointment.status.not_in(("cancelled", "no_show")),
+            )
+            .execution_options(populate_existing=True)
+        )
+    )
+    occupants = [
+        Occupant(
+            id=m.id,
+            booking_group_id=m.booking_group_id,
+            status=m.status,
+            starts_at=m.starts_at,
+            ends_at=m.ends_at,
+        )
+        for m in members
+    ]
+    if also_consider is not None:
+        occupants = [*occupants, also_consider]
+
+    narrow: list[tuple[AppointmentResource, Range]] = []
+    widen: list[tuple[AppointmentResource, Range]] = []
+    for member in members:
+        occupant = next(o for o in occupants if o.id == member.id)
+        before, after = waive_handover(
+            occupant, occupants, member.buffer_before_minutes, member.buffer_after_minutes
+        )
+        wanted = Range(
+            member.starts_at - timedelta(minutes=before),
+            member.ends_at + timedelta(minutes=after),
+            bounds="[)",
+        )
+        for ar in member.resources:
+            if ar.period == wanted:
+                continue
+            shrinking = ar.period.lower <= wanted.lower and ar.period.upper >= wanted.upper
+            (narrow if shrinking else widen).append((ar, wanted))
+
+    for ar, wanted in narrow:
+        ar.period = wanted
+    if narrow:
+        await db.flush()
+
+    for ar, wanted in widen:
+        try:
+            async with db.begin_nested():
+                ar.period = wanted
+                await db.flush()
+        except IntegrityError as error:
+            if not _is_slot_taken(error):
+                raise
+            await db.refresh(ar, attribute_names=["period"])
 
 
 def _with_link(content: dict, link_index: int | None) -> dict:
@@ -702,6 +793,7 @@ async def change_appointment(
         [appointment.staff_id],
         starts_at,
         excluding=appointment.id,
+        handover_group_id=appointment.booking_group_id,
         relax_advisory=payload.override,
     )
     if slot is None:
@@ -712,6 +804,7 @@ async def change_appointment(
                 [appointment.staff_id],
                 starts_at,
                 excluding=appointment.id,
+                handover_group_id=appointment.booking_group_id,
                 relax_advisory=True,
             )
             if reachable is not None:
@@ -736,6 +829,42 @@ async def change_appointment(
         else []
     )
 
+    # The handover waiver (fix round 2): this appointment's own resource periods are built
+    # correctly waived from the start, against its group's *other* occupying members as they
+    # stand right now — never inserted full and narrowed after, which is what would risk
+    # tripping the exclusion constraint against a sibling whose own period has not caught up
+    # yet. `recompute_group_periods` below is what catches the sibling side of the same move.
+    own_before, own_after = before, after
+    if appointment.booking_group_id is not None:
+        siblings = [
+            Occupant(
+                id=row.id,
+                booking_group_id=row.booking_group_id,
+                status=row.status,
+                starts_at=row.starts_at,
+                ends_at=row.ends_at,
+            )
+            for row in await db.scalars(
+                select(Appointment).where(
+                    Appointment.booking_group_id == appointment.booking_group_id,
+                    Appointment.id != appointment.id,
+                    Appointment.status.not_in(("cancelled", "no_show")),
+                )
+            )
+        ]
+        own_before, own_after = waive_handover(
+            Occupant(
+                id=appointment.id,
+                booking_group_id=appointment.booking_group_id,
+                status="confirmed",
+                starts_at=slot.starts_at,
+                ends_at=slot.ends_at,
+            ),
+            siblings,
+            before,
+            after,
+        )
+
     appointment.starts_at = slot.starts_at
     appointment.ends_at = slot.ends_at
     appointment.duration_minutes = duration
@@ -743,12 +872,20 @@ async def change_appointment(
     appointment.override_reason = payload.override_reason if rules else None
     appointment.resources = [
         AppointmentResource(
-            resource_id=r.id, kind=r.kind, period=Range(span[0], span[1], bounds="[)")
+            resource_id=r.id,
+            kind=r.kind,
+            period=Range(
+                slot.starts_at - timedelta(minutes=own_before),
+                slot.ends_at + timedelta(minutes=own_after),
+                bounds="[)",
+            ),
         )
         for r in claimed
     ]
     try:
         await db.flush()
+        if appointment.booking_group_id is not None:
+            await recompute_group_periods(db, appointment.booking_group_id)
     except IntegrityError as error:
         await db.rollback()
         if not _is_slot_taken(error):
@@ -858,6 +995,11 @@ async def cancel_appointment(
     if appointment.status != "confirmed":
         return invalid_transition(appointment.status)
     _cancel(db, appointment, actor, payload.reason)
+    if appointment.booking_group_id is not None:
+        # The handover waiver, restored (fix round 2): nothing was ever stored on a sibling
+        # to undo — this appointment simply stops matching `waive_handover`'s occupying test
+        # the moment its status flips, and the sibling's resource period springs back to it.
+        await recompute_group_periods(db, appointment.booking_group_id)
     await db.commit()
     return _out(await _load(db, appointment.id))
 
@@ -886,6 +1028,9 @@ async def mark_no_show(appointment_id: uuid.UUID, actor: Scheduler, db: SessionD
         actor_user_id=actor.id,
         metadata={},
     )
+    if appointment.booking_group_id is not None:
+        # Same restoration as a cancel (fix round 2) — a no-show stops occupying too.
+        await recompute_group_periods(db, appointment.booking_group_id)
     await db.commit()
     return _out(await _load(db, appointment.id))
 
@@ -956,14 +1101,23 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
     group_id = uuid.uuid4()
     created: list[Appointment] = []
     cursor = payload.starts_at
-    # The buffer waiver (fix round 1, Important): same client, no turnover, so a link's
-    # after-buffer and the very next link's before-buffer never count against each other —
-    # for the staff member and for a shared resource — but every other buffer still applies
-    # in full. `previous_*` is one step of lookback, matching the ruling's scope
-    # ("consecutive links" only, never A and C around a B that changes staff or room).
+    # The handover waiver (fix round 2): same client, no turnover, so a link's after-buffer
+    # and the very next link's before-buffer never count against each other — for the staff
+    # member and for a shared resource — but every other buffer still applies in full.
+    # `previous_appointment` is one step of lookback, matching `waive_handover`'s own scope
+    # ("consecutive links" only, never A and C around a B that changes staff or room). Every
+    # buffer *column* on every row here is always the catalog's own snapshot value, full,
+    # untouched — the waiver only ever shapes a resource's stored `period`
+    # (`recompute_group_periods`) and, for staff, is applied fresh at read time
+    # (`slots.busy_intervals`'s `handover_group_id`) and by the trigger itself.
+    #
+    # This link's own check excludes the immediately preceding link *outright* — not via
+    # `handover_group_id`, which only waives a facing buffer between rows the database
+    # already has, and this one does not exist yet. Their raw spans only ever touch, never
+    # overlap (`cursor` is the previous link's own `ends_at`), so full exclusion can never
+    # let two links double-book the same instant; a link with different staff or a different
+    # resource was never going to see the excluded sibling as busy in the first place.
     previous_appointment: Appointment | None = None
-    previous_staff_id: uuid.UUID | None = None
-    previous_resources: dict[uuid.UUID, AppointmentResource] = {}
     try:
         for i, link in enumerate(payload.links):
             service = await catalog_entry(db, link.service_id)
@@ -982,13 +1136,6 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
                     )
                 await authorize_override(db, actor, claims, link.staff_id)
 
-            # The immediately preceding link is excluded outright from this link's busy
-            # check — not just its buffer. Their raw spans only ever touch, never overlap
-            # (`cursor` is the previous link's own `ends_at`), so this can never let two
-            # links double-book the same instant; it only stops a sibling that has not
-            # committed yet from making itself look busy to the very next link in its own
-            # chain. A different staff member or resource was never going to see it as busy
-            # in the first place, so excluding it is a no-op there.
             exclude_id = previous_appointment.id if previous_appointment is not None else None
             computed, slot = await offered_slot(
                 db, service, candidates, cursor, excluding=exclude_id, relax_advisory=link.override
@@ -996,7 +1143,12 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
             if slot is None:
                 if not link.override and link.staff_id is not None:
                     relaxed, reachable = await offered_slot(
-                        db, service, candidates, cursor, excluding=exclude_id, relax_advisory=True
+                        db,
+                        service,
+                        candidates,
+                        cursor,
+                        excluding=exclude_id,
+                        relax_advisory=True,
                     )
                     if reachable is not None:
                         before = service.buffer_before_minutes
@@ -1013,51 +1165,51 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
                 .order_by(Staff.sort_order, Staff.display_name, Staff.id)
                 .limit(1)
             )
-            same_staff_as_previous = previous_staff_id is not None and staff_id == previous_staff_id
-            before = 0 if same_staff_as_previous else service.buffer_before_minutes
-            # This link's own after-buffer is stored in full; if the *next* link turns out
-            # to share this same staff member, it is waived retroactively below, once that
-            # is known — exactly the same lookback, one link later.
-            after = service.buffer_after_minutes
-            # Resources are searched for with the *full* buffer, never the staff-waived one:
-            # a room this link picks has to be genuinely free for its own real turnover,
-            # whether or not the staff member happens to be continuing straight through. The
-            # waiver only narrows the *stored* period afterwards, and only for whichever
-            # resource turns out to actually be the one shared with the previous link.
-            search_span = (
-                slot.starts_at - timedelta(minutes=service.buffer_before_minutes),
-                slot.ends_at + timedelta(minutes=service.buffer_after_minutes),
-            )
+            before, after = service.buffer_before_minutes, service.buffer_after_minutes
             claimed = assign_resources(
-                service.requirements, computed.resources, computed.resource_busy, search_span
+                service.requirements,
+                computed.resources,
+                computed.resource_busy,
+                (
+                    slot.starts_at - timedelta(minutes=before),
+                    slot.ends_at + timedelta(minutes=after),
+                ),
             )
             if claimed is None:
                 return not_offered(link_index=i)
-            rules = (
-                broken_rules(
-                    computed,
-                    staff_id,
-                    slot,
-                    service.buffer_before_minutes,
-                    service.buffer_after_minutes,
-                )
-                if link.override
-                else []
-            )
-            shared_resource_ids = {r.id for r in claimed if r.id in previous_resources}
+            rules = broken_rules(computed, staff_id, slot, before, after) if link.override else []
 
-            # Waive the shared edge on the *previous* link now — and flush it in its own
-            # statement, before this link's own insert. `ex_appointment_resources_no_overlap`
-            # and the staff-concurrency trigger both fire per statement (neither is
-            # deferred): the previous link's row must already carry its shrunk buffer by the
-            # time this link's row is checked against it, not the other way around.
-            if same_staff_as_previous or shared_resource_ids:
-                if same_staff_as_previous and previous_appointment is not None:
-                    previous_appointment.buffer_after_minutes = 0
-                for rid in shared_resource_ids:
-                    prev_ar = previous_resources[rid]
-                    prev_ar.period = Range(prev_ar.period.lower, slot.starts_at, bounds="[)")
-                await db.flush()
+            # This link's own resource periods are built correctly waived from the start,
+            # against the link immediately before it (the only one it could possibly be
+            # touching, by chain construction) — never inserted full and narrowed after. The
+            # *previous* link's own periods are narrowed first, in their own statement,
+            # `also_consider`ing this not-yet-inserted link — the exclusion constraint is not
+            # deferred, so the previous link's row must already carry its shrunk period by
+            # the time this link's own insert is checked against it, not the other way round.
+            own_occupant = Occupant(
+                id=uuid.uuid4(),
+                booking_group_id=group_id,
+                status="confirmed",
+                starts_at=slot.starts_at,
+                ends_at=slot.ends_at,
+            )
+            own_before, own_after = before, after
+            if previous_appointment is not None:
+                await recompute_group_periods(db, group_id, also_consider=own_occupant)
+                own_before, own_after = waive_handover(
+                    own_occupant,
+                    [
+                        Occupant(
+                            id=previous_appointment.id,
+                            booking_group_id=group_id,
+                            status="confirmed",
+                            starts_at=previous_appointment.starts_at,
+                            ends_at=previous_appointment.ends_at,
+                        )
+                    ],
+                    before,
+                    after,
+                )
 
             appointment = Appointment(
                 customer_id=customer.id,
@@ -1079,18 +1231,9 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
                     AppointmentResource(
                         resource_id=r.id,
                         kind=r.kind,
-                        # The resource's own before-buffer is waived only when *this*
-                        # resource — not merely the staff member — is the one shared with
-                        # the previous link; a different room a same-staff link picked up
-                        # gets its full turnover regardless.
                         period=Range(
-                            slot.starts_at
-                            - timedelta(
-                                minutes=0
-                                if r.id in shared_resource_ids
-                                else service.buffer_before_minutes
-                            ),
-                            slot.ends_at + timedelta(minutes=after),
+                            slot.starts_at - timedelta(minutes=own_before),
+                            slot.ends_at + timedelta(minutes=own_after),
                             bounds="[)",
                         ),
                     )
@@ -1103,8 +1246,6 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
 
             cursor = slot.ends_at
             previous_appointment = appointment
-            previous_staff_id = staff_id
-            previous_resources = {r.resource_id: r for r in appointment.resources}
     except IntegrityError as error:
         await db.rollback()
         if not _is_slot_taken(error):
@@ -1181,6 +1322,9 @@ async def cancel_group(group_id: uuid.UUID, payload: CancelIn, actor: Scheduler,
             actor_user_id=actor.id,
             metadata={"group_id": str(group_id), "appointment_ids": cancelled_ids},
         )
+        # One call: it looks at the whole group's current occupancy, so every surviving
+        # member's period springs back in the same pass regardless of which ones just left.
+        await recompute_group_periods(db, group_id)
     await db.commit()
     loaded = [await _load(db, a.id) for a in members]
     return GroupOut(booking_group_id=str(group_id), appointments=[_out(a) for a in loaded])

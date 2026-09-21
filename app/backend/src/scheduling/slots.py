@@ -48,6 +48,7 @@ from scheduling.availability import (
     ChainLink,
     Id,
     Interval,
+    Occupant,
     Requirement,
     ResourceSpec,
     ServiceSpec,
@@ -55,6 +56,7 @@ from scheduling.availability import (
     StaffSpec,
     bookable_slots,
     chain_starts,
+    waive_handover,
 )
 from scheduling.clock import localize
 from scheduling.models import (
@@ -105,6 +107,7 @@ async def busy_intervals(
     window: Interval,
     *,
     excluding: uuid.UUID | None = None,
+    handover_group_id: uuid.UUID | None = None,
 ) -> tuple[dict[Id, list[Interval]], dict[Id, list[Interval]]]:
     """The intervals already taken inside `window`, per staff member and per resource.
 
@@ -119,11 +122,25 @@ async def busy_intervals(
 
     `excluding` leaves one appointment out — its staff span and its resource claims — which
     is how a move asks "where could this go?" without the appointment standing in its own way.
+
+    `handover_group_id` (fix round 2) is the *waiver*: busy time contributed by another
+    appointment sharing that group id, and currently touching one being checked for it, is
+    trimmed at the shared edge — same client, no turnover — via `availability.waive_handover`,
+    derived fresh from each row's own (never-mutated) snapshot every call, for staff and,
+    while a chain is mid-construction (`appointments.book_group`) or a member is mid-move
+    (`change_appointment`), for resources too — their stored `period` only catches up once a
+    write actually lands (`appointments.recompute_group_periods`), so a read taken before that
+    must derive the same answer itself rather than trust the column.
+
+    `excluding` only ever drops one row from the *busy* result, never from the query this
+    waiver reads: an excluded appointment is still a real group member another row may need
+    to see in order to waive its own facing edge against it (this is what makes a no-op move
+    of one link still see the other link's buffer correctly waived).
     """
     staff_ids, resource_ids = list(staff_ids), list(resource_ids)
     staff_busy: dict[Id, list[Interval]] = {}
     resource_busy: dict[Id, list[Interval]] = {}
-    if staff_ids:
+    if staff_ids and handover_group_id is None:
         starts = Appointment.starts_at - _minutes(Appointment.buffer_before_minutes)
         ends = Appointment.ends_at + _minutes(Appointment.buffer_after_minutes)
         for row in await db.execute(
@@ -136,7 +153,58 @@ async def busy_intervals(
             )
         ):
             staff_busy.setdefault(row[0], []).append((row[1], row[2]))
-    if resource_ids:
+    elif staff_ids:
+        # The handover-aware path: raw spans and snapshot buffers, fetched wide enough that a
+        # sibling's own buffer (bounded, but not by anything this function assumes a size for)
+        # cannot fall outside it, then buffered — and waived — in Python.
+        #
+        # `excluding` is applied only to what gets added to `staff_busy`, never to the query
+        # itself: the excluded appointment is still a group member another row may need to see
+        # in order to waive its own facing edge against it (a no-op move checks the excluded
+        # appointment's own old span against a sibling that is *not* excluded — that sibling's
+        # busy contribution must already be waived, and it cannot be without the excluded row
+        # present to compare against).
+        margin = timedelta(days=1)
+        rows = list(
+            await db.execute(
+                select(
+                    Appointment.id,
+                    Appointment.staff_id,
+                    Appointment.booking_group_id,
+                    Appointment.status,
+                    Appointment.starts_at,
+                    Appointment.ends_at,
+                    Appointment.buffer_before_minutes,
+                    Appointment.buffer_after_minutes,
+                ).where(
+                    Appointment.staff_id.in_(staff_ids),
+                    Appointment.status != "cancelled",
+                    Appointment.starts_at < window[1] + margin,
+                    Appointment.ends_at > window[0] - margin,
+                )
+            )
+        )
+        occupants = [
+            Occupant(
+                id=r.id,
+                booking_group_id=r.booking_group_id,
+                status=r.status,
+                starts_at=r.starts_at,
+                ends_at=r.ends_at,
+            )
+            for r in rows
+        ]
+        for row, occupant in zip(rows, occupants, strict=True):
+            if excluding is not None and row.id == excluding:
+                continue
+            before, after = waive_handover(
+                occupant, occupants, row.buffer_before_minutes, row.buffer_after_minutes
+            )
+            start = row.starts_at - timedelta(minutes=before)
+            end = row.ends_at + timedelta(minutes=after)
+            if start < window[1] and end > window[0]:
+                staff_busy.setdefault(row.staff_id, []).append((start, end))
+    if resource_ids and handover_group_id is None:
         period = AppointmentResource.period
         for row in await db.execute(
             select(AppointmentResource.resource_id, func.lower(period), func.upper(period)).where(
@@ -146,6 +214,54 @@ async def busy_intervals(
             )
         ):
             resource_busy.setdefault(row[0], []).append((row[1], row[2]))
+    elif resource_ids:
+        # The same handover-aware path as staff, and for the same reason: a member being
+        # PATCHed is excluded from `resource_busy` itself, but stays in the query so a sibling
+        # still sharing this resource can see it and waive its own facing edge — this reads
+        # the raw span and snapshot buffers straight off `appointments`, never the (possibly
+        # not-yet-caught-up) stored `period`.
+        margin = timedelta(days=1)
+        rows = list(
+            await db.execute(
+                select(
+                    AppointmentResource.resource_id,
+                    Appointment.id,
+                    Appointment.booking_group_id,
+                    Appointment.status,
+                    Appointment.starts_at,
+                    Appointment.ends_at,
+                    Appointment.buffer_before_minutes,
+                    Appointment.buffer_after_minutes,
+                )
+                .join(Appointment, Appointment.id == AppointmentResource.appointment_id)
+                .where(
+                    AppointmentResource.resource_id.in_(resource_ids),
+                    Appointment.status != "cancelled",
+                    Appointment.starts_at < window[1] + margin,
+                    Appointment.ends_at > window[0] - margin,
+                )
+            )
+        )
+        occupants = [
+            Occupant(
+                id=r.id,
+                booking_group_id=r.booking_group_id,
+                status=r.status,
+                starts_at=r.starts_at,
+                ends_at=r.ends_at,
+            )
+            for r in rows
+        ]
+        for row, occupant in zip(rows, occupants, strict=True):
+            if excluding is not None and row.id == excluding:
+                continue
+            before, after = waive_handover(
+                occupant, occupants, row.buffer_before_minutes, row.buffer_after_minutes
+            )
+            start = row.starts_at - timedelta(minutes=before)
+            end = row.ends_at + timedelta(minutes=after)
+            if start < window[1] and end > window[0]:
+                resource_busy.setdefault(row.resource_id, []).append((start, end))
     return staff_busy, resource_busy
 
 
@@ -190,12 +306,14 @@ async def compute(
     to: Date,
     *,
     excluding: uuid.UUID | None = None,
+    handover_group_id: uuid.UUID | None = None,
     relax_advisory: bool = False,
 ) -> Computed:
     """The engine's inputs, read for `staff_ids` over the local dates `from_`..`to`, and its
     answer. `service` is already the catalog's bookable view; `staff_ids` is the eligible set
     or one member of it — the caller has checked which. `excluding` is the appointment being
-    moved, left out of what is busy (see `busy_intervals`).
+    moved, left out of what is busy; `handover_group_id` is the same visit's own buffer
+    waiver, both threaded straight through to `busy_intervals`.
 
     `relax_advisory` is the engine's switch of the same name (tech-stack §22): the shift,
     time off, closures and the horizon set aside, the physical rules untouched. **Only
@@ -259,7 +377,12 @@ async def compute(
         await db.scalars(select(Closure.date).where(Closure.date >= from_, Closure.date <= to))
     )
     staff_busy, resource_busy = await busy_intervals(
-        db, staff_ids, [r.id for r in resources], window, excluding=excluding
+        db,
+        staff_ids,
+        [r.id for r in resources],
+        window,
+        excluding=excluding,
+        handover_group_id=handover_group_id,
     )
 
     now = datetime.now(UTC)

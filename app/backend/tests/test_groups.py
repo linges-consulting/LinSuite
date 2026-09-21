@@ -25,6 +25,7 @@ from tests.test_appointments import (  # noqa: F401 — the autouse fixture come
     me_staff_id,
     move,
     put_hours,
+    resource_periods,
 )
 
 GROUP_AVAILABILITY = "/api/availability/group"
@@ -445,3 +446,191 @@ async def test_a_no_op_patch_of_a_group_member_succeeds(client):
     resp = await move(client, second["id"], starts_at=at("10:00"))
 
     assert resp.status_code == 200, resp.text
+
+
+# --- the waiver is derived, never stored (fix round 2) --------------------------------------
+#
+# Round 1's fix zeroed the sibling's own `buffer_after_minutes`/`buffer_before_minutes` to make
+# the handover book — a regression: the row started lying about the service's real buffer, and
+# nothing restored it when the sibling later left. These prove the waiver is re-derived from
+# current status and adjacency every time it matters, for staff and for a shared resource, and
+# that it "restores" itself the instant a sibling stops being adjacent — with no code of its own.
+
+
+async def find(client, appointment_id: str) -> dict:
+    listing = await client.get(
+        APPOINTMENTS,
+        params={"from": MONDAY.isoformat(), "to": MONDAY.isoformat(), "include_cancelled": True},
+    )
+    return next(a for a in listing.json()["appointments"] if a["id"] == appointment_id)
+
+
+async def test_cancelling_one_link_of_a_same_staff_chain_restores_the_others_buffer(client):
+    ana, _ben = await two_providers(client)
+    facial = await make_service(
+        client, [ana], name="Facial", duration_minutes=60, buffer_after_minutes=15
+    )
+    addon = await make_service(client, [ana], name="Hot Stone Add-on", duration_minutes=30)
+    booked = await book_group(
+        client, [{"service_id": facial, "staff_id": ana}, {"service_id": addon, "staff_id": ana}]
+    )
+    assert booked.status_code == 201, booked.text
+    first, second = booked.json()["appointments"]
+    assert (await find(client, first["id"]))["buffer_after_minutes"] == 15
+
+    cancel = await client.post(f"{APPOINTMENTS}/{second['id']}/cancel", json={})
+    assert cancel.status_code == 200, cancel.text
+
+    # The snapshot never moved — before the cancel or after it, the row still reports the
+    # service's real buffer.
+    assert (await find(client, first["id"]))["buffer_after_minutes"] == 15
+
+    # The addon is gone, but its own former slot is not free: facial's after-buffer, no
+    # longer waived against anything, covers it again.
+    other = await book(client, addon, ana, at("10:00"))
+    assert other.status_code == 422, other.text
+    assert other.json()["code"] == "not_offered"
+
+    data = await group_availability(client, [addon], staff=ana)
+    assert at("10:00") not in [s["starts_at"] for s in data["days"][0]["slots"]]
+
+
+async def test_cancelling_one_link_of_a_same_room_chain_restores_the_others_period(client):
+    ana, ben = await two_providers(client)
+    room = await make_resource(client, "space", "Room 1")
+    facial = await make_service(
+        client,
+        [ana],
+        name="Facial",
+        duration_minutes=60,
+        buffer_after_minutes=15,
+        requirements=[{"kind": "space"}],
+    )
+    addon = await make_service(
+        client,
+        [ben],
+        name="Hot Stone Add-on",
+        duration_minutes=30,
+        requirements=[{"kind": "space"}],
+    )
+    booked = await book_group(
+        client, [{"service_id": facial, "staff_id": ana}, {"service_id": addon, "staff_id": ben}]
+    )
+    assert booked.status_code == 201, booked.text
+    first, second = booked.json()["appointments"]
+    # Waived while the addon is still there: facial's own stored period ends exactly at 10:00.
+    assert (await resource_periods(first["id"])) == [(room, at("09:00"), at("10:00"))]
+
+    cancel = await client.post(f"{APPOINTMENTS}/{second['id']}/cancel", json={})
+    assert cancel.status_code == 200, cancel.text
+
+    # The room is free by the clock at 10:00, but facial's own 15-minute after-buffer, no
+    # longer waived, claims it again.
+    other = await book(client, addon, ben, at("10:00"))
+    assert other.status_code == 422, other.text
+    assert other.json()["code"] == "not_offered"
+    periods = await resource_periods(first["id"])
+    assert periods == [(room, at("09:00"), at("10:15"))]
+
+
+async def test_moving_a_link_away_restores_the_previous_links_buffer(client):
+    ana, _ben = await two_providers(client)
+    facial = await make_service(
+        client, [ana], name="Facial", duration_minutes=60, buffer_after_minutes=15
+    )
+    addon = await make_service(client, [ana], name="Hot Stone Add-on", duration_minutes=30)
+    booked = await book_group(
+        client, [{"service_id": facial, "staff_id": ana}, {"service_id": addon, "staff_id": ana}]
+    )
+    assert booked.status_code == 201, booked.text
+    first, second = booked.json()["appointments"]
+
+    moved = await move(client, second["id"], starts_at=at("11:00"))
+    assert moved.status_code == 200, moved.text
+
+    # Facial's after-buffer is back in force at its own old edge — nothing sits there anymore
+    # to waive it against.
+    other = await book(client, addon, ana, at("10:00"))
+    assert other.status_code == 422, other.text
+    assert other.json()["code"] == "not_offered"
+
+
+async def test_a_before_buffer_on_the_second_link_is_waived_against_the_first(client):
+    """The waiver is symmetric: a facing *before*-buffer on the later link is waived exactly
+    like a facing after-buffer on the earlier one."""
+    ana, _ben = await two_providers(client)
+    facial = await make_service(client, [ana], name="Facial", duration_minutes=60)
+    addon = await make_service(
+        client, [ana], name="Hot Stone Add-on", duration_minutes=30, buffer_before_minutes=15
+    )
+
+    data = await group_availability(client, [facial, addon], staff=f"{ana},{ana}")
+    assert at("09:00") in [s["starts_at"] for s in data["days"][0]["slots"]]
+
+    resp = await book_group(
+        client, [{"service_id": facial, "staff_id": ana}, {"service_id": addon, "staff_id": ana}]
+    )
+
+    assert resp.status_code == 201, resp.text
+    first, second = resp.json()["appointments"]
+    assert first["ends_at"] == at("10:00")
+    assert second["starts_at"] == at("10:00")
+
+
+async def test_an_a_b_a_three_link_chain_waives_both_edges_of_the_middle_link(client):
+    ana, ben = await two_providers(client)
+    first_service = await make_service(
+        client, [ana], name="Prep", duration_minutes=30, buffer_after_minutes=10
+    )
+    middle_service = await make_service(
+        client,
+        [ben],
+        name="Massage",
+        duration_minutes=60,
+        buffer_before_minutes=10,
+        buffer_after_minutes=10,
+    )
+    last_service = await make_service(
+        client, [ana], name="Finish", duration_minutes=30, buffer_before_minutes=10
+    )
+
+    resp = await book_group(
+        client,
+        [
+            {"service_id": first_service, "staff_id": ana},
+            {"service_id": middle_service, "staff_id": ben},
+            {"service_id": last_service, "staff_id": ana},
+        ],
+    )
+
+    assert resp.status_code == 201, resp.text
+    a, b, c = resp.json()["appointments"]
+    assert a["ends_at"] == at("09:30")
+    assert b["starts_at"] == at("09:30")
+    assert b["ends_at"] == at("10:30")
+    assert c["starts_at"] == at("10:30")
+
+
+async def test_a_buffered_chain_can_be_booked_cancelled_and_booked_again_at_the_same_start(client):
+    """A round trip: booking a same-staff buffered chain, cancelling the whole group, and
+    booking the identical chain at the identical start again must both succeed — nothing
+    about the first booking's waiver may linger stuck-narrow after its group is gone."""
+    ana, _ben = await two_providers(client)
+    facial = await make_service(
+        client, [ana], name="Facial", duration_minutes=60, buffer_after_minutes=15
+    )
+    addon = await make_service(client, [ana], name="Hot Stone Add-on", duration_minutes=30)
+    links = [{"service_id": facial, "staff_id": ana}, {"service_id": addon, "staff_id": ana}]
+
+    first = await book_group(client, links)
+    assert first.status_code == 201, first.text
+    group_id = first.json()["booking_group_id"]
+
+    cancelled = await client.post(group_cancel_url(group_id), json={})
+    assert cancelled.status_code == 200, cancelled.text
+
+    second = await book_group(client, links)
+    assert second.status_code == 201, second.text
+    a, b = second.json()["appointments"]
+    assert a["starts_at"] == at("09:00")
+    assert b["starts_at"] == at("10:00")

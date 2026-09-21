@@ -271,6 +271,60 @@ def _resolve_link(link: ChainLink, slot: "Slot") -> Id | None:
     return next((s for s in link.staff_order if s in slot.staff_ids), None)
 
 
+# --- the handover waiver (fix round 2) -----------------------------------------------------
+#
+# Same client, no turnover between two links of one visit — but *derived* fresh from current
+# position and status every time it matters, never stored on an appointment's own snapshot
+# (that would misreport what the service's buffer actually is, and go stale the moment a
+# sibling is cancelled, no-showed or moved away). This is the one place that derivation is
+# decided; `scheduling/slots.py`'s loader and `scheduling/appointments.py`'s group booking
+# and resource-period recompute all call it, so "offered" and "accepted" never disagree.
+
+# A cancelled or no-show appointment is never anyone's handover partner — the slot it held is
+# exactly the slot it no longer holds.
+NOT_OCCUPYING = frozenset({"cancelled", "no_show"})
+
+
+@dataclass(frozen=True)
+class Occupant:
+    """The handful of facts a handover check needs about one appointment — never the row
+    itself, so this stays pure and S2-testable."""
+
+    id: Id
+    booking_group_id: Id | None
+    status: str
+    starts_at: datetime
+    ends_at: datetime
+
+
+def waive_handover(
+    subject: Occupant, others: Iterable[Occupant], before: int, after: int
+) -> tuple[int, int]:
+    """`subject`'s own buffer minutes, with whichever edge faces an occupying same-visit
+    sibling zeroed — the far edge, and everything when there is no such sibling, untouched.
+
+    A handover sibling is another appointment sharing `subject.booking_group_id` (never true
+    when it is `None` — nothing outside a group has a visit to share turnover with), itself
+    occupying, whose span touches `subject`'s exactly: one's `ends_at` the other's
+    `starts_at`. Cancelling, no-showing or moving a sibling away "restores" the buffer with
+    no code of its own — it simply stops matching this test the next time it is asked.
+    """
+    if subject.booking_group_id is None or subject.status in NOT_OCCUPYING:
+        return before, after
+    for other in others:
+        if other.id == subject.id:
+            continue
+        if other.booking_group_id != subject.booking_group_id:
+            continue
+        if other.status in NOT_OCCUPYING:
+            continue
+        if other.ends_at == subject.starts_at:
+            before = 0
+        if subject.ends_at == other.starts_at:
+            after = 0
+    return before, after
+
+
 def advisory_breaches(
     *,
     timezone: str,
