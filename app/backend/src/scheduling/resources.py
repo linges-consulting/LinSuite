@@ -31,6 +31,7 @@ from auth.capabilities import Requires
 from auth.models import User
 from core.audit import record_event
 from core.db import SessionDep
+from scheduling import cache
 from scheduling._admin_forms import blank_to_none, known_colour, refuse_emptied_field
 from scheduling.models import Resource
 
@@ -184,6 +185,7 @@ async def create_resource(
         metadata={"kind": resource.kind, "name": resource.name},
     )
     await db.commit()
+    await cache.bump()
     return _out(resource)
 
 
@@ -226,6 +228,7 @@ async def update_resource(
             metadata={"changed": sorted(changed)},
         )
     await db.commit()
+    await cache.bump()
     return _out(resource)
 
 
@@ -250,6 +253,7 @@ async def deactivate_resource(
         metadata={"kind": resource.kind, "name": resource.name},
     )
     await db.commit()
+    await cache.bump()
     return _out(resource)
 
 
@@ -271,6 +275,7 @@ async def reactivate_resource(
         metadata={"kind": resource.kind, "name": resource.name},
     )
     await db.commit()
+    await cache.bump()
     return _out(resource)
 
 

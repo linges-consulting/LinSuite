@@ -33,6 +33,7 @@ from auth.capabilities import Requires
 from auth.models import User
 from core.audit import record_event
 from core.db import SessionDep
+from scheduling import cache
 from scheduling.models import MINUTE_STEP, MINUTES_IN_DAY, WorkingHours
 from scheduling.staff import load_staff
 
@@ -124,4 +125,5 @@ async def replace_hours(
         metadata={"blocks": len(payload.blocks)},
     )
     await db.commit()
+    await cache.bump()
     return await _week(db, staff_id)

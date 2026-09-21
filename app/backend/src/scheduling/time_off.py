@@ -40,6 +40,7 @@ from core.audit import record_event
 from core.db import SessionDep
 from core.errors import CAPABILITY_REQUIRED, Forbidden
 from core.models import Business
+from scheduling import cache
 from scheduling._admin_forms import blank_to_none
 from scheduling.clock import localize
 from scheduling.models import Staff, TimeOff
@@ -213,6 +214,7 @@ async def create_time_off(
         metadata={"time_off_id": str(entry.id), "all_day": payload.all_day},
     )
     await db.commit()
+    await cache.bump()
     return _entry(entry, zone)
 
 
@@ -239,3 +241,4 @@ async def delete_time_off(
         metadata={"time_off_id": str(entry_id)},
     )
     await db.commit()
+    await cache.bump()

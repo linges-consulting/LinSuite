@@ -45,6 +45,7 @@ from core.config import get_settings
 from core.db import SessionDep
 from core.models import Business
 from notifications.tasks import send_email
+from scheduling import cache
 from scheduling._admin_forms import blank_to_none, known_colour, refuse, refuse_emptied_field
 from scheduling.models import MAX_BASIS_POINTS, Staff
 from scheduling.palette import BY_KEY, PALETTE, next_free
@@ -442,6 +443,7 @@ async def update_staff(
             metadata={"email": user.email, "changed": sorted(changed)},
         )
     await db.commit()
+    await cache.bump()
     return _out(staff, user, (await locks_for([user.email])).get(user.email))
 
 
@@ -474,6 +476,7 @@ async def deactivate_staff(staff_id: uuid.UUID, admin: StaffManager, db: Session
         metadata={"email": user.email, "display_name": staff.display_name},
     )
     await db.commit()
+    await cache.bump()
     log.info("staff: %s deactivated %s", admin.email, user.email)
     return _out(staff, user, None)
 
@@ -494,6 +497,7 @@ async def reactivate_staff(staff_id: uuid.UUID, admin: StaffManager, db: Session
         metadata={"email": user.email, "display_name": staff.display_name},
     )
     await db.commit()
+    await cache.bump()
     log.info("staff: %s reactivated %s", admin.email, user.email)
     return _out(staff, user, (await locks_for([user.email])).get(user.email))
 

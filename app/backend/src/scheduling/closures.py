@@ -33,6 +33,7 @@ from auth.models import User
 from core.audit import record_event
 from core.db import SessionDep
 from core.models import Business
+from scheduling import cache
 from scheduling._admin_forms import refuse
 from scheduling.models import Closure
 
@@ -110,6 +111,7 @@ async def add_closure(payload: ClosureIn, admin: Administrator, db: SessionDep) 
         metadata={"date": closure.date.isoformat(), "name": closure.name},
     )
     await db.commit()
+    await cache.bump()
     return _closure(closure)
 
 
@@ -148,6 +150,7 @@ async def import_statutory(year: Year, admin: Administrator, db: SessionDep) -> 
         metadata={"year": year, "count": added, "province": province},
     )
     await db.commit()
+    await cache.bump()
     return {"added": added, "skipped": len(found) - added, "closures": await _closures(db, year)}
 
 
@@ -168,3 +171,4 @@ async def remove_closure(closure_id: uuid.UUID, admin: Administrator, db: Sessio
         metadata={"date": date, "name": name, "source": source},
     )
     await db.commit()
+    await cache.bump()

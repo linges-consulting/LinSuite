@@ -39,6 +39,7 @@ from auth.models import User
 from auth.session import CurrentUser
 from core.audit import record_event
 from core.db import SessionDep
+from scheduling import cache
 from scheduling._admin_forms import blank_to_none, refuse, refuse_emptied_field
 from scheduling.models import (
     MIN_DURATION,
@@ -474,6 +475,7 @@ async def update_service(
             metadata={"changed": sorted(changed)},
         )
     await db.commit()
+    await cache.bump()
     return _out(await _load(db, service_id))
 
 
@@ -521,6 +523,7 @@ async def replace_eligible_staff(
         metadata={"staff": len(wanted)},
     )
     await db.commit()
+    await cache.bump()
     return _out(await _load(db, service_id))
 
 
@@ -575,6 +578,7 @@ async def replace_requirements(
         metadata={"requirements": len(wanted)},
     )
     await db.commit()
+    await cache.bump()
     return _out(await _load(db, service_id))
 
 
@@ -615,6 +619,7 @@ async def _set_active(
         metadata={"name": service.name},
     )
     await db.commit()
+    await cache.bump()
     return _out(await _load(db, service_id))
 
 

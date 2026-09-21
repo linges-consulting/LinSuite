@@ -64,6 +64,7 @@ from core.db import SessionDep
 from core.errors import CAPABILITY_REQUIRED, Forbidden
 from customers.models import Customer
 from customers.routes import CustomerIn, create_customer
+from scheduling import cache
 from scheduling._admin_forms import blank_to_none, refuse
 from scheduling.availability import Interval, Occupant, Slot, advisory_breaches, waive_handover
 from scheduling.clock import localize
@@ -717,6 +718,7 @@ async def book_appointment(payload: BookingIn, actor: Scheduler, claims: ClaimsD
     if rules:
         record_override(db, appointment, actor)
     await db.commit()
+    await cache.bump()
     return _out(await _load(db, appointment.id))
 
 
@@ -974,6 +976,7 @@ async def change_appointment(
             metadata={"from": old_duration, "to": duration},
         )
     await db.commit()
+    await cache.bump()
     return _out(await _load(db, appointment.id))
 
 
@@ -1042,6 +1045,7 @@ async def complete_appointment(appointment_id: uuid.UUID, actor: Scheduler, db: 
         metadata={},
     )
     await db.commit()
+    await cache.bump()
     return _out(await _load(db, appointment.id))
 
 
@@ -1063,6 +1067,7 @@ async def cancel_appointment(
         # the moment its status flips, and the sibling's resource period springs back to it.
         await _recompute_group_periods_never_failing(db, appointment.booking_group_id)
     await db.commit()
+    await cache.bump()
     return _out(await _load(db, appointment.id))
 
 
@@ -1094,6 +1099,7 @@ async def mark_no_show(appointment_id: uuid.UUID, actor: Scheduler, db: SessionD
         # Same restoration as a cancel (fix round 2) — a no-show stops occupying too.
         await _recompute_group_periods_never_failing(db, appointment.booking_group_id)
     await db.commit()
+    await cache.bump()
     return _out(await _load(db, appointment.id))
 
 
@@ -1341,6 +1347,7 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
         },
     )
     await db.commit()
+    await cache.bump()
     loaded = [await _load(db, a.id) for a in created]
     return GroupOut(booking_group_id=str(group_id), appointments=[_out(a) for a in loaded])
 
@@ -1380,6 +1387,7 @@ async def cancel_group(group_id: uuid.UUID, payload: CancelIn, actor: Scheduler,
         # member's period springs back in the same pass regardless of which ones just left.
         await _recompute_group_periods_never_failing(db, group_id)
     await db.commit()
+    await cache.bump()
     loaded = [await _load(db, a.id) for a in members]
     return GroupOut(booking_group_id=str(group_id), appointments=[_out(a) for a in loaded])
 

@@ -43,6 +43,7 @@ from auth.capabilities import Requires
 from auth.models import User
 from core.db import SessionDep
 from core.models import Business
+from scheduling import cache
 from scheduling._admin_forms import refuse
 from scheduling.availability import (
     ChainLink,
@@ -464,28 +465,40 @@ async def availability(
             )
         staff_ids = [staff_id]
 
-    computed = await compute(db, service, staff_ids, from_, to)
+    # Only this — the engine's own answer — is cached (tech-stack §19). The catalog and
+    # eligibility checks above always run fresh; they are cheap single-row reads, and a
+    # cache hit here already reflects the latest generation, which any change to either one
+    # bumps (`scheduling/cache.py`).
+    async def _compute() -> dict:
+        computed = await compute(db, service, staff_ids, from_, to)
+        return AvailabilityOut(
+            service_id=service.id,
+            timezone=computed.timezone,
+            granularity_minutes=computed.granularity_minutes,
+            horizon_ends_on=computed.horizon_ends_on.isoformat(),
+            days=[
+                DayOut(
+                    date=day.isoformat(),
+                    slots=[
+                        SlotOut(
+                            starts_at=utc(slot.starts_at),
+                            ends_at=utc(slot.ends_at),
+                            staff_ids=[str(s) for s in slot.staff_ids],
+                        )
+                        for slot in slots
+                    ],
+                )
+                for day, slots in computed.days.items()
+            ],
+        ).model_dump()
 
-    return AvailabilityOut(
-        service_id=service.id,
-        timezone=computed.timezone,
-        granularity_minutes=computed.granularity_minutes,
-        horizon_ends_on=computed.horizon_ends_on.isoformat(),
-        days=[
-            DayOut(
-                date=day.isoformat(),
-                slots=[
-                    SlotOut(
-                        starts_at=utc(slot.starts_at),
-                        ends_at=utc(slot.ends_at),
-                        staff_ids=[str(s) for s in slot.staff_ids],
-                    )
-                    for slot in slots
-                ],
-            )
-            for day, slots in computed.days.items()
-        ],
-    )
+    parts = {
+        "service_id": str(service.id),
+        "staff_id": str(staff_id) if staff_id is not None else None,
+        "from": from_.isoformat(),
+        "to": to.isoformat(),
+    }
+    return AvailabilityOut.model_validate(await cache.cached("avail", parts, _compute))
 
 
 def unbookable(service: CatalogServiceOut, link_index: int | None = None) -> JSONResponse:
@@ -521,6 +534,13 @@ class GroupDayOut(BaseModel):
     slots: list[GroupSlotOut]
 
 
+class _Unbookable(Exception):
+    """Signals a 409 out of `group_availability`'s cached computation without caching it."""
+
+    def __init__(self, response: JSONResponse):
+        self.response = response
+
+
 class GroupAvailabilityOut(BaseModel):
     service_ids: list[str]
     timezone: str
@@ -554,56 +574,75 @@ async def group_availability(
     if len(tokens) != len(service_ids):
         raise refuse("staff", 'Name a provider, or "any", for every service.', where="query")
 
-    links: list[ChainLink] = []
-    computed_first: Computed | None = None
-    for i, (service_id, token) in enumerate(zip(service_ids, tokens, strict=True)):
-        service = await catalog_entry(db, uuid.UUID(service_id))
-        if not service.bookable:
-            return unbookable(service, link_index=i)
-        eligible = [uuid.UUID(s) for s in service.staff_ids]
-        named = uuid.UUID(token) if token and token != "any" else None
-        if named is not None and named not in eligible:
-            raise refuse("staff", "That staff member cannot deliver this service.", where="query")
-        candidates = [named] if named else eligible
-        computed = await compute(db, service, candidates, from_, to)
-        computed_first = computed_first or computed
-        order = (
-            list(
-                await db.scalars(
-                    select(Staff.id)
-                    .where(Staff.id.in_(candidates))
-                    .order_by(Staff.sort_order, Staff.display_name, Staff.id)
+    async def _compute() -> dict:
+        links: list[ChainLink] = []
+        computed_first: Computed | None = None
+        for i, (service_id, token) in enumerate(zip(service_ids, tokens, strict=True)):
+            service = await catalog_entry(db, uuid.UUID(service_id))
+            if not service.bookable:
+                # Never cached — see the `except` below. `cache.cached` only ever writes back
+                # the value `compute()` returns, so an exception here leaves nothing behind.
+                raise _Unbookable(unbookable(service, link_index=i))
+            eligible = [uuid.UUID(s) for s in service.staff_ids]
+            named = uuid.UUID(token) if token and token != "any" else None
+            if named is not None and named not in eligible:
+                raise refuse(
+                    "staff", "That staff member cannot deliver this service.", where="query"
                 )
-            )
-            if named is None
-            else []
-        )
-        slots = [slot for day_slots in computed.days.values() for slot in day_slots]
-        links.append(ChainLink(slots=slots, staff_id=named, staff_order=order))
-
-    zone = ZoneInfo(computed_first.timezone)
-    by_date: dict[Date, list] = {
-        from_ + timedelta(days=n): [] for n in range((to - from_).days + 1)
-    }
-    for chain in chain_starts(links):
-        by_date.setdefault(chain.starts_at.astimezone(zone).date(), []).append(chain)
-
-    return GroupAvailabilityOut(
-        service_ids=service_ids,
-        timezone=computed_first.timezone,
-        granularity_minutes=computed_first.granularity_minutes,
-        horizon_ends_on=computed_first.horizon_ends_on.isoformat(),
-        days=[
-            GroupDayOut(
-                date=day.isoformat(),
-                slots=[
-                    GroupSlotOut(
-                        starts_at=utc(chain.starts_at),
-                        staff_ids=[str(s) for s in chain.staff_ids],
+            candidates = [named] if named else eligible
+            computed = await compute(db, service, candidates, from_, to)
+            computed_first = computed_first or computed
+            order = (
+                list(
+                    await db.scalars(
+                        select(Staff.id)
+                        .where(Staff.id.in_(candidates))
+                        .order_by(Staff.sort_order, Staff.display_name, Staff.id)
                     )
-                    for chain in sorted(chains, key=lambda c: c.starts_at)
-                ],
+                )
+                if named is None
+                else []
             )
-            for day, chains in sorted(by_date.items())
-        ],
-    )
+            slots = [slot for day_slots in computed.days.values() for slot in day_slots]
+            links.append(ChainLink(slots=slots, staff_id=named, staff_order=order))
+
+        zone = ZoneInfo(computed_first.timezone)
+        by_date: dict[Date, list] = {
+            from_ + timedelta(days=n): [] for n in range((to - from_).days + 1)
+        }
+        for chain in chain_starts(links):
+            by_date.setdefault(chain.starts_at.astimezone(zone).date(), []).append(chain)
+
+        return GroupAvailabilityOut(
+            service_ids=service_ids,
+            timezone=computed_first.timezone,
+            granularity_minutes=computed_first.granularity_minutes,
+            horizon_ends_on=computed_first.horizon_ends_on.isoformat(),
+            days=[
+                GroupDayOut(
+                    date=day.isoformat(),
+                    slots=[
+                        GroupSlotOut(
+                            starts_at=utc(chain.starts_at),
+                            staff_ids=[str(s) for s in chain.staff_ids],
+                        )
+                        for chain in sorted(chains, key=lambda c: c.starts_at)
+                    ],
+                )
+                for day, chains in sorted(by_date.items())
+            ],
+        ).model_dump()
+
+    # `service_ids` keeps its order (visit order is the chain's own semantics, tech-stack
+    # §19 step 4); `tokens` is positional against it, so the pair together is the question.
+    parts = {
+        "service_ids": service_ids,
+        "staff": tokens,
+        "from": from_.isoformat(),
+        "to": to.isoformat(),
+    }
+    try:
+        data = await cache.cached("avail:group", parts, _compute)
+    except _Unbookable as signal:
+        return signal.response
+    return GroupAvailabilityOut.model_validate(data)

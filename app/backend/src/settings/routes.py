@@ -27,6 +27,7 @@ from auth.models import User
 from core.audit import record_event
 from core.db import SessionDep
 from core.models import Business
+from scheduling import cache
 from settings import assets, branding, images
 from settings.models import FAVICON, LOGO, BrandingAsset
 from settings.timezones import PROVINCES, is_canonical
@@ -198,6 +199,11 @@ async def update_business(
             metadata={"changed": changed},
         )
     await db.commit()
+    if changed:
+        # Only `slot_granularity_minutes` and `booking_horizon_days` are engine inputs, but
+        # `changed` is field names, not which of them fired — bumping on any profile edit is
+        # the cheap side to be wrong on, and this screen is not saved often.
+        await cache.bump()
     return BusinessOut.model_validate(business, from_attributes=True)
 
 
@@ -233,6 +239,9 @@ async def update_timezone(
             metadata={"timezone": [was, payload.timezone]},
         )
     await db.commit()
+    if was != payload.timezone:
+        # Every recurring rule the engine reads is a wall-clock time against this zone.
+        await cache.bump()
     return payload
 
 
