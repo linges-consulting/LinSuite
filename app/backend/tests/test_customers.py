@@ -167,8 +167,38 @@ async def test_search_matches_name_phone_and_email_prefixes(client):
     assert names(await client.get(CUSTOMERS, params={"q": "(416) 555"})) == ["Priya Nair"]
     assert names(await client.get(CUSTOMERS, params={"q": "PRIYA@"})) == ["Priya Nair"]
     assert names(await client.get(CUSTOMERS, params={"q": "zzz"})) == []
-    # No query is the whole list, most recently added first.
-    assert len(names(await client.get(CUSTOMERS))) == 3
+    # No query is the whole list, alphabetical by last name then first, with its total.
+    everyone = await client.get(CUSTOMERS)
+    assert names(everyone) == ["Samira Haddad", "Priya Nair", "Sam Okonkwo"]
+    assert everyone.json()["total"] == 3
+
+
+async def test_the_list_is_paginated_and_reports_the_total(client):
+    await sign_in(client)
+    for last in ("Bravo", "alpha", "Charlie", "Delta", "Echo"):
+        made = await client.post(CUSTOMERS, json={"first_name": "X", "last_name": last})
+        assert made.status_code == 201, made.text
+
+    def lasts(resp):
+        assert resp.status_code == 200, resp.text
+        return [c["last_name"] for c in resp.json()["customers"]]
+
+    first = await client.get(CUSTOMERS, params={"page": 1, "page_size": 2})
+    second = await client.get(CUSTOMERS, params={"page": 2, "page_size": 2})
+    third = await client.get(CUSTOMERS, params={"page": 3, "page_size": 2})
+    beyond = await client.get(CUSTOMERS, params={"page": 4, "page_size": 2})
+
+    # Case-insensitive: "alpha" sorts with the As, not after the Zs.
+    assert lasts(first) == ["alpha", "Bravo"]
+    assert lasts(second) == ["Charlie", "Delta"]
+    assert lasts(third) == ["Echo"]
+    assert lasts(beyond) == []
+    assert all(r.json()["total"] == 5 for r in (first, second, third, beyond))
+    # A search is paginated the same way, and its total is the number of matches.
+    matched = await client.get(CUSTOMERS, params={"q": "x", "page_size": 100})
+    assert matched.json()["total"] == 5
+    assert (await client.get(CUSTOMERS, params={"page_size": 101})).status_code == 422
+    assert (await client.get(CUSTOMERS, params={"page": 0})).status_code == 422
 
 
 async def test_the_two_capabilities_gate_the_two_verbs(client):

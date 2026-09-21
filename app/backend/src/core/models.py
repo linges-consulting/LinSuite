@@ -1,4 +1,4 @@
-"""The business record and the audit log: the two tables that belong to no single domain.
+"""The business record and the two audit logs: the tables that belong to no single domain.
 
 Single-tenant means exactly one business, so `id` is pinned to 1 by a CHECK constraint —
 the database, not the application, refuses a second business.
@@ -21,13 +21,14 @@ from sqlalchemy import (
     Identity,
     Index,
     Integer,
+    PrimaryKeyConstraint,
     String,
     Text,
     Uuid,
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import INET, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
@@ -157,3 +158,42 @@ class AuditEvent(Base):
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class AccessLogEntry(Base):
+    """One PHI read: who opened whose record, as what, from where (ADR-0002 §1).
+
+    A second table rather than more columns on `AuditEvent`, because it answers a different
+    question — "who *looked*" — at a different volume, and is yearly-partitioned for it.
+    `postgresql_partition_by` here is what keeps autogenerate from proposing to recreate the
+    table flat; migration 0019 is where the partitions, the sequence and the trigger live.
+    The partition key has to be in the primary key, hence `(id, occurred_at)`.
+
+    Written only by `core.access_log.LogAccess`. Identifiers only, never what was seen.
+    """
+
+    __tablename__ = "audit_access_log"
+    __table_args__ = (
+        PrimaryKeyConstraint("id", "occurred_at"),
+        Index("ix_audit_access_log_customer", "customer_id", "occurred_at"),
+        Index("ix_audit_access_log_actor", "actor_user_id", "occurred_at"),
+        {"postgresql_partition_by": "RANGE (occurred_at)"},
+    )
+
+    # An explicit sequence rather than `Identity()`: Postgres 16 refuses an identity column
+    # on a partitioned table.
+    id: Mapped[int] = mapped_column(
+        BigInteger, server_default=text("nextval('audit_access_log_id_seq')")
+    )
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # No foreign keys, as on `AuditEvent`: the trail outlives what it describes.
+    actor_user_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    # The role's name at the moment of access — roles rename, the log must not.
+    actor_role: Mapped[str] = mapped_column(String(64))
+    customer_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    resource_type: Mapped[str] = mapped_column(String(64))
+    resource_id: Mapped[str] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(16))
+    ip: Mapped[str | None] = mapped_column(INET)

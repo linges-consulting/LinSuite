@@ -15,26 +15,39 @@ of the same name, so the two sides are unioned before comparing and collapse cle
 they are bound to whichever role ran that migration — which holds for every migration run
 through `DATABASE_URL_MIGRATE`, and silently does not for one an operator runs by hand as
 `postgres`. The runbook rule is "always migrate as the schema owner"; this is the assertion
-that catches the day somebody did not. `audit_events` is the exception the append-only rule
-makes: the app role may INSERT and SELECT and nothing else (ADR-0002).
+that catches the day somebody did not. The append-only tables are the exceptions, named per
+table in `APP_EXCEPTIONS`: the app role may INSERT and SELECT and nothing else (ADR-0002).
+A partitioned table's children are checked too — a REVOKE on the parent does not reach a
+partition created afterwards, so whatever creates one must revoke on it as well.
 
-**The trigger.** `tg_appointments_staff_concurrency` is policy that no constraint can
-express, so nothing but this says it is still attached and still enabled.
+**The triggers.** `tg_appointments_staff_concurrency` is policy that no constraint can
+express, and `audit_access_log_no_rewrite` is the second half of append-only (a grant is
+undone by one careless `GRANT ALL`, a trigger by one `DISABLE TRIGGER`); nothing but this
+says either is still attached and still enabled.
 """
 
 from pathlib import Path
 
+import pytest
 from sqlalchemy import text
 
 from core.db import Base, session_scope
 
-# `linsuite_app` writes everywhere except the append-only log; `linsuite_purge` is the
+# `linsuite_app` writes everywhere except the append-only logs; `linsuite_purge` is the
 # privileged role the retention-expiry job runs as, and only ever reads and deletes.
 APP_ROLE, PURGE_ROLE = "linsuite_app", "linsuite_purge"
 APP_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE")
-AUDIT_TABLE = "audit_events"
-AUDIT_APP_PRIVILEGES = ("SELECT", "INSERT")
+# Per-table departures from the default. Extend this, never bypass the test.
+APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
+    "audit_events": ("SELECT", "INSERT"),
+    "audit_access_log": ("SELECT", "INSERT"),
+}
 PURGE_PRIVILEGES = ("SELECT", "DELETE")
+# (table, trigger) pairs that must be attached and firing.
+TRIGGERS = (
+    ("appointments", "tg_appointments_staff_concurrency"),
+    ("audit_access_log", "audit_access_log_no_rewrite"),
+)
 
 
 def tables() -> list[str]:
@@ -92,26 +105,42 @@ async def test_both_roles_hold_the_privileges_they_are_meant_to_on_every_table(d
                 {"r": role, "t": table, "p": privilege},
             )
 
-        for table in tables():
-            wanted = AUDIT_APP_PRIVILEGES if table == AUDIT_TABLE else APP_PRIVILEGES
-            for privilege in APP_PRIVILEGES:
-                granted = await may(APP_ROLE, table, privilege)
-                assert granted is (privilege in wanted), f"{APP_ROLE} {privilege} on {table}"
-            for privilege in PURGE_PRIVILEGES:
-                assert await may(PURGE_ROLE, table, privilege), f"{PURGE_ROLE} {privilege} {table}"
-            # Never, for either: TRUNCATE is a DELETE that fires no trigger and leaves no row.
-            for role in (APP_ROLE, PURGE_ROLE):
-                assert not await may(role, table, "TRUNCATE"), f"{role} TRUNCATE on {table}"
+        async def children(table: str) -> list[str]:
+            return list(
+                await db.scalars(
+                    text(
+                        "SELECT inhrelid::regclass::text FROM pg_inherits "
+                        "WHERE inhparent = cast(:t AS regclass)"
+                    ),
+                    {"t": table},
+                )
+            )
+
+        for parent in tables():
+            wanted = APP_EXCEPTIONS.get(parent, APP_PRIVILEGES)
+            for table in [parent, *await children(parent)]:
+                for privilege in APP_PRIVILEGES:
+                    granted = await may(APP_ROLE, table, privilege)
+                    assert granted is (privilege in wanted), f"{APP_ROLE} {privilege} on {table}"
+                for privilege in PURGE_PRIVILEGES:
+                    assert await may(PURGE_ROLE, table, privilege), (
+                        f"{PURGE_ROLE} {privilege} {table}"
+                    )
+                # Never, for either: TRUNCATE is a DELETE that fires no trigger and leaves
+                # no row.
+                for role in (APP_ROLE, PURGE_ROLE):
+                    assert not await may(role, table, "TRUNCATE"), f"{role} TRUNCATE on {table}"
 
 
-async def test_the_staff_concurrency_trigger_is_attached_and_enabled(database):
+@pytest.mark.parametrize(("table", "trigger"), TRIGGERS)
+async def test_each_trigger_is_attached_and_enabled(database, table, trigger):
     async with session_scope() as db:
         enabled = await db.scalar(
             text(
                 "SELECT tgenabled::text FROM pg_trigger "
-                "WHERE tgrelid = 'appointments'::regclass "
-                "AND tgname = 'tg_appointments_staff_concurrency'"
-            )
+                "WHERE tgrelid = cast(:t AS regclass) AND tgname = :n"
+            ),
+            {"t": table, "n": trigger},
         )
     # 'O' — fires in the origin session, which is every session this application has.
     assert enabled == "O"

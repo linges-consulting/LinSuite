@@ -1,9 +1,9 @@
 """S5: the newest migration goes up, down and up again against a real database.
 
-Migration 0018 is a `CREATE OR REPLACE` of the staff-concurrency trigger function, so its
-downgrade is the only thing standing between an operator stepping back one revision and a
-half-replaced rule. Proving the round trip — and that the body actually changes both ways —
-is what stops "the downgrade restores 0017 verbatim" from being a comment nobody ran.
+Migration 0019 creates the partitioned `audit_access_log`, its partitions, sequence, trigger
+function and trigger. Proving the round trip is what stops "the downgrade takes it all back
+down" from being a comment nobody ran — a partition or a function left behind would make the
+next `upgrade` fail on a fresh `CREATE`.
 """
 
 import asyncio
@@ -16,9 +16,8 @@ from sqlalchemy import text
 from core.db import session_scope
 from tests.conftest import BACKEND_DIR
 
-# Only 0018's body mentions `TG_OP`: it is the scope guard that stops a status change being
-# re-checked against a limit the row already satisfied.
-SCOPE_GUARD = "TG_OP"
+TABLE = "audit_access_log"
+FUNCTION = "audit_access_log_append_only"
 
 
 def _alembic() -> Config:
@@ -27,11 +26,21 @@ def _alembic() -> Config:
     return cfg
 
 
-async def _trigger_body() -> str:
+async def _present() -> tuple[bool, bool, int]:
+    """(table exists, function exists, number of partitions)."""
     async with session_scope() as db:
-        return await db.scalar(
-            text("SELECT pg_get_functiondef('appointments_enforce_staff_concurrency'::regproc)")
+        table = await db.scalar(text(f"SELECT to_regclass('{TABLE}') IS NOT NULL"))
+        function = await db.scalar(
+            text("SELECT count(*) > 0 FROM pg_proc WHERE proname = :f"), {"f": FUNCTION}
         )
+        partitions = await db.scalar(
+            text(
+                "SELECT count(*) FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhparent "
+                "WHERE c.relname = :t"
+            ),
+            {"t": TABLE},
+        )
+    return bool(table), bool(function), int(partitions)
 
 
 async def _run(step: str) -> None:
@@ -42,10 +51,10 @@ async def _run(step: str) -> None:
 
 
 async def test_the_newest_migration_round_trips(database):
-    assert SCOPE_GUARD in await _trigger_body()
+    assert await _present() == (True, True, 2)
 
     await _run("-1")
-    assert SCOPE_GUARD not in await _trigger_body()
+    assert await _present() == (False, False, 0)
 
     await _run("head")
-    assert SCOPE_GUARD in await _trigger_body()
+    assert await _present() == (True, True, 2)

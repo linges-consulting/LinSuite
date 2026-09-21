@@ -1,9 +1,17 @@
-"""`/api/customers`: create one, find one.
+"""`/api/customers`: create one, find one, open one.
 
-Two capabilities, one per verb. `customers.view` finds people — the booking screen's search
-box — and `customers.manage` adds them. The booking endpoint creates a customer inline under
-its own capability (`scheduling/appointments.py`) and does it through `create_customer` here,
-so there is one place a customer is made and one audit event for it wherever that happens.
+Two capabilities, one per verb. `customers.view` finds and opens people — the Clients list,
+the booking screen's search box, the profile — and `customers.manage` adds them. The booking
+endpoint creates a customer inline under its own capability (`scheduling/appointments.py`)
+and does it through `create_customer` here, so there is one place a customer is made and one
+audit event for it wherever that happens.
+
+**Listing never logs; opening always does** (ADR-0002 §4). The list and the search render
+names, and logging every render would bury the access events in noise. Opening a profile is
+`GET /customers/{customer_id}`, which carries `LogAccess` and returns the profile *and* its
+appointment history in one response — so a profile open is exactly one row, not one per
+panel. The history is read straight off `scheduling.models.Appointment` here rather than
+through `scheduling.appointments`, which imports this module for `create_customer`.
 """
 
 import re
@@ -11,7 +19,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -19,14 +27,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.capabilities import Requires
 from auth.models import User
+from core.access_log import LogAccess
 from core.audit import record_event
 from core.db import SessionDep
+from core.models import Business
 from customers.models import Customer
+from scheduling.models import Appointment
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 
 Viewer = Annotated[User, Depends(Requires("customers.view"))]
 Manager = Annotated[User, Depends(Requires("customers.manage"))]
+
+# One screenful by default; a hundred at most — this is a list, not an export.
+PAGE_SIZE, MAX_PAGE_SIZE = 50, 100
 
 Name = Annotated[str, Field(min_length=1, max_length=100)]
 # The unique index migration 0014 creates on `lower(email)`.
@@ -118,13 +132,23 @@ async def add_customer(payload: CustomerIn, actor: Manager, db: SessionDep) -> C
     return customer_out(customer)
 
 
+class CustomerListOut(BaseModel):
+    customers: list[CustomerOut]
+    total: int
+
+
 @router.get("")
 async def find_customers(
-    _: Viewer, db: SessionDep, q: Annotated[str | None, Field(max_length=100)] = None
-) -> dict[str, list[CustomerOut]]:
-    """Prefix matches on either name, the email, or the digits of the phone. Twenty at most:
-    this is a picker's search box, not a report."""
-    query = select(Customer).limit(20)
+    _: Viewer,
+    db: SessionDep,
+    q: Annotated[str | None, Field(max_length=100)] = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = PAGE_SIZE,
+) -> CustomerListOut:
+    """Alphabetical by last name then first, a page at a time, with the total. `q` narrows
+    it by prefix on either name, the email, or the digits of the phone — the booking dialog
+    sends only `q` and reads the first page."""
+    query = select(Customer)
     term = (q or "").strip().lower()
     if term:
         digits = re.sub(r"\D", "", term)
@@ -135,7 +159,73 @@ async def find_customers(
         ]
         if digits:
             matches.append(Customer.phone.startswith(digits, autoescape=True))
-        query = query.where(or_(*matches)).order_by(Customer.last_name, Customer.first_name)
-    else:
-        query = query.order_by(Customer.created_at.desc())
-    return {"customers": [customer_out(c) for c in await db.scalars(query)]}
+        query = query.where(or_(*matches))
+    total = await db.scalar(select(func.count()).select_from(query.subquery()))
+    rows = await db.scalars(
+        query.order_by(func.lower(Customer.last_name), func.lower(Customer.first_name))
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return CustomerListOut(customers=[customer_out(c) for c in rows], total=total or 0)
+
+
+# --- the profile: the one PHI read this module has --------------------------------------
+
+
+class VisitOut(BaseModel):
+    """One row of a client's history: when, what, with whom, and how it ended."""
+
+    id: str
+    starts_at: datetime
+    ends_at: datetime
+    status: str
+    booking_group_id: str | None
+    service: dict[str, str]
+    staff: dict[str, str]
+
+
+class CustomerProfileOut(BaseModel):
+    customer: CustomerOut
+    # The business's zone, so a screen can print the day each visit was on.
+    timezone: str
+    # Newest first, upcoming included, cancelled and no-shows too: this is the history.
+    appointments: list[VisitOut]
+
+
+@router.get(
+    "/{customer_id}",
+    dependencies=[Depends(Requires("customers.view")), Depends(LogAccess("customer_profile"))],
+)
+async def read_customer(customer_id: uuid.UUID, db: SessionDep) -> CustomerProfileOut:
+    """The profile and its visits together, so opening one is one access-log row. `Requires`
+    is declared before `LogAccess` on purpose: a refusal is not an access."""
+    customer = await db.get(Customer, customer_id)
+    if customer is None:
+        # The access log already holds the attempt — see `core/access_log.py`.
+        raise HTTPException(status_code=404, detail="No such customer.")
+    visits = await db.scalars(
+        select(Appointment)
+        .where(Appointment.customer_id == customer_id)
+        .order_by(Appointment.starts_at.desc())
+    )
+    timezone = await db.scalar(select(Business.timezone).where(Business.id == 1))
+    return CustomerProfileOut(
+        customer=customer_out(customer),
+        timezone=timezone or "UTC",
+        appointments=[
+            VisitOut(
+                id=str(a.id),
+                starts_at=a.starts_at,
+                ends_at=a.ends_at,
+                status=a.status,
+                booking_group_id=str(a.booking_group_id) if a.booking_group_id else None,
+                service={"id": str(a.service.id), "name": a.service.name},
+                staff={
+                    "id": str(a.staff.id),
+                    "display_name": a.staff.display_name,
+                    "colour": a.staff.colour,
+                },
+            )
+            for a in visits
+        ],
+    )
