@@ -14,6 +14,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { fetchAdminBusiness, fetchHealth } from '@/lib/api'
 import { useSession } from '@/lib/auth'
+import { BUSINESS } from '@/lib/query-keys'
 
 export function HomePage() {
   const { user } = useSession()
@@ -42,7 +43,7 @@ export function HomePage() {
  */
 function BusinessProfileCard() {
   const { data, isPending, refetch, isFetching } = useQuery({
-    queryKey: ['admin', 'business'],
+    queryKey: BUSINESS,
     queryFn: fetchAdminBusiness,
     retry: false,
   })

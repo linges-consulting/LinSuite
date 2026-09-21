@@ -63,6 +63,7 @@ import { clock, today, weekdayLabel } from '@/lib/calendar/format'
 import { describeRules, whyNotOverride } from '@/lib/calendar/overrides'
 import { addDays, localDate } from '@/lib/calendar/pixels'
 import { formatPhone } from '@/lib/phone'
+import { invalidateScheduling } from '@/lib/query-client'
 import { APPOINTMENTS, AVAILABILITY, CATALOG, CUSTOMERS, ROSTER, SCHEDULE } from '@/lib/query-keys'
 import { useTheme } from '@/lib/theme'
 
@@ -126,9 +127,7 @@ export function SchedulePage() {
   })
 
   const refreshAfterStatusChange = () => {
-    queryClient.invalidateQueries({ queryKey: SCHEDULE })
-    queryClient.invalidateQueries({ queryKey: APPOINTMENTS })
-    queryClient.invalidateQueries({ queryKey: AVAILABILITY })
+    invalidateScheduling(queryClient)
   }
   const complete = useMutation({
     mutationFn: completeAppointment,
@@ -185,9 +184,7 @@ export function SchedulePage() {
     },
     onSettled: (_moved, error) => {
       if (overridableRules(error)) return
-      queryClient.invalidateQueries({ queryKey: SCHEDULE })
-      queryClient.invalidateQueries({ queryKey: APPOINTMENTS })
-      queryClient.invalidateQueries({ queryKey: AVAILABILITY })
+      invalidateScheduling(queryClient)
     },
   })
 
@@ -449,6 +446,14 @@ function ColourDot({ member }: { member: RosterEntry }) {
 
 const ANY = 'any'
 
+/** A chain refused with `override_available`. The chain picker offers only chain-valid
+ *  starts, so this is reachable on a stale pick — and the dialog has no per-link confirm to
+ *  send them to, so it must not say "it can be booked with an override" and then offer no
+ *  way to do it. Booking the services one at a time is the way, and each single booking
+ *  does have the confirm. */
+const CHAIN_OVERRIDE_HINT =
+  'That time is outside availability. Book these services one at a time to override it.'
+
 /** A booking refused because the chosen time is gone — the lost race (`slot_taken`, the
  *  database refused) or the engine's own refusal (`not_offered`). Both mean "what you were
  *  looking at is out of date", and the screen answers both the same way. */
@@ -619,9 +624,9 @@ function BookingDialog(props: {
     },
     onSuccess: (made) => {
       toast.success(`Booked the visit — ${made.appointments.length} appointments linked`)
-      queryClient.invalidateQueries({ queryKey: SCHEDULE })
-      queryClient.invalidateQueries({ queryKey: APPOINTMENTS })
-      queryClient.invalidateQueries({ queryKey: AVAILABILITY })
+      invalidateScheduling(queryClient)
+      // A client created inline by this booking is not in any cached search yet.
+      if (!existing) queryClient.invalidateQueries({ queryKey: CUSTOMERS })
       props.onClose()
     },
     onError: (error) => {
@@ -658,9 +663,8 @@ function BookingDialog(props: {
       toast.success(
         `Booked ${made.customer.first_name} ${made.customer.last_name} with ${made.staff.display_name}${where}`,
       )
-      queryClient.invalidateQueries({ queryKey: SCHEDULE })
-      queryClient.invalidateQueries({ queryKey: APPOINTMENTS })
-      queryClient.invalidateQueries({ queryKey: AVAILABILITY })
+      invalidateScheduling(queryClient)
+      if (!existing) queryClient.invalidateQueries({ queryKey: CUSTOMERS })
       props.onClose()
     },
     onError: (error) => {
@@ -682,7 +686,7 @@ function BookingDialog(props: {
 
   const problem = chained
     ? bookChain.error && !stalePick(bookChain.error)
-      ? `${bookChain.error.message}${
+      ? `${overridableRules(bookChain.error) ? CHAIN_OVERRIDE_HINT : bookChain.error.message}${
           refusedLinkIndex(bookChain.error) !== null ? ` (service ${refusedLinkIndex(bookChain.error)! + 1})` : ''
         }`
       : null

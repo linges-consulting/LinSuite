@@ -322,10 +322,9 @@ async def authorize_override(
             CAPABILITY_REQUIRED,
             "Only an administrator may book outside another staff member's availability.",
         )
-    state = await modes.read_state(claims)
-    if not state.in_admin_mode:
-        raise modes.ADMIN_MODE_REQUIRED
-    await modes.slide(claims, state.hard_limit_at)
+    # The one check-and-slide, not a second copy of it (`scheduling/time_off.py` calls the
+    # same function for the same reason).
+    await modes.require_admin_mode(claims, actor)
 
 
 def assign_resources(

@@ -2,6 +2,7 @@ import { MutationCache, QueryCache, QueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { ApiError, type User } from '@/lib/api'
 import { SESSION } from '@/lib/auth'
+import { APPOINTMENTS, AVAILABILITY, SCHEDULE } from '@/lib/query-keys'
 
 /**
  * One client, with the answers that mean "what you believe about this session is no longer
@@ -75,4 +76,20 @@ export function createQueryClient(): QueryClient {
     defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
   })
   return client
+}
+
+/**
+ * An input the availability engine reads has changed — a shift, an absence, a closure, a
+ * service, a resource, a staff member. The calendar and the slot lists are computed from
+ * those, so an administrative edit that invalidates only its own list leaves a booking
+ * screen offering times the server will now refuse (or hiding times it would now accept)
+ * until the query goes stale on its own.
+ *
+ * The server bumps its own cache generation on the same writes (`scheduling/cache.py`);
+ * this is the browser's half of the same job.
+ */
+export function invalidateScheduling(client: QueryClient): void {
+  client.invalidateQueries({ queryKey: SCHEDULE })
+  client.invalidateQueries({ queryKey: APPOINTMENTS })
+  client.invalidateQueries({ queryKey: AVAILABILITY })
 }

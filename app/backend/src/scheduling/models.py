@@ -73,6 +73,8 @@ class Staff(Base):
             "AND licence_number IS NOT NULL AND btrim(licence_number) <> '')",
             name="ck_staff_practitioner_credentials",
         ),
+        # The roster read, in column order: the active ones, sorted the way they are drawn.
+        Index("ix_staff_active_sort", "active", "sort_order", "display_name"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -136,6 +138,9 @@ class Resource(Base):
     __table_args__ = (
         CheckConstraint("kind IN ('space', 'equipment')", name="ck_resources_kind"),
         Index("ux_resources_kind_name", "kind", text("lower(name)"), unique=True),
+        # How the settings screen and the engine read them: the active ones of one kind,
+        # in the administrator's order.
+        Index("ix_resources_kind_active_sort", "kind", "active", "sort_order", "name"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(

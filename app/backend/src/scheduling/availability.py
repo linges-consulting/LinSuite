@@ -239,6 +239,14 @@ def chain_starts(links: Sequence[ChainLink]) -> list[ChainStart]:
     A pure walk over what the engine already computed: no session, no clock, S2-testable —
     the sequential search tech-stack §19 calls out as the ticket's real complexity, cut down
     to matching timestamps once the engine has done the rest.
+
+    ponytail: each link's `slots` were computed independently, so an A-B-A chain whose middle
+    link is shorter than the first link's after-buffer can be *offered* here and then refused
+    at POST (422 `not_offered`, `link_index: 2`) — the booking path excludes only the
+    immediately preceding link, and link 0's own buffer is still in force against link 2.
+    The refusal is correct; the offer is over-generous. Fixing it means walking the chain
+    with the already-chosen links' spans subtracted, which is a re-entrant search rather than
+    a match on instants. Do that when a real visit hits it.
     """
     if not links:
         return []

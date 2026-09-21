@@ -38,6 +38,7 @@ import {
   type Draft,
   type Week,
 } from '@/lib/hours'
+import { invalidateScheduling } from '@/lib/query-client'
 import { STAFF_HOURS, TIME_OFF } from '@/lib/query-keys'
 
 /**
@@ -113,6 +114,7 @@ export function HoursDialog({ member, onClose }: { member: StaffRow; onClose: ()
     onSuccess: () => {
       toast.success(`Saved ${member.display_name}'s hours`)
       queryClient.invalidateQueries({ queryKey: STAFF_HOURS })
+      invalidateScheduling(queryClient)
       onClose()
     },
   })
@@ -232,7 +234,10 @@ export function TimeOffDialog({ member, onClose }: { member: StaffRow; onClose: 
     queryKey: [...TIME_OFF, member.id],
     queryFn: () => fetchTimeOff(member.id),
   })
-  const refresh = () => queryClient.invalidateQueries({ queryKey: TIME_OFF })
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: TIME_OFF })
+    invalidateScheduling(queryClient)
+  }
 
   const [allDay, setAllDay] = useState(true)
   const [startDate, setStartDate] = useState('')

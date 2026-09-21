@@ -19,6 +19,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     Identity,
+    Index,
     Integer,
     String,
     Text,
@@ -31,10 +32,38 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
 
+# The codes migration 0008's CHECK names, spelled out rather than imported: `core/` imports
+# no domain module, and `settings.timezones.PROVINCES` is where the screen reads them from.
+PROVINCE_CODES = ("AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE", "QC", "SK", "YT")
+
 
 class Business(Base):
     __tablename__ = "businesses"
-    __table_args__ = (CheckConstraint("id = 1", name="ck_businesses_single_row"),)
+    # Every rule the database actually holds, declared here too: a CHECK that exists only in
+    # a migration is one the next `alembic revision --autogenerate` proposes dropping.
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_businesses_single_row"),
+        CheckConstraint(
+            "province IS NULL OR province IN (" + ", ".join(f"'{p}'" for p in PROVINCE_CODES) + ")",
+            name="ck_businesses_province",
+        ),
+        # Canada Post's format, in the one shape the API normalises to: `A1A 1A1`, upper case.
+        CheckConstraint(
+            "postal_code IS NULL OR postal_code ~ '^[A-Z][0-9][A-Z] [0-9][A-Z][0-9]$'",
+            name="ck_businesses_postal_code",
+        ),
+        CheckConstraint(
+            "brand_primary ~ '^#[0-9a-f]{6}$' AND brand_secondary ~ '^#[0-9a-f]{6}$'",
+            name="ck_businesses_brand_hex",
+        ),
+        CheckConstraint(
+            "slot_granularity_minutes BETWEEN 5 AND 60 AND slot_granularity_minutes % 5 = 0",
+            name="ck_businesses_slot_granularity",
+        ),
+        CheckConstraint(
+            "booking_horizon_days BETWEEN 1 AND 365", name="ck_businesses_booking_horizon"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(
         Integer, primary_key=True, server_default="1", autoincrement=False
@@ -108,6 +137,11 @@ class AuditEvent(Base):
     """
 
     __tablename__ = "audit_events"
+    # The two reads this table exists for: one actor's trail, and a window of time.
+    __table_args__ = (
+        Index("ix_audit_events_actor", "actor_user_id", "occurred_at"),
+        Index("ix_audit_events_occurred_at", "occurred_at"),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
     # Deliberately not a foreign key. An audit trail outlives the accounts it describes:

@@ -61,6 +61,7 @@ import {
   type StaffDraft,
   type StaffRow,
 } from '@/lib/api'
+import { invalidateScheduling } from '@/lib/query-client'
 import { ROLES, STAFF, STAFF_PALETTE } from '@/lib/query-keys'
 import { clockTime } from '@/lib/throttle'
 import { HoursDialog, TimeOffDialog } from '@/routes/staff-availability'
@@ -231,7 +232,10 @@ function StaffLine(props: {
   const queryClient = useQueryClient()
   // The key prefix, so both cached rosters — with and without the inactive rows — are
   // re-read. Invalidating only the one on screen leaves the other stale behind the filter.
-  const refresh = () => queryClient.invalidateQueries({ queryKey: STAFF })
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: STAFF })
+    invalidateScheduling(queryClient)
+  }
   const colour = props.palette.find((c) => c.key === member.colour)
 
   const toastOk = (message: string, description?: string) => () => {
@@ -499,6 +503,7 @@ function StaffDialog(props: {
           : { description: 'They have an email with a link to choose a password.' },
       )
       queryClient.invalidateQueries({ queryKey: STAFF })
+      invalidateScheduling(queryClient)
       props.onClose()
     },
   })

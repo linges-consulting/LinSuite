@@ -54,6 +54,7 @@ import {
   type StaffRow,
 } from '@/lib/api'
 import { centsToDollars, dollarsToCents } from '@/lib/money'
+import { invalidateScheduling } from '@/lib/query-client'
 import { RESOURCES, SERVICES, STAFF, STAFF_PALETTE } from '@/lib/query-keys'
 
 /**
@@ -200,7 +201,10 @@ function requirementLabel(requirement: ServiceRequirement) {
 
 function ServiceLine({ service, onEdit }: { service: ServiceRow; onEdit: () => void }) {
   const queryClient = useQueryClient()
-  const refresh = () => queryClient.invalidateQueries({ queryKey: SERVICES })
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: SERVICES })
+    invalidateScheduling(queryClient)
+  }
 
   const setActive = useMutation({
     mutationFn: (active: boolean) =>
@@ -437,6 +441,7 @@ function ServiceDialog(props: {
     onSuccess: (service) => {
       toast.success(existing ? `Saved ${service.name}` : `Added ${service.name}`)
       queryClient.invalidateQueries({ queryKey: SERVICES })
+      invalidateScheduling(queryClient)
       props.onClose()
     },
   })

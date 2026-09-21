@@ -24,6 +24,7 @@ import {
   importStatutoryClosures,
   type Closure,
 } from '@/lib/api'
+import { invalidateScheduling } from '@/lib/query-client'
 import { CLOSURES } from '@/lib/query-keys'
 
 /**
@@ -50,7 +51,10 @@ export function ClosuresPanel() {
     queryFn: () => fetchClosures(year),
     placeholderData: (previous) => previous,
   })
-  const refresh = () => queryClient.invalidateQueries({ queryKey: CLOSURES })
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: CLOSURES })
+    invalidateScheduling(queryClient)
+  }
 
   const importStatutory = useMutation({
     mutationFn: () => importStatutoryClosures(year),
@@ -200,6 +204,7 @@ function ClosureDialog({ year, onClose }: { year: number; onClose: () => void })
     onSuccess: (closure) => {
       toast.success(`Closed ${closure.date}`)
       queryClient.invalidateQueries({ queryKey: CLOSURES })
+      invalidateScheduling(queryClient)
       onClose()
     },
   })

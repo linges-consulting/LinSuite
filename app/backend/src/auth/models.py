@@ -87,7 +87,14 @@ class User(Base):
     __tablename__ = "users"
     # Addresses are case-insensitive in practice: one account per address, whatever the
     # casing. Stored lowercase; the functional index is what actually enforces it.
-    __table_args__ = (Index("uq_users_email_lower", text("lower(email)"), unique=True),)
+    __table_args__ = (
+        Index("uq_users_email_lower", text("lower(email)"), unique=True),
+        # Every capability check joins through the role.
+        Index("ix_users_role_id", "role_id"),
+        CheckConstraint(
+            "mfa_method IS NULL OR mfa_method IN ('totp', 'email')", name="ck_users_mfa_method"
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True, server_default=text("gen_random_uuid()")
@@ -206,6 +213,8 @@ class PasswordResetToken(Base):
     """
 
     __tablename__ = "password_reset_tokens"
+    # Revoking every outstanding link for one account reads by user.
+    __table_args__ = (Index("ix_password_reset_tokens_user_id", "user_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True, server_default=text("gen_random_uuid()")

@@ -1,4 +1,12 @@
 import '@testing-library/jest-dom/vitest'
+import { configure } from '@testing-library/dom'
+
+// Testing Library's default `findBy*` budget is 1000 ms, which is a wall clock, not a
+// measure of work. Under parallel jsdom workers a test paying a cold app import (and, in
+// `mfa.test.tsx`, QR generation) can cross it without anything being wrong — the flake the
+// M1 ledger recorded. Five seconds is still short enough that a genuinely stuck assertion
+// fails the run rather than hanging it.
+configure({ asyncUtilTimeout: 5000 })
 
 // jsdom has neither; cmdk observes its list, the theme provider reads the colour scheme.
 globalThis.ResizeObserver ??= class {

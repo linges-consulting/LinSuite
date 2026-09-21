@@ -39,6 +39,7 @@ import {
   type ResourceRow,
   type StaffColour,
 } from '@/lib/api'
+import { invalidateScheduling } from '@/lib/query-client'
 import { RESOURCES, STAFF_PALETTE } from '@/lib/query-keys'
 
 /**
@@ -201,7 +202,12 @@ function ResourceLine(props: {
 }) {
   const { resource } = props
   const queryClient = useQueryClient()
-  const refresh = () => queryClient.invalidateQueries({ queryKey: [...RESOURCES, props.kind] })
+  const refresh = () => {
+    // The bare prefix: the other tab's list and the service dialog's `[...RESOURCES, 'all']`
+    // are the same rooms, and a room created here has to reach both.
+    queryClient.invalidateQueries({ queryKey: RESOURCES })
+    invalidateScheduling(queryClient)
+  }
 
   const setActive = useMutation({
     mutationFn: (active: boolean) =>
@@ -317,7 +323,8 @@ function ResourceDialog(props: {
       existing ? updateResource(existing.id, draft) : createResource({ ...draft, kind: props.kind }),
     onSuccess: (resource) => {
       toast.success(existing ? `Saved ${resource.name}` : `Added ${resource.name}`)
-      queryClient.invalidateQueries({ queryKey: [...RESOURCES, props.kind] })
+      queryClient.invalidateQueries({ queryKey: RESOURCES })
+      invalidateScheduling(queryClient)
       props.onClose()
     },
   })
