@@ -27,6 +27,7 @@ from tests.test_appointments import (  # noqa: F401 — the autouse fixture come
     put_hours,
     resource_periods,
 )
+from tests.test_lifecycle import _concurrent_requests, _slowed
 
 GROUP_AVAILABILITY = "/api/availability/group"
 GROUP_BOOK = f"{APPOINTMENTS}/group"
@@ -634,3 +635,153 @@ async def test_a_buffered_chain_can_be_booked_cancelled_and_booked_again_at_the_
     a, b = second.json()["appointments"]
     assert a["starts_at"] == at("09:00")
     assert b["starts_at"] == at("10:00")
+
+
+# --- concurrent transitions on different members of one group (fix round 3) -----------------
+#
+# `cancel_appointment`, `mark_no_show` and `change_appointment` used to lock only their own
+# row before `recompute_group_periods` read and rewrote the rest of the group unlocked — two
+# such requests on two *different* members of one group could each read a stale "who's
+# occupying" and race each other. `_lock` now takes the whole group's lock, in id order,
+# before any of them read a status; same technique as `test_lifecycle.py`'s racing tests.
+
+
+async def test_concurrent_cancels_of_two_different_group_members_do_not_race(client, monkeypatch):
+    """Cancel A and cancel C, fired at the same time, on a three-link same-room chain A-B-C:
+    without the group lock this is a genuine lost update — each cancel's `recompute` reads
+    the *other* outer link as still confirmed (its cancel hasn't committed yet), so each only
+    widens the one edge of the surviving middle link B it believes changed, and whichever
+    commits second overwrites the first's write with its own stale, single-edge value. The
+    group lock serialises them — whichever order the locks land in, B ends up with *both*
+    edges correctly restored — and neither request waits forever on the other (a deadlock
+    would hang this test)."""
+    ana, _ben = await two_providers(client)
+    room = await make_resource(client, "space", "Room 1")
+    a = await make_service(
+        client,
+        [ana],
+        name="A",
+        duration_minutes=30,
+        buffer_after_minutes=15,
+        requirements=[{"kind": "space"}],
+    )
+    b = await make_service(
+        client,
+        [ana],
+        name="B",
+        duration_minutes=30,
+        buffer_before_minutes=20,
+        buffer_after_minutes=25,
+        requirements=[{"kind": "space"}],
+    )
+    c = await make_service(
+        client,
+        [ana],
+        name="C",
+        duration_minutes=30,
+        buffer_before_minutes=10,
+        requirements=[{"kind": "space"}],
+    )
+    booked = await book_group(
+        client,
+        [
+            {"service_id": a, "staff_id": ana},
+            {"service_id": b, "staff_id": ana},
+            {"service_id": c, "staff_id": ana},
+        ],
+    )
+    assert booked.status_code == 201, booked.text
+    link_a, link_b, link_c = booked.json()["appointments"]
+    # Fully waived while both neighbours occupy: B's stored period is its own raw span.
+    assert (await resource_periods(link_b["id"])) == [(room, at("09:30"), at("10:00"))]
+
+    await _slowed(monkeypatch, "_load")
+    resp_a, resp_c = await _concurrent_requests(
+        client,
+        ("POST", f"{APPOINTMENTS}/{link_a['id']}/cancel", {}),
+        ("POST", f"{APPOINTMENTS}/{link_c['id']}/cancel", {}),
+    )
+
+    assert resp_a.status_code == 200, resp_a.text
+    assert resp_c.status_code == 200, resp_c.text
+    # B is the only survivor; nothing occupies either of its edges any more, so both its own
+    # buffers are back in full — regardless of which cancel's lock landed first.
+    periods = await resource_periods(link_b["id"])
+    assert periods == [(room, at("09:10"), at("10:25"))]
+
+
+async def test_a_cancel_racing_a_move_of_a_different_member_does_not_race(client, monkeypatch):
+    """Cancel A and move B away, fired at the same time, on a two-link same-staff chain: the
+    group lock serialises them regardless of which lock wins first, and both requests finish
+    (no 500) with a final state — A cancelled, B moved — that is internally consistent."""
+    ana, _ben = await two_providers(client)
+    facial = await make_service(
+        client, [ana], name="Facial", duration_minutes=60, buffer_after_minutes=15
+    )
+    addon = await make_service(
+        client, [ana], name="Hot Stone Add-on", duration_minutes=30, buffer_before_minutes=15
+    )
+    booked = await book_group(
+        client, [{"service_id": facial, "staff_id": ana}, {"service_id": addon, "staff_id": ana}]
+    )
+    assert booked.status_code == 201, booked.text
+    link_a, link_b = booked.json()["appointments"]
+
+    await _slowed(monkeypatch, "_load")
+    cancel_resp, move_resp = await _concurrent_requests(
+        client,
+        ("POST", f"{APPOINTMENTS}/{link_a['id']}/cancel", {}),
+        ("PATCH", f"{APPOINTMENTS}/{link_b['id']}", {"starts_at": at("14:00")}),
+    )
+
+    assert cancel_resp.status_code == 200, cancel_resp.text
+    assert move_resp.status_code == 200, move_resp.text
+    assert (await find(client, link_a["id"]))["status"] == "cancelled"
+    moved = await find(client, link_b["id"])
+    assert moved["status"] == "confirmed"
+    assert moved["starts_at"] == at("14:00")
+
+
+async def test_cancelling_a_link_that_a_real_outsider_has_since_taken_never_fails(client):
+    """The widen half's savepoint fallback (fix round 2), with a genuine occupying outsider
+    rather than a hypothetical one: cancelling B can't spring A's after-buffer all the way
+    back when a real booking now legitimately sits in part of that space — the cancel still
+    succeeds, A's period stays at its current, trimmed value, and the outsider is untouched."""
+    ana, ben = await two_providers(client)
+    room = await make_resource(client, "space", "Room 1")
+    a = await make_service(
+        client,
+        [ana],
+        name="A",
+        duration_minutes=30,
+        buffer_after_minutes=60,
+        requirements=[{"kind": "space"}],
+    )
+    b = await make_service(
+        client, [ana], name="B", duration_minutes=30, requirements=[{"kind": "space"}]
+    )
+    booked = await book_group(
+        client, [{"service_id": a, "staff_id": ana}, {"service_id": b, "staff_id": ana}]
+    )
+    assert booked.status_code == 201, booked.text
+    link_a, link_b = booked.json()["appointments"]
+    assert link_b["ends_at"] == at("10:00")
+
+    outsider_service = await make_service(
+        client, [ben], name="Outsider", duration_minutes=30, requirements=[{"kind": "space"}]
+    )
+    outsider = await book(client, outsider_service, ben, at("10:00"))
+    assert outsider.status_code == 201, outsider.text
+
+    cancel = await client.post(f"{APPOINTMENTS}/{link_b['id']}/cancel", json={})
+    assert cancel.status_code == 200, cancel.text
+
+    # A's after-buffer would want to spring back to the full 60 minutes, but the outsider now
+    # legitimately holds part of that space — the widen is refused, silently, and A keeps the
+    # trimmed period it already had.
+    periods = await resource_periods(link_a["id"])
+    assert periods == [(room, at("09:00"), at("09:30"))]
+
+    still_there = await find(client, outsider.json()["id"])
+    assert still_there["status"] == "confirmed"
+    assert still_there["resources"] == [{"id": room, "name": "Room 1", "kind": "space"}]

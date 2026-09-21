@@ -381,6 +381,15 @@ async def recompute_group_periods(
     caught in its own savepoint and left at its current, narrower period: **cancelling,
     no-showing or moving a member out of a handover never fails** because some other member
     could not fully spring back to its catalog buffer.
+
+    A narrowing write cannot legitimately collide — a subset of a period that already didn't
+    overlap anything still doesn't — but its own flush still runs inside a savepoint (fix
+    round 3) rather than bare: an `IntegrityError` there always re-raises (never swallowed
+    *here*, unlike a widen's), but through a savepoint so the caller's own transaction is
+    still usable afterwards to decide what that re-raise means — 409 `slot_taken` for a PATCH
+    (its own surrounding `try`/`except` already does this), never-fail for a cancel/no-show/
+    group-cancel (whose callers catch it and carry on; `_cancel` and a no-show can't be
+    refused by a sibling's stored period failing to shrink).
     """
     members = list(
         await db.scalars(
@@ -423,10 +432,11 @@ async def recompute_group_periods(
             shrinking = ar.period.lower <= wanted.lower and ar.period.upper >= wanted.upper
             (narrow if shrinking else widen).append((ar, wanted))
 
-    for ar, wanted in narrow:
-        ar.period = wanted
     if narrow:
-        await db.flush()
+        async with db.begin_nested():
+            for ar, wanted in narrow:
+                ar.period = wanted
+            await db.flush()
 
     for ar, wanted in widen:
         try:
@@ -437,6 +447,22 @@ async def recompute_group_periods(
             if not _is_slot_taken(error):
                 raise
             await db.refresh(ar, attribute_names=["period"])
+
+
+async def _recompute_group_periods_never_failing(
+    db: AsyncSession, booking_group_id: uuid.UUID
+) -> None:
+    """`recompute_group_periods`, for the three transitions that must never fail because a
+    sibling's stored period could not be recomputed (fix round 3) — a cancel, a no-show, and
+    a group cancel. The narrow half re-raises `IntegrityError` through its own savepoint
+    rather than swallowing it (see that function's docstring); here, where there is no
+    409 to return, it is simply absorbed — the savepoint already left the session usable, so
+    the transition itself still commits."""
+    try:
+        await recompute_group_periods(db, booking_group_id)
+    except IntegrityError as error:
+        if not _is_slot_taken(error):
+            raise
 
 
 def _with_link(content: dict, link_index: int | None) -> dict:
@@ -705,6 +731,24 @@ async def _load(db: AsyncSession, appointment_id: uuid.UUID) -> Appointment:
     )
 
 
+async def _lock_group(db: AsyncSession, booking_group_id: uuid.UUID) -> list[uuid.UUID]:
+    """Locks every member of one booking group `FOR UPDATE`, in id order — the *one* lock
+    order used everywhere a group is touched (fix round 3). A fixed order, independent of
+    which member a request happened to name first, is what keeps two such requests (two
+    single-member transitions on different members, or one of those racing `cancel_group`)
+    from deadlocking each other: neither ever locks its own row before asking for the rest of
+    the group, which would let tx1 (member A then the group) and tx2 (member B then the
+    group) each hold what the other waits for."""
+    return list(
+        await db.scalars(
+            select(Appointment.id)
+            .where(Appointment.booking_group_id == booking_group_id)
+            .order_by(Appointment.id)
+            .with_for_update()
+        )
+    )
+
+
 async def _lock(db: AsyncSession, appointment_id: uuid.UUID) -> Appointment | None:
     """Serialises every transition on one appointment (fix round 1, Critical): two racing
     requests — a complete and a cancel, a move and a cancel — must not both see `confirmed`
@@ -712,11 +756,29 @@ async def _lock(db: AsyncSession, appointment_id: uuid.UUID) -> Appointment | No
     second request waits here until the first commits or rolls back, then reads the truth
     and refuses with 409 `invalid_transition` rather than clobbering it.
 
-    Locked with a bare id-only select first, `_load`'s joins second: `customer`/`staff`/
-    `service` are `lazy="joined"` — a LEFT OUTER JOIN by default — and Postgres refuses
-    `FOR UPDATE` on the nullable side of an outer join. The row is already locked by the
-    time the joined reload runs, so nothing between the two selects can change it.
+    A grouped appointment locks the *whole group* instead of just its own row (fix round 3):
+    `recompute_group_periods` reads and rewrites every occupying sibling's stored resource
+    period, so two transitions on two different members of one group — cancel A racing cancel
+    B, cancel A racing a PATCH of B — must not interleave any more than two transitions on the
+    same row may. `booking_group_id` is read with a plain, unlocked select first — it never
+    changes after insert, so nothing races reading it — and only then is the group locked, via
+    `_lock_group`, never this row on its own first (that ordering is exactly what would
+    deadlock two such requests against each other).
+
+    An ungrouped appointment keeps the single-row lock: a bare id-only select first, `_load`'s
+    joins second — `customer`/`staff`/`service` are `lazy="joined"` (a LEFT OUTER JOIN by
+    default) and Postgres refuses `FOR UPDATE` on the nullable side of an outer join. The row
+    is already locked by the time the joined reload runs, so nothing between the two selects
+    can change it.
     """
+    group_id = await db.scalar(
+        select(Appointment.booking_group_id).where(Appointment.id == appointment_id)
+    )
+    if group_id is not None:
+        locked_ids = await _lock_group(db, group_id)
+        if appointment_id not in locked_ids:
+            return None
+        return await _load(db, appointment_id)
     locked = await db.scalar(
         select(Appointment.id).where(Appointment.id == appointment_id).with_for_update()
     )
@@ -999,7 +1061,7 @@ async def cancel_appointment(
         # The handover waiver, restored (fix round 2): nothing was ever stored on a sibling
         # to undo — this appointment simply stops matching `waive_handover`'s occupying test
         # the moment its status flips, and the sibling's resource period springs back to it.
-        await recompute_group_periods(db, appointment.booking_group_id)
+        await _recompute_group_periods_never_failing(db, appointment.booking_group_id)
     await db.commit()
     return _out(await _load(db, appointment.id))
 
@@ -1030,7 +1092,7 @@ async def mark_no_show(appointment_id: uuid.UUID, actor: Scheduler, db: SessionD
     )
     if appointment.booking_group_id is not None:
         # Same restoration as a cancel (fix round 2) — a no-show stops occupying too.
-        await recompute_group_periods(db, appointment.booking_group_id)
+        await _recompute_group_periods_never_failing(db, appointment.booking_group_id)
     await db.commit()
     return _out(await _load(db, appointment.id))
 
@@ -1288,19 +1350,11 @@ async def cancel_group(group_id: uuid.UUID, payload: CancelIn, actor: Scheduler,
     """Every non-terminal member, the same code path a single cancel uses — a completed
     member stays completed, an already-cancelled one is untouched.
 
-    Members are locked `FOR UPDATE` in **id order** before anything reads their status —
-    the same reasoning as `_lock`, extended to more than one row: a fixed order is what
-    keeps two group cancels (or a group cancel and a single transition) that both touch an
-    overlapping set of rows from deadlocking each other, whichever order they were asked in.
+    Members are locked via `_lock_group` — the same one lock order `_lock` uses for a single
+    member of a group (fix round 3), so a group cancel and a single transition on one of its
+    members, or two group cancels, never deadlock each other however they were asked.
     """
-    ids = list(
-        await db.scalars(
-            select(Appointment.id)
-            .where(Appointment.booking_group_id == group_id)
-            .order_by(Appointment.id)
-            .with_for_update()
-        )
-    )
+    ids = await _lock_group(db, group_id)
     if not ids:
         raise HTTPException(status_code=404, detail="No such booking group.")
     # Locked in id order; loaded and acted on in chain order — the lock order is only about
@@ -1324,7 +1378,7 @@ async def cancel_group(group_id: uuid.UUID, payload: CancelIn, actor: Scheduler,
         )
         # One call: it looks at the whole group's current occupancy, so every surviving
         # member's period springs back in the same pass regardless of which ones just left.
-        await recompute_group_periods(db, group_id)
+        await _recompute_group_periods_never_failing(db, group_id)
     await db.commit()
     loaded = [await _load(db, a.id) for a in members]
     return GroupOut(booking_group_id=str(group_id), appointments=[_out(a) for a in loaded])
