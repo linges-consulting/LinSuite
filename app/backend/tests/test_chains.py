@@ -97,3 +97,49 @@ def test_a_single_link_chain_is_just_that_links_own_starts():
         ChainStart(starts_at=at(9), staff_ids=(ANA,)),
         ChainStart(starts_at=at(10), staff_ids=(ANA,)),
     ]
+
+
+# --- the buffer waiver (fix round 1, Important) -------------------------------------------
+#
+# `chain_starts` never models a buffer of its own — it only matches the instant one link's
+# `ends_at` to the next link's `starts_at`. Whether that instant is *offered* to link 2 at
+# all is entirely the loader's question (`compute()`, S1-tested in `test_groups.py`): the
+# loader never sees a not-yet-booked sibling, so a same-staff or same-room link 2 slot list
+# already includes the exact handover instant, buffer or not. These tests pin that
+# `chain_starts` itself puts up no obstacle to the *same* staff member chaining straight
+# through — the walk is the same walk whether the two links share a person or not.
+
+
+def test_same_staff_two_link_chain_offered_at_the_exact_handover_despite_an_after_buffer():
+    # Ana, back to back with herself: the loader would only offer link 2's 10:00 start if her
+    # buffer_after didn't count against her own very next client — this is what that loader
+    # answer looks like once it reaches chain_starts.
+    links = [
+        ChainLink(slots=[slot(9, 10, ANA)], staff_id=ANA),
+        ChainLink(slots=[slot(10, 11, ANA)], staff_id=ANA),
+    ]
+    assert chain_starts(links) == [ChainStart(starts_at=at(9), staff_ids=(ANA, ANA))]
+
+
+def test_same_staff_with_a_before_buffer_on_link_two_still_chains_at_the_handover():
+    # Same shape at a non-hour boundary, link 2 named explicitly rather than "any" — the
+    # before-buffer side of the same waiver, at the same instant.
+    links = [
+        ChainLink(
+            slots=[Slot(starts_at=at(9, 15), ends_at=at(10), staff_ids=(ANA,))], staff_id=ANA
+        ),
+        ChainLink(
+            slots=[Slot(starts_at=at(10), ends_at=at(10, 30), staff_ids=(ANA,))], staff_id=ANA
+        ),
+    ]
+    assert chain_starts(links) == [ChainStart(starts_at=at(9, 15), staff_ids=(ANA, ANA))]
+
+
+def test_three_link_a_b_a_chains_through_the_middle_staff_change_and_back():
+    # Ana, then Ben, then Ana again — two handovers, the outer one on each side full-length.
+    links = [
+        ChainLink(slots=[slot(9, 10, ANA)], staff_id=ANA),
+        ChainLink(slots=[slot(10, 11, BEN)], staff_id=BEN),
+        ChainLink(slots=[slot(11, 12, ANA)], staff_id=ANA),
+    ]
+    assert chain_starts(links) == [ChainStart(starts_at=at(9), staff_ids=(ANA, BEN, ANA))]

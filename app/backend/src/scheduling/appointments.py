@@ -614,6 +614,26 @@ async def _load(db: AsyncSession, appointment_id: uuid.UUID) -> Appointment:
     )
 
 
+async def _lock(db: AsyncSession, appointment_id: uuid.UUID) -> Appointment | None:
+    """Serialises every transition on one appointment (fix round 1, Critical): two racing
+    requests — a complete and a cancel, a move and a cancel — must not both see `confirmed`
+    and both win. `SELECT ... FOR UPDATE` locks the row before anything reads its status; the
+    second request waits here until the first commits or rolls back, then reads the truth
+    and refuses with 409 `invalid_transition` rather than clobbering it.
+
+    Locked with a bare id-only select first, `_load`'s joins second: `customer`/`staff`/
+    `service` are `lazy="joined"` — a LEFT OUTER JOIN by default — and Postgres refuses
+    `FOR UPDATE` on the nullable side of an outer join. The row is already locked by the
+    time the joined reload runs, so nothing between the two selects can change it.
+    """
+    locked = await db.scalar(
+        select(Appointment.id).where(Appointment.id == appointment_id).with_for_update()
+    )
+    if locked is None:
+        return None
+    return await _load(db, appointment_id)
+
+
 # --- moving and resizing --------------------------------------------------------------------
 
 
@@ -654,7 +674,7 @@ async def change_appointment(
     appointment's own staff member; the marker follows the appointment — set by a confirmed
     override, cleared by a move that needed none.
     """
-    appointment = await _load(db, appointment_id)
+    appointment = await _lock(db, appointment_id)
     if appointment is None:
         raise HTTPException(status_code=404, detail="No such appointment.")
     if appointment.status != "confirmed":
@@ -807,7 +827,7 @@ def _cancel(db: AsyncSession, appointment: Appointment, actor: User, reason: str
 async def complete_appointment(appointment_id: uuid.UUID, actor: Scheduler, db: SessionDep):
     """The one explicit, recorded event later phases hang behaviour on (module docstring;
     CLAUDE.md "package credits deduct on completion"). Only from `confirmed`."""
-    appointment = await _load(db, appointment_id)
+    appointment = await _lock(db, appointment_id)
     if appointment is None:
         raise HTTPException(status_code=404, detail="No such appointment.")
     if appointment.status != "confirmed":
@@ -832,7 +852,7 @@ async def cancel_appointment(
 ):
     """Cancelling one member of a group leaves the others untouched — only
     `POST /group/{id}/cancel` acts on the whole visit."""
-    appointment = await _load(db, appointment_id)
+    appointment = await _lock(db, appointment_id)
     if appointment is None:
         raise HTTPException(status_code=404, detail="No such appointment.")
     if appointment.status != "confirmed":
@@ -847,7 +867,7 @@ async def mark_no_show(appointment_id: uuid.UUID, actor: Scheduler, db: SessionD
     """Distinguishable from cancelled in reporting (acceptance criteria): the client did not
     cancel, they did not come. Only once `starts_at` has passed — there is nothing to have
     missed yet before then."""
-    appointment = await _load(db, appointment_id)
+    appointment = await _lock(db, appointment_id)
     if appointment is None:
         raise HTTPException(status_code=404, detail="No such appointment.")
     if appointment.status != "confirmed":
@@ -936,6 +956,14 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
     group_id = uuid.uuid4()
     created: list[Appointment] = []
     cursor = payload.starts_at
+    # The buffer waiver (fix round 1, Important): same client, no turnover, so a link's
+    # after-buffer and the very next link's before-buffer never count against each other —
+    # for the staff member and for a shared resource — but every other buffer still applies
+    # in full. `previous_*` is one step of lookback, matching the ruling's scope
+    # ("consecutive links" only, never A and C around a B that changes staff or room).
+    previous_appointment: Appointment | None = None
+    previous_staff_id: uuid.UUID | None = None
+    previous_resources: dict[uuid.UUID, AppointmentResource] = {}
     try:
         for i, link in enumerate(payload.links):
             service = await catalog_entry(db, link.service_id)
@@ -954,13 +982,21 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
                     )
                 await authorize_override(db, actor, claims, link.staff_id)
 
+            # The immediately preceding link is excluded outright from this link's busy
+            # check — not just its buffer. Their raw spans only ever touch, never overlap
+            # (`cursor` is the previous link's own `ends_at`), so this can never let two
+            # links double-book the same instant; it only stops a sibling that has not
+            # committed yet from making itself look busy to the very next link in its own
+            # chain. A different staff member or resource was never going to see it as busy
+            # in the first place, so excluding it is a no-op there.
+            exclude_id = previous_appointment.id if previous_appointment is not None else None
             computed, slot = await offered_slot(
-                db, service, candidates, cursor, relax_advisory=link.override
+                db, service, candidates, cursor, excluding=exclude_id, relax_advisory=link.override
             )
             if slot is None:
                 if not link.override and link.staff_id is not None:
                     relaxed, reachable = await offered_slot(
-                        db, service, candidates, cursor, relax_advisory=True
+                        db, service, candidates, cursor, excluding=exclude_id, relax_advisory=True
                     )
                     if reachable is not None:
                         before = service.buffer_before_minutes
@@ -977,12 +1013,23 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
                 .order_by(Staff.sort_order, Staff.display_name, Staff.id)
                 .limit(1)
             )
-            span = (
+            same_staff_as_previous = previous_staff_id is not None and staff_id == previous_staff_id
+            before = 0 if same_staff_as_previous else service.buffer_before_minutes
+            # This link's own after-buffer is stored in full; if the *next* link turns out
+            # to share this same staff member, it is waived retroactively below, once that
+            # is known — exactly the same lookback, one link later.
+            after = service.buffer_after_minutes
+            # Resources are searched for with the *full* buffer, never the staff-waived one:
+            # a room this link picks has to be genuinely free for its own real turnover,
+            # whether or not the staff member happens to be continuing straight through. The
+            # waiver only narrows the *stored* period afterwards, and only for whichever
+            # resource turns out to actually be the one shared with the previous link.
+            search_span = (
                 slot.starts_at - timedelta(minutes=service.buffer_before_minutes),
                 slot.ends_at + timedelta(minutes=service.buffer_after_minutes),
             )
             claimed = assign_resources(
-                service.requirements, computed.resources, computed.resource_busy, span
+                service.requirements, computed.resources, computed.resource_busy, search_span
             )
             if claimed is None:
                 return not_offered(link_index=i)
@@ -997,6 +1044,20 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
                 if link.override
                 else []
             )
+            shared_resource_ids = {r.id for r in claimed if r.id in previous_resources}
+
+            # Waive the shared edge on the *previous* link now — and flush it in its own
+            # statement, before this link's own insert. `ex_appointment_resources_no_overlap`
+            # and the staff-concurrency trigger both fire per statement (neither is
+            # deferred): the previous link's row must already carry its shrunk buffer by the
+            # time this link's row is checked against it, not the other way around.
+            if same_staff_as_previous or shared_resource_ids:
+                if same_staff_as_previous and previous_appointment is not None:
+                    previous_appointment.buffer_after_minutes = 0
+                for rid in shared_resource_ids:
+                    prev_ar = previous_resources[rid]
+                    prev_ar.period = Range(prev_ar.period.lower, slot.starts_at, bounds="[)")
+                await db.flush()
 
             appointment = Appointment(
                 customer_id=customer.id,
@@ -1005,8 +1066,8 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
                 starts_at=slot.starts_at,
                 ends_at=slot.ends_at,
                 duration_minutes=service.duration_minutes,
-                buffer_before_minutes=service.buffer_before_minutes,
-                buffer_after_minutes=service.buffer_after_minutes,
+                buffer_before_minutes=before,
+                buffer_after_minutes=after,
                 price_cents=service.price_cents,
                 status="confirmed",
                 booking_group_id=group_id,
@@ -1016,15 +1077,34 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
                 created_by_user_id=actor.id,
                 resources=[
                     AppointmentResource(
-                        resource_id=r.id, kind=r.kind, period=Range(span[0], span[1], bounds="[)")
+                        resource_id=r.id,
+                        kind=r.kind,
+                        # The resource's own before-buffer is waived only when *this*
+                        # resource — not merely the staff member — is the one shared with
+                        # the previous link; a different room a same-staff link picked up
+                        # gets its full turnover regardless.
+                        period=Range(
+                            slot.starts_at
+                            - timedelta(
+                                minutes=0
+                                if r.id in shared_resource_ids
+                                else service.buffer_before_minutes
+                            ),
+                            slot.ends_at + timedelta(minutes=after),
+                            bounds="[)",
+                        ),
                     )
                     for r in claimed
                 ],
             )
             db.add(appointment)
             created.append(appointment)
+            await db.flush()
+
             cursor = slot.ends_at
-        await db.flush()
+            previous_appointment = appointment
+            previous_staff_id = staff_id
+            previous_resources = {r.resource_id: r for r in appointment.resources}
     except IntegrityError as error:
         await db.rollback()
         if not _is_slot_taken(error):
@@ -1065,17 +1145,27 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
 @router.post("/group/{group_id}/cancel", response_model=GroupOut)
 async def cancel_group(group_id: uuid.UUID, payload: CancelIn, actor: Scheduler, db: SessionDep):
     """Every non-terminal member, the same code path a single cancel uses — a completed
-    member stays completed, an already-cancelled one is untouched."""
-    members = list(
+    member stays completed, an already-cancelled one is untouched.
+
+    Members are locked `FOR UPDATE` in **id order** before anything reads their status —
+    the same reasoning as `_lock`, extended to more than one row: a fixed order is what
+    keeps two group cancels (or a group cancel and a single transition) that both touch an
+    overlapping set of rows from deadlocking each other, whichever order they were asked in.
+    """
+    ids = list(
         await db.scalars(
-            select(Appointment)
+            select(Appointment.id)
             .where(Appointment.booking_group_id == group_id)
-            .order_by(Appointment.starts_at)
-            .execution_options(populate_existing=True)
+            .order_by(Appointment.id)
+            .with_for_update()
         )
     )
-    if not members:
+    if not ids:
         raise HTTPException(status_code=404, detail="No such booking group.")
+    # Locked in id order; loaded and acted on in chain order — the lock order is only about
+    # avoiding deadlocks, never about what the response looks like.
+    members = [await _load(db, i) for i in ids]
+    members.sort(key=lambda a: a.starts_at)
     cancelled_ids = []
     for appointment in members:
         if appointment.status != "confirmed":

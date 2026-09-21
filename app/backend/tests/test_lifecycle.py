@@ -263,3 +263,121 @@ async def test_a_role_without_schedule_manage_may_not_transition_an_appointment(
 
     assert resp.status_code == 403, resp.text
     assert resp.json()["code"] == "capability_required"
+
+
+# --- concurrent transitions (fix round 1: Critical) ---------------------------------------
+#
+# Two requests racing on one appointment's status must not both win. `_load` is the read
+# both `complete_appointment` and `cancel_appointment` do before their status check — slowing
+# it (the same technique as `test_two_concurrent_bookings_of_one_slot...`) is what turns the
+# race from lucky into certain: both requests reach "read the row" before either has
+# committed a change.
+
+
+async def _slowed(monkeypatch, name: str):
+    """Patch `scheduling.appointments.<name>` so every call pauses just after the real one,
+    widening whatever race the caller is about to provoke."""
+    import asyncio
+
+    from scheduling import appointments
+
+    real = getattr(appointments, name)
+
+    async def slow(*args, **kwargs):
+        result = await real(*args, **kwargs)
+        await asyncio.sleep(0.25)
+        return result
+
+    monkeypatch.setattr(appointments, name, slow)
+
+
+async def _concurrent_requests(client, *requests: tuple[str, str, dict]):
+    """`requests` is (method, url, json_body) triples, fired together on independent ASGI
+    clients that share this test's session cookie — genuinely concurrent connections, not
+    just concurrent coroutines on one."""
+    import asyncio
+
+    from httpx import ASGITransport, AsyncClient
+
+    from main import app as main_app
+
+    cookie = client.cookies["linsuite_session"]
+
+    async def attempt(method: str, url: str, body: dict):
+        async with AsyncClient(transport=ASGITransport(app=main_app), base_url="http://test") as c:
+            c.cookies.set("linsuite_session", cookie)
+            return await c.request(method, url, json=body)
+
+    return await asyncio.gather(*(attempt(method, url, body) for method, url, body in requests))
+
+
+async def test_a_complete_and_a_cancel_racing_on_one_appointment_yield_one_winner(
+    client, monkeypatch
+):
+    appointment_id, *_ = await book_one(client)
+    await _slowed(monkeypatch, "_load")
+
+    complete_resp, cancel_resp = await _concurrent_requests(
+        client,
+        ("POST", f"{APPOINTMENTS}/{appointment_id}/complete", {}),
+        ("POST", f"{APPOINTMENTS}/{appointment_id}/cancel", {"reason": "Racing"}),
+    )
+
+    assert sorted([complete_resp.status_code, cancel_resp.status_code]) == [200, 409], (
+        complete_resp.text,
+        cancel_resp.text,
+    )
+    loser = complete_resp if complete_resp.status_code == 409 else cancel_resp
+    assert loser.json()["code"] == "invalid_transition"
+
+    async with session_scope() as db:
+        row = (
+            await db.execute(
+                text("SELECT status, completed_at, cancelled_at FROM appointments WHERE id = :id"),
+                {"id": appointment_id},
+            )
+        ).one()
+    # Exactly one terminal timestamp survives — the loser never touched the row.
+    stamps = [row.completed_at, row.cancelled_at]
+    assert sum(1 for s in stamps if s is not None) == 1
+    if row.status == "completed":
+        assert row.completed_at is not None
+        assert row.cancelled_at is None
+    else:
+        assert row.status == "cancelled"
+        assert row.cancelled_at is not None
+        assert row.completed_at is None
+
+
+async def test_a_move_racing_a_cancel_never_reattaches_resources_to_a_cancelled_appointment(
+    client, monkeypatch
+):
+    appointment_id, *_ = await book_one(client, room=True)
+    await _slowed(monkeypatch, "_load")
+
+    move_resp, cancel_resp = await _concurrent_requests(
+        client,
+        ("PATCH", f"{APPOINTMENTS}/{appointment_id}", {"starts_at": at("11:00")}),
+        ("POST", f"{APPOINTMENTS}/{appointment_id}/cancel", {"reason": "Racing"}),
+    )
+    assert move_resp.status_code in (200, 409), move_resp.text
+    # Cancel never blocks on a move (a move alone never terminalizes the row), so it always
+    # eventually succeeds whichever order the lock was granted in.
+    assert cancel_resp.status_code == 200, cancel_resp.text
+    if move_resp.status_code == 409:
+        assert move_resp.json()["code"] == "invalid_transition"
+
+    async with session_scope() as db:
+        row = (
+            await db.execute(
+                text("SELECT status FROM appointments WHERE id = :id"), {"id": appointment_id}
+            )
+        ).one()
+        resources = await db.scalar(
+            text("SELECT count(*) FROM appointment_resources WHERE appointment_id = :id"),
+            {"id": appointment_id},
+        )
+    assert row.status == "cancelled"
+    # Whichever order the lock was granted in, cancellation is the final word: no resource
+    # claim survives it, even one a racing move tried to re-attach.
+    assert resources == 0

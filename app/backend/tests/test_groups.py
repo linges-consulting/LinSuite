@@ -23,6 +23,7 @@ from tests.test_appointments import (  # noqa: F401 — the autouse fixture come
     make_resource,
     make_service,
     me_staff_id,
+    move,
     put_hours,
 )
 
@@ -317,3 +318,130 @@ async def test_cancelling_an_unknown_group_is_404(client):
     await as_admin(client)
     resp = await client.post(group_cancel_url("00000000-0000-0000-0000-000000000000"), json={})
     assert resp.status_code == 404, resp.text
+
+
+# --- the buffer waiver between consecutive links (fix round 1, Important) -----------------
+#
+# Same client, no turnover: a link's outgoing buffer and the next link's incoming buffer do
+# not count against each other, for the staff member and for a shared resource. Against
+# every other appointment those buffers apply in full, and the visit's own outer edges
+# (the first link's before, the last link's after) are never touched.
+
+
+async def test_a_same_staff_chain_offered_at_the_handover_actually_books(client):
+    """The exact repro: a 60-minute service with a 15-minute after-buffer, then a 30-minute
+    one, same staff. `GET .../group` must offer 09:00, and `POST /group` must book it —
+    the same instant, the same answer."""
+    ana, _ben = await two_providers(client)
+    facial = await make_service(
+        client, [ana], name="Facial", duration_minutes=60, buffer_after_minutes=15
+    )
+    addon = await make_service(client, [ana], name="Hot Stone Add-on", duration_minutes=30)
+
+    data = await group_availability(client, [facial, addon], staff=f"{ana},{ana}")
+    assert at("09:00") in [s["starts_at"] for s in data["days"][0]["slots"]]
+
+    resp = await book_group(
+        client, [{"service_id": facial, "staff_id": ana}, {"service_id": addon, "staff_id": ana}]
+    )
+
+    assert resp.status_code == 201, resp.text
+    first, second = resp.json()["appointments"]
+    assert first["starts_at"] == at("09:00")
+    assert first["ends_at"] == at("10:00")
+    assert second["starts_at"] == at("10:00")
+    assert second["staff"]["id"] == ana
+
+
+async def test_a_same_room_chain_offered_at_the_handover_actually_books(client):
+    """The same repro, for a shared *resource* rather than a shared staff member: without
+    the waiver, the two links' buffered periods would overlap and trip the exclusion
+    constraint the moment the second link is inserted."""
+    ana, ben = await two_providers(client)
+    room = await make_resource(client, "space", "Room 1")
+    facial = await make_service(
+        client,
+        [ana],
+        name="Facial",
+        duration_minutes=60,
+        buffer_after_minutes=15,
+        requirements=[{"kind": "space"}],
+    )
+    addon = await make_service(
+        client,
+        [ben],
+        name="Hot Stone Add-on",
+        duration_minutes=30,
+        requirements=[{"kind": "space"}],
+    )
+
+    data = await group_availability(client, [facial, addon], staff=f"{ana},{ben}")
+    assert at("09:00") in [s["starts_at"] for s in data["days"][0]["slots"]]
+
+    resp = await book_group(
+        client, [{"service_id": facial, "staff_id": ana}, {"service_id": addon, "staff_id": ben}]
+    )
+
+    assert resp.status_code == 201, resp.text
+    first, second = resp.json()["appointments"]
+    assert first["resources"] == [{"id": room, "name": "Room 1", "kind": "space"}]
+    assert second["resources"] == [{"id": room, "name": "Room 1", "kind": "space"}]
+
+
+async def test_an_unrelated_booking_right_after_the_visit_respects_the_last_links_buffer(client):
+    """The waiver is only between consecutive *siblings* — the visit's own outer edge (the
+    last link's after-buffer) still applies in full to everyone else."""
+    ana, ben = await two_providers(client)
+    facial = await make_service(client, [ana], name="Facial", duration_minutes=60)
+    addon = await make_service(
+        client, [ben], name="Hot Stone Add-on", duration_minutes=30, buffer_after_minutes=15
+    )
+    booked = await book_group(
+        client, [{"service_id": facial, "staff_id": ana}, {"service_id": addon, "staff_id": ben}]
+    )
+    assert booked.status_code == 201, booked.text
+    assert booked.json()["appointments"][1]["ends_at"] == at("10:30")
+
+    # Ben is free by the clock at 10:30, but the add-on's own 15-minute after-buffer is real
+    # turnover this unrelated client does not get to skip.
+    unrelated = await book(client, addon, ben, at("10:30"))
+
+    assert unrelated.status_code == 422, unrelated.text
+    assert unrelated.json()["code"] == "not_offered"
+
+
+async def test_an_outsider_inside_the_handover_window_still_blocks_the_chain(client):
+    """The waiver only ever ignores a *sibling that does not exist yet* — a real, pre-existing
+    appointment sitting in that same window is exactly what "not offered" still means."""
+    ana, ben = await two_providers(client)
+    facial = await make_service(
+        client, [ana], name="Facial", duration_minutes=60, buffer_after_minutes=15
+    )
+    addon = await make_service(client, [ben], name="Hot Stone Add-on", duration_minutes=30)
+    outsider = await book(client, addon, ben, at("10:00"))
+    assert outsider.status_code == 201, outsider.text
+
+    data = await group_availability(client, [facial, addon], staff=f"{ana},{ben}")
+
+    assert at("09:00") not in [s["starts_at"] for s in data["days"][0]["slots"]]
+
+
+async def test_a_no_op_patch_of_a_group_member_succeeds(client):
+    """A move that asks for nothing new must not be refused merely because the loader,
+    checking it against its own stored (waived) buffer, second-guesses the booking it was
+    itself part of."""
+    ana, _ben = await two_providers(client)
+    facial = await make_service(
+        client, [ana], name="Facial", duration_minutes=60, buffer_after_minutes=15
+    )
+    addon = await make_service(client, [ana], name="Hot Stone Add-on", duration_minutes=30)
+    booked = await book_group(
+        client, [{"service_id": facial, "staff_id": ana}, {"service_id": addon, "staff_id": ana}]
+    )
+    assert booked.status_code == 201, booked.text
+    second = booked.json()["appointments"][1]
+    assert second["starts_at"] == at("10:00")
+
+    resp = await move(client, second["id"], starts_at=at("10:00"))
+
+    assert resp.status_code == 200, resp.text
