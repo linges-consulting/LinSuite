@@ -411,7 +411,9 @@ async def snapshot(claims: dict, db: SessionDep, user: User) -> MfaOut:
     return MfaOut(
         enrolled=user.mfa_method is not None,
         method=user.mfa_method,
-        pending=state.pending,
+        # Same polarity as `assert_verified`: an enrolled account with no proof owes a code,
+        # whether or not the session hash survived to say so.
+        pending=state.pending or (user.mfa_method is not None and state.verified_at is None),
         enrolment_required=(
             user.mfa_method is None
             and ADMIN_CAPABILITY in user.capabilities

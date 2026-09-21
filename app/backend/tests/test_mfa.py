@@ -304,8 +304,12 @@ async def test_a_session_whose_redis_state_is_lost_is_not_verified(client):
 
     assert resp.status_code == 403, resp.text
     assert resp.json()["code"] == "mfa_verification_required"
+    # `/auth/me` is what the frontend routes on: it has to say the same thing the gate does,
+    # or the shell 403s everywhere and never shows the verify screen.
+    assert (await client.get("/api/auth/me")).json()["mfa"]["pending"] is True
     await forget_spent_steps()
     assert (await verify(client, code(secret, 1))).status_code == 200
+    assert (await client.get("/api/auth/me")).json()["mfa"]["pending"] is False
 
 
 async def test_an_unenrolled_account_needs_no_such_proof(client):
