@@ -17,3 +17,4 @@ dist/
 tmp/
 
 .playwright-mcp/
+.gstack/
