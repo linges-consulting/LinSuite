@@ -38,6 +38,18 @@ what offers 01:30 twice, an hour apart, both on the grid.
 **Busy intervals are inputs, not queries.** Appointments arrive with Task 15; until then the
 loader passes empty sets. What an appointment contributes — its own buffers included — is
 that ticket's decision, and this function does not need to know.
+
+**Advisory versus physical (tech-stack §22).** Steps 1 and 2 above are two kinds of rule.
+The shift, time off, closures and the horizon are *advisory*: a human may override them, on
+the record. A busy room or device and a staff member at their concurrency limit are
+*physical*: nothing overrides them. `relax_advisory=True` lifts exactly the advisory rules —
+each staff member's working block becomes the whole local day, time off, closures and the
+horizon are ignored — and changes nothing else, which is what lets booking ask "could an
+override reach this start?" with the same function that says what is offered. It is a
+question only the staff-side booking path asks; `/api/availability` never relaxes, and the
+public portal must never be given the switch. `advisory_breaches` is the other half: which
+of the four rules a given span breaks, so the person confirming is told what they are
+overriding.
 """
 
 from collections.abc import Hashable, Iterable, Mapping, Sequence
@@ -55,6 +67,14 @@ MINUTES_IN_DAY = 24 * 60
 
 Id = Hashable
 Interval = tuple[datetime, datetime]
+
+# The four advisory rules, in the order `advisory_breaches` names them. The frontend's
+# confirm dialog switches on these strings; renaming one is an API change.
+OUTSIDE_SHIFT = "outside_shift"
+TIME_OFF = "time_off"
+CLOSURE = "closure"
+BEYOND_HORIZON = "beyond_horizon"
+ADVISORY_RULES = (OUTSIDE_SHIFT, TIME_OFF, CLOSURE, BEYOND_HORIZON)
 
 
 @dataclass(frozen=True)
@@ -114,12 +134,17 @@ def bookable_slots(
     dates: Iterable[Date],
     now: datetime,
     horizon_ends_on: Date | None = None,
+    relax_advisory: bool = False,
 ) -> dict[Date, list[Slot]]:
     """The bookable starts on each of `dates` (business-local), in UTC, in order.
 
     Every requested date is a key, empty when nothing can be booked — a closure, a day past
     `horizon_ends_on`, a day nobody works. Each slot names every eligible staff member who
     could take it; a caller wanting one person filters `staff` before calling.
+
+    `relax_advisory` lifts the shift, time off, closures and the horizon (see the module
+    docstring) and nothing else: the past, busy resources and the concurrency limit apply
+    exactly as they do without it.
     """
     zone = ZoneInfo(timezone)
     providers = [s for s in staff if s.id in set(service.staff_ids)]
@@ -136,7 +161,9 @@ def bookable_slots(
     result: dict[Date, list[Slot]] = {}
     for day in dates:
         result[day] = []
-        if day in closures or (horizon_ends_on is not None and day > horizon_ends_on):
+        if not relax_advisory and (
+            day in closures or (horizon_ends_on is not None and day > horizon_ends_on)
+        ):
             continue
 
         # Step 3: each resource's free intervals on this local day — the whole day minus what
@@ -152,8 +179,13 @@ def bookable_slots(
         grid = [start for start in _grid(day, granularity_minutes, zone) if start >= now]
         takers: dict[datetime, list[Id]] = {}
         for person in providers:
-            free = _merged(local_blocks_to_instants(person.hours.get(day.weekday(), ()), day, zone))
-            free = _subtract(free, person.time_off)
+            # Steps 1 and 2. The advisory half — the shift and the time off — is what
+            # `relax_advisory` lifts; the saturated intervals are physical and never are.
+            if relax_advisory:
+                free = list(day_window)
+            else:
+                free = _merged(_shift(person, day, zone))
+                free = _subtract(free, person.time_off)
             free = _subtract(free, _saturated(staff_busy.get(person.id, ()), person.max_concurrent))
             if not free:
                 continue
@@ -167,6 +199,39 @@ def bookable_slots(
             for start, ids in sorted(takers.items())
         ]
     return result
+
+
+def advisory_breaches(
+    *,
+    timezone: str,
+    staff: StaffSpec,
+    day: Date,
+    span: Interval,
+    closures: set[Date],
+    horizon_ends_on: Date | None,
+) -> list[str]:
+    """Which of the four advisory rules a buffered `span` for `staff` on local `day` breaks,
+    in `ADVISORY_RULES` order — empty when it breaks none, which is the same "yes" the
+    ordinary engine gives for that start. The physical rules are not this function's
+    question: a start this names no rule for may still be refused by a busy room or a
+    saturated staff member, and that refusal is not one anybody can override."""
+    zone = ZoneInfo(timezone)
+    start, end = span
+    broken: list[str] = []
+    if not _within(span, _merged(_shift(staff, day, zone))):
+        broken.append(OUTSIDE_SHIFT)
+    if any(off_start < end and off_end > start for off_start, off_end in staff.time_off):
+        broken.append(TIME_OFF)
+    if day in closures:
+        broken.append(CLOSURE)
+    if horizon_ends_on is not None and day > horizon_ends_on:
+        broken.append(BEYOND_HORIZON)
+    return broken
+
+
+def _shift(person: StaffSpec, day: Date, zone: ZoneInfo) -> list[Interval]:
+    """One person's working blocks on one local day, as instants."""
+    return local_blocks_to_instants(person.hours.get(day.weekday(), ()), day, zone)
 
 
 def _candidates(requirement: Requirement, known: Mapping[Id, str]) -> list[Id]:

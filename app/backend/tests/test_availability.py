@@ -20,6 +20,7 @@ from scheduling.availability import (
     ResourceSpec,
     ServiceSpec,
     StaffSpec,
+    advisory_breaches,
     bookable_slots,
 )
 
@@ -60,6 +61,7 @@ def compute(
     resource_busy: dict | None = None,
     now: datetime = LONG_AGO,
     horizon_ends_on: date | None = None,
+    relax_advisory: bool = False,
 ):
     days = [day] if isinstance(day, date) else day
     return bookable_slots(
@@ -74,6 +76,7 @@ def compute(
         dates=days,
         now=now,
         horizon_ends_on=horizon_ends_on,
+        relax_advisory=relax_advisory,
     )
 
 
@@ -528,3 +531,129 @@ def test_the_grid_stays_on_local_midnight_across_the_repeated_hour():
     )
 
     assert found[:6] == ["00:00", "00:45", "01:30", "01:30", "02:15", "03:00"]
+
+
+# --- relaxed: the advisory rules lifted, the physical ones not (tech-stack §22) -------------------
+#
+# `relax_advisory=True` is how booking asks "could a human override their way into this
+# start?" — the shift, time off, closures and the horizon are set aside; a busy room, a busy
+# device and a saturated staff member are not, because those conflicts are physical. It is
+# never how `/api/availability` answers.
+
+# Every quarter hour a sixty-minute service fits inside one local day: 00:00 through 23:00.
+WHOLE_DAY = 93
+
+
+def test_relaxed_offers_every_start_of_the_day_though_the_shift_is_nine_to_noon():
+    relaxed = starts(relax_advisory=True)
+
+    assert len(relaxed) == WHOLE_DAY
+    assert relaxed[:2] == ["00:00", "00:15"] and relaxed[-1] == "23:00"
+    assert "08:00" in relaxed and "15:30" in relaxed
+    # And the ordinary answer is untouched by the flag existing.
+    assert starts() == NINE_SLOTS
+
+
+def test_relaxed_ignores_time_off_closures_and_the_horizon():
+    away = [(local(ORDINARY, "00:00"), local(ORDINARY + timedelta(days=1), "00:00"))]
+    on_holiday = [StaffSpec(id="ana", hours=NINE_TO_NOON, time_off=away)]
+    yesterday = ORDINARY - timedelta(days=1)
+
+    assert starts(staff=on_holiday) == []
+    assert len(starts(staff=on_holiday, relax_advisory=True)) == WHOLE_DAY
+    assert starts(closures={ORDINARY}) == []
+    assert len(starts(closures={ORDINARY}, relax_advisory=True)) == WHOLE_DAY
+    assert starts(horizon_ends_on=yesterday) == []
+    assert len(starts(horizon_ends_on=yesterday, relax_advisory=True)) == WHOLE_DAY
+
+
+def test_relaxed_still_refuses_a_busy_device_and_a_busy_room():
+    service = ServiceSpec(
+        duration_minutes=60,
+        staff_ids=("ana",),
+        requirements=(Requirement(kind="equipment", resource_id="laser-2"),),
+    )
+    resources = [ResourceSpec(id="laser-2", kind="equipment")]
+    busy = {"laser-2": [(local(ORDINARY, "10:00"), local(ORDINARY, "11:00"))]}
+
+    relaxed = starts(service=service, resources=resources, resource_busy=busy, relax_advisory=True)
+
+    assert len(relaxed) == WHOLE_DAY - 7  # 09:15 … 10:45 gone, exactly as when not relaxed
+    assert [s for s in relaxed if s in NINE_SLOTS] == ["09:00", "11:00"]
+    # A room nobody has: still nothing, relaxed or not.
+    needs_room = ServiceSpec(
+        duration_minutes=60, staff_ids=("ana",), requirements=(Requirement(kind="space"),)
+    )
+    assert starts(service=needs_room, relax_advisory=True) == []
+
+
+def test_relaxed_still_refuses_a_saturated_staff_member():
+    ten_to_eleven = (local(ORDINARY, "10:00"), local(ORDINARY, "11:00"))
+    one_chair = [StaffSpec(id="ana", hours=NINE_TO_NOON, max_concurrent=1)]
+    two_chairs = [StaffSpec(id="ana", hours=NINE_TO_NOON, max_concurrent=2)]
+
+    once = starts(staff=one_chair, staff_busy={"ana": [ten_to_eleven]}, relax_advisory=True)
+    assert "10:00" not in once and "09:15" not in once and "11:00" in once
+    twice = starts(staff=two_chairs, staff_busy={"ana": [ten_to_eleven]}, relax_advisory=True)
+    assert "10:00" in twice
+    full = starts(staff=two_chairs, staff_busy={"ana": [ten_to_eleven] * 2}, relax_advisory=True)
+    assert "10:00" not in full
+
+
+def test_relaxed_still_drops_starts_that_have_begun():
+    now = local(ORDINARY, "22:10")
+
+    assert starts(now=now, relax_advisory=True) == ["22:15", "22:30", "22:45", "23:00"]
+
+
+def breaches(hhmm_start: str, hhmm_end: str, *, day: date = ORDINARY, **kwargs) -> list[str]:
+    staff = kwargs.pop("staff", StaffSpec(id="ana", hours=NINE_TO_NOON))
+    return advisory_breaches(
+        timezone=TORONTO,
+        staff=staff,
+        day=day,
+        span=(local(day, hhmm_start), local(day, hhmm_end)),
+        closures=kwargs.pop("closures", set()),
+        horizon_ends_on=kwargs.pop("horizon_ends_on", None),
+    )
+
+
+def test_a_span_inside_the_shift_breaks_no_advisory_rule():
+    assert breaches("10:00", "11:00") == []
+    assert breaches("11:00", "12:00") == []  # ends exactly at the shift's end
+
+
+def test_a_span_past_the_shift_end_or_before_its_start_is_outside_shift():
+    assert breaches("11:30", "12:30") == ["outside_shift"]
+    assert breaches("08:30", "09:30") == ["outside_shift"]
+    assert breaches("14:00", "15:00") == ["outside_shift"]
+    # A day nobody works at all.
+    mondays_only = StaffSpec(id="ana", hours={0: [(540, 720)]})
+    tuesday = date(2026, 6, 16)
+    assert breaches("10:00", "11:00", day=tuesday, staff=mondays_only) == ["outside_shift"]
+
+
+def test_a_span_touching_time_off_is_time_off():
+    away = [(local(ORDINARY, "10:00"), local(ORDINARY, "11:00"))]
+    staff = StaffSpec(id="ana", hours=NINE_TO_NOON, time_off=away)
+
+    assert breaches("10:30", "11:30", staff=staff) == ["time_off"]
+    # Touching is not overlapping: 11:00 starts as the absence ends.
+    assert breaches("11:00", "12:00", staff=staff) == []
+
+
+def test_a_closure_and_the_horizon_are_named():
+    assert breaches("10:00", "11:00", closures={ORDINARY}) == ["closure"]
+    yesterday = ORDINARY - timedelta(days=1)
+    assert breaches("10:00", "11:00", horizon_ends_on=yesterday) == ["beyond_horizon"]
+    assert breaches("10:00", "11:00", horizon_ends_on=ORDINARY) == []
+
+
+def test_every_broken_rule_is_named_in_a_fixed_order():
+    away = [(local(ORDINARY, "13:00"), local(ORDINARY, "14:00"))]
+    staff = StaffSpec(id="ana", hours=NINE_TO_NOON, time_off=away)
+    yesterday = ORDINARY - timedelta(days=1)
+
+    assert breaches(
+        "13:30", "14:30", staff=staff, closures={ORDINARY}, horizon_ends_on=yesterday
+    ) == ["outside_shift", "time_off", "closure", "beyond_horizon"]

@@ -174,6 +174,10 @@ class Computed:
     days: dict[Date, list[Slot]]
     resources: list[ResourceRow]
     resource_busy: dict[Id, list[Interval]]
+    # The advisory inputs, kept so booking can name which rules a start breaks
+    # (`availability.advisory_breaches`) without reading them twice.
+    staff: dict[Id, StaffSpec]
+    closures: set[Date]
 
 
 async def compute(
@@ -184,11 +188,18 @@ async def compute(
     to: Date,
     *,
     excluding: uuid.UUID | None = None,
+    relax_advisory: bool = False,
 ) -> Computed:
     """The engine's inputs, read for `staff_ids` over the local dates `from_`..`to`, and its
     answer. `service` is already the catalog's bookable view; `staff_ids` is the eligible set
     or one member of it — the caller has checked which. `excluding` is the appointment being
-    moved, left out of what is busy (see `busy_intervals`)."""
+    moved, left out of what is busy (see `busy_intervals`).
+
+    `relax_advisory` is the engine's switch of the same name (tech-stack §22): the shift,
+    time off, closures and the horizon set aside, the physical rules untouched. **Only
+    `scheduling/appointments.py` passes it**, to diagnose an override and to make one. The
+    availability route never does, and the client-facing portal (M3) must never be given
+    it — a relaxed answer is a list of starts nobody has agreed to work."""
     business = (
         await db.execute(
             select(
@@ -251,6 +262,10 @@ async def compute(
 
     now = datetime.now(UTC)
     horizon_ends_on = now.astimezone(zone).date() + timedelta(days=business.booking_horizon_days)
+    specs = {
+        s: StaffSpec(id=s, hours=hours[s], time_off=time_off[s], max_concurrent=limits.get(s, 1))
+        for s in staff_ids
+    }
     days = bookable_slots(
         timezone=business.timezone,
         granularity_minutes=business.slot_granularity_minutes,
@@ -266,10 +281,7 @@ async def compute(
                 for r in service.requirements
             ],
         ),
-        staff=[
-            StaffSpec(id=s, hours=hours[s], time_off=time_off[s], max_concurrent=limits.get(s, 1))
-            for s in staff_ids
-        ],
+        staff=specs.values(),
         resources=[ResourceSpec(id=r.id, kind=r.kind) for r in resources],
         closures=closures,
         staff_busy=staff_busy,
@@ -277,6 +289,7 @@ async def compute(
         dates=dates,
         now=now,
         horizon_ends_on=horizon_ends_on,
+        relax_advisory=relax_advisory,
     )
     return Computed(
         timezone=business.timezone,
@@ -285,6 +298,8 @@ async def compute(
         days=days,
         resources=resources,
         resource_busy=resource_busy,
+        staff=specs,
+        closures=closures,
     )
 
 
