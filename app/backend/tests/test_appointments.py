@@ -903,6 +903,21 @@ async def test_s5_the_trigger_enforces_max_concurrent_appointments_over_buffered
             assert constraint_of(refused.value) == "tg_appointments_staff_concurrency"
 
 
+async def test_s5_the_trigger_does_not_count_a_no_show_row(client):
+    """A no-show frees the staff member exactly as a cancel does (fix wave, finding 2): at the
+    default limit of one, the hour a client did not turn up for is bookable again."""
+    await as_admin(client)
+    seed = await _seed_rows()
+
+    async with session_scope() as db:
+        await _insert_appointment(db, seed, at("10:00"), at("11:00"), after=15, status="no_show")
+        await db.commit()
+
+    async with session_scope() as db:
+        await _insert_appointment(db, seed, at("10:00"), at("11:00"))
+        await db.commit()
+
+
 BOOKING_TABLES = ("customers", "appointments", "appointment_resources")
 
 

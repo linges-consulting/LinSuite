@@ -46,6 +46,7 @@ from core.models import Business
 from scheduling import cache
 from scheduling._admin_forms import refuse
 from scheduling.availability import (
+    NOT_OCCUPYING,
     ChainLink,
     Id,
     Interval,
@@ -112,7 +113,9 @@ async def busy_intervals(
 ) -> tuple[dict[Id, list[Interval]], dict[Id, list[Interval]]]:
     """The intervals already taken inside `window`, per staff member and per resource.
 
-    A staff member is busy for each non-cancelled appointment's span **inflated by the buffers
+    A staff member is busy for each *occupying* appointment's span — `availability.
+    NOT_OCCUPYING` is the one definition, shared with the trigger, of what does not count: a
+    cancelled or no-show booking holds nothing — **inflated by the buffers
     snapshotted on that appointment** — the turnaround after one booking is time nobody else
     can have either, and it is the appointment's own turnaround, not the service's current
     one. A resource is busy for each `appointment_resources.period`, which already is that
@@ -147,7 +150,7 @@ async def busy_intervals(
         for row in await db.execute(
             select(Appointment.staff_id, starts, ends).where(
                 Appointment.staff_id.in_(staff_ids),
-                Appointment.status != "cancelled",
+                Appointment.status.not_in(NOT_OCCUPYING),
                 starts < window[1],
                 ends > window[0],
                 *([Appointment.id != excluding] if excluding else []),
@@ -179,7 +182,7 @@ async def busy_intervals(
                     Appointment.buffer_after_minutes,
                 ).where(
                     Appointment.staff_id.in_(staff_ids),
-                    Appointment.status != "cancelled",
+                    Appointment.status.not_in(NOT_OCCUPYING),
                     Appointment.starts_at < window[1] + margin,
                     Appointment.ends_at > window[0] - margin,
                 )
@@ -237,7 +240,7 @@ async def busy_intervals(
                 .join(Appointment, Appointment.id == AppointmentResource.appointment_id)
                 .where(
                     AppointmentResource.resource_id.in_(resource_ids),
-                    Appointment.status != "cancelled",
+                    Appointment.status.not_in(NOT_OCCUPYING),
                     Appointment.starts_at < window[1] + margin,
                     Appointment.ends_at > window[0] - margin,
                 )

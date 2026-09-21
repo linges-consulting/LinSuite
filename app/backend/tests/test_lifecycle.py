@@ -201,6 +201,46 @@ async def test_marking_no_show_after_the_start_frees_the_room_and_audits_it(clie
     assert events[0][2] == appointment_id
 
 
+async def test_a_no_show_frees_the_staff_members_remaining_time(client):
+    """A no-show does not occupy: the stylist is bookable again for the span the client did
+    not turn up for. The row is pushed into the past to be markable and then pushed back, so
+    the transition itself goes through the real endpoint (fix wave, finding 2)."""
+    appointment_id, service, me, _ = await book_one(client)
+    await push_to_past(appointment_id)
+    marked = await client.post(f"{APPOINTMENTS}/{appointment_id}/no-show", json={})
+    assert marked.status_code == 200, marked.text
+    await push_to_past(appointment_id, days=-20)
+
+    assert "10:00" in await slots_on(client, service, staff_id=me)
+    second = await book(client, service, me, at("10:00"))
+    assert second.status_code == 201, second.text
+
+
+async def test_lowering_the_concurrency_limit_never_blocks_completing_an_existing_appointment(
+    client,
+):
+    """The staff-concurrency trigger is about taking a span, not keeping one: an appointment
+    that already holds its slot may still be completed after the limit is lowered under it
+    (fix wave, finding 3)."""
+    await as_admin(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me, [(0, 540, 720)])
+    raised = await client.patch(f"/api/admin/staff/{me}", json={"max_concurrent_appointments": 2})
+    assert raised.status_code == 200, raised.text
+    service = await make_service(client, [me])
+    first = await book(client, service, me, at("10:00"))
+    assert first.status_code == 201, first.text
+    second = await book(client, service, me, at("10:30"))
+    assert second.status_code == 201, second.text
+    lowered = await client.patch(f"/api/admin/staff/{me}", json={"max_concurrent_appointments": 1})
+    assert lowered.status_code == 200, lowered.text
+
+    resp = await client.post(f"{APPOINTMENTS}/{first.json()['id']}/complete", json={})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "completed"
+
+
 async def test_no_show_is_distinguishable_from_cancelled(client):
     """Both terminal, both free their resources — but the status the report reads is not
     the same one (acceptance criteria: "No-show is distinguishable from cancelled")."""

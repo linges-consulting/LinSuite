@@ -8,6 +8,8 @@ everything), and that a group's cancel acts on every non-terminal member and lea
 `tests/test_chains.py` already pins the pure search this all sits on.
 """
 
+from datetime import timedelta
+
 from sqlalchemy import text
 
 from core.db import session_scope
@@ -532,6 +534,96 @@ async def test_cancelling_one_link_of_a_same_room_chain_restores_the_others_peri
     assert other.json()["code"] == "not_offered"
     periods = await resource_periods(first["id"])
     assert periods == [(room, at("09:00"), at("10:15"))]
+
+
+# --- no-show on a handover chain (fix wave, findings 1 and 2) --------------------------------
+#
+# A no-show stops occupying exactly as a cancel does, so the *status update itself* must not be
+# compared against its sibling with the facing buffers back in force — that comparison overlaps
+# and the trigger refuses it. The row has to be in the past to be markable, so the whole visit
+# is pushed back (resource claims included) before the transition is asked for.
+
+PAST_DAYS = 20
+PAST_MONDAY = MONDAY - timedelta(days=PAST_DAYS)
+
+
+async def push_group_to_past(group_id: str, days: int = PAST_DAYS) -> None:
+    async with session_scope() as db:
+        await db.execute(
+            text(
+                "UPDATE appointment_resources SET period = tstzrange("
+                "lower(period) - make_interval(days => :d), "
+                "upper(period) - make_interval(days => :d), '[)') "
+                "WHERE appointment_id IN "
+                "(SELECT id FROM appointments WHERE booking_group_id = :g)"
+            ),
+            {"d": days, "g": group_id},
+        )
+        await db.execute(
+            text(
+                "UPDATE appointments SET starts_at = starts_at - make_interval(days => :d), "
+                "ends_at = ends_at - make_interval(days => :d) WHERE booking_group_id = :g"
+            ),
+            {"d": days, "g": group_id},
+        )
+        await db.commit()
+
+
+async def _buffered_same_staff_chain(client):
+    """Cut (15-minute after-buffer) then colour (10-minute before-buffer), one stylist, one
+    room — the commonest salon visit, and the one the handover waiver exists for."""
+    ana, _ben = await two_providers(client)
+    room = await make_resource(client, "space", "Room 1")
+    cut = await make_service(
+        client,
+        [ana],
+        name="Cut",
+        duration_minutes=60,
+        buffer_after_minutes=15,
+        requirements=[{"kind": "space"}],
+    )
+    colour = await make_service(
+        client,
+        [ana],
+        name="Colour",
+        duration_minutes=30,
+        buffer_before_minutes=10,
+        requirements=[{"kind": "space"}],
+    )
+    booked = await book_group(
+        client, [{"service_id": cut, "staff_id": ana}, {"service_id": colour, "staff_id": ana}]
+    )
+    assert booked.status_code == 201, booked.text
+    body = booked.json()
+    await push_group_to_past(body["booking_group_id"])
+    return room, body["appointments"]
+
+
+async def test_no_showing_the_first_link_of_a_buffered_chain_frees_the_siblings_period(client):
+    room, (first, second) = await _buffered_same_staff_chain(client)
+
+    resp = await client.post(f"{APPOINTMENTS}/{first['id']}/no-show", json={})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "no_show"
+    assert resp.json()["resources"] == []
+    # The colour's own before-buffer is no longer waived against anything: its room period
+    # springs back to cover the ten minutes before it starts.
+    assert await resource_periods(second["id"]) == [
+        (room, at("09:50", PAST_MONDAY), at("10:30", PAST_MONDAY))
+    ]
+
+
+async def test_no_showing_the_second_link_of_a_buffered_chain_frees_the_siblings_period(client):
+    room, (first, second) = await _buffered_same_staff_chain(client)
+
+    resp = await client.post(f"{APPOINTMENTS}/{second['id']}/no-show", json={})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "no_show"
+    assert await resource_periods(first["id"]) == [
+        (room, at("09:00", PAST_MONDAY), at("10:15", PAST_MONDAY))
+    ]
 
 
 async def test_moving_a_link_away_restores_the_previous_links_buffer(client):

@@ -66,7 +66,14 @@ from customers.models import Customer
 from customers.routes import CustomerIn, create_customer
 from scheduling import cache
 from scheduling._admin_forms import blank_to_none, refuse
-from scheduling.availability import Interval, Occupant, Slot, advisory_breaches, waive_handover
+from scheduling.availability import (
+    NOT_OCCUPYING,
+    Interval,
+    Occupant,
+    Slot,
+    advisory_breaches,
+    waive_handover,
+)
 from scheduling.clock import localize
 from scheduling.models import Appointment, AppointmentResource, Staff
 from scheduling.services import CatalogServiceOut, RequirementOut, catalog_entry
@@ -397,7 +404,7 @@ async def recompute_group_periods(
             select(Appointment)
             .where(
                 Appointment.booking_group_id == booking_group_id,
-                Appointment.status.not_in(("cancelled", "no_show")),
+                Appointment.status.not_in(NOT_OCCUPYING),
             )
             .execution_options(populate_existing=True)
         )
@@ -912,7 +919,7 @@ async def change_appointment(
                 select(Appointment).where(
                     Appointment.booking_group_id == appointment.booking_group_id,
                     Appointment.id != appointment.id,
-                    Appointment.status.not_in(("cancelled", "no_show")),
+                    Appointment.status.not_in(NOT_OCCUPYING),
                 )
             )
         ]
