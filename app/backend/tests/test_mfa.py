@@ -288,6 +288,39 @@ async def test_a_pending_session_reaches_only_verify_me_and_logout(client):
     assert (await client.post("/api/auth/logout", json={})).status_code == 204
 
 
+async def test_a_session_whose_redis_state_is_lost_is_not_verified(client):
+    """The gate asks for positive proof (fix wave, finding 5). Redis is a cache with
+    snapshot persistence; an enrolled account whose session hash goes missing — a restart,
+    an eviction — must be treated as *not* having presented a code, never as having done so.
+    `/auth/mfa/verify` stays open, so the way out is to present one."""
+    await login(client)
+    secret, _ = await enrol(client)
+    client.cookies.clear()
+    await login(client)
+    assert (await verify(client, code(secret))).status_code == 200, "precondition"
+    await get_redis().delete(mfa.session_key(jti(client)))
+
+    resp = await client.get(ADMIN_ENDPOINT)
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["code"] == "mfa_verification_required"
+    await forget_spent_steps()
+    assert (await verify(client, code(secret, 1))).status_code == 200
+
+
+async def test_an_unenrolled_account_needs_no_such_proof(client):
+    """The polarity flip is about enrolled accounts only: an account with no second factor
+    has nothing to present, and its session is not held hostage by a missing Redis hash."""
+    await login(client)
+    await get_redis().delete(mfa.session_key(jti(client)))
+
+    resp = await client.get(ADMIN_ENDPOINT)
+
+    # It may still want Admin Mode; what it must never want is a code this account has not
+    # got and cannot produce.
+    assert resp.json().get("code") != "mfa_verification_required", resp.text
+
+
 async def test_a_valid_code_clears_pending_and_records_when(client):
     await login(client)
     secret, _ = await enrol(client)

@@ -51,6 +51,12 @@ MFA_EMAIL_OTP_NOT_ALLOWED = "mfa_email_otp_not_allowed"
 # there. Emitted by the middleware in `main.py` rather than raised as `Forbidden`: that handler
 # runs inside `ExceptionMiddleware`, which a middleware's own exception never reaches.
 UPLOAD_ORIGIN_REQUIRED = "upload_origin_required"
+# Redis is unreachable on a path that must not guess: the `jti` denylist, the Admin Mode
+# window, this session's MFA state and the credential throttle all fail closed. 503 rather
+# than 500 so a screen can say "try again shortly" instead of "something is broken"
+# (tech-stack §14). The availability cache is the one caller that degrades instead — a miss
+# there is a slower answer, not a weaker one.
+SERVICE_UNAVAILABLE = "service_unavailable"
 
 
 class Forbidden(HTTPException):

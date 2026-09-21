@@ -71,7 +71,7 @@ async def enrolling_user(user: UnrestrictedUser, claims: ClaimsDep, db: SessionD
     """
     if await change_required(db, user):
         raise PASSWORD_CHANGE_REQUIRED
-    await mfa.assert_verified(claims)
+    await mfa.assert_verified(claims, user)
     return user
 
 

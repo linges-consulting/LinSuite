@@ -24,6 +24,11 @@ services:
 
   redis:
     image: redis:7-alpine
+    # Append-only, so a restart loses at most the last second of writes rather than the last
+    # snapshot interval. What lives here fails closed when it is missing — the `jti` denylist
+    # (a lost entry resurrects a logged-out session), this session's MFA verification, the
+    # Admin Mode window, the credential throttle — so the shorter that window, the better.
+    command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redisdata:/data
     healthcheck:
@@ -44,7 +49,7 @@ services:
       # Longer rule = higher default priority, so /api wins over the frontend's catch-all.
       traefik.http.routers.app.rule: Host(`${APP_HOST:-localhost}`) && PathPrefix(`/api`)
       traefik.http.routers.app.entrypoints: web
-      traefik.http.routers.app.middlewares: api-ratelimit@docker
+      traefik.http.routers.app.middlewares: api-ratelimit@docker,api-bodylimit@docker
       traefik.http.services.app.loadbalancer.server.port: "8000"
 
       # Blunt per-IP volumetric limits (tech-stack §14). Deliberately *not* application code:
@@ -66,17 +71,31 @@ services:
       traefik.http.middlewares.auth-ratelimit.ratelimit.average: "60"
       traefik.http.middlewares.auth-ratelimit.ratelimit.period: "1m"
       traefik.http.middlewares.auth-ratelimit.ratelimit.burst: "20"
+      # A ceiling on the request body, on both routers. FastAPI parses the body *before* it
+      # resolves dependencies, so no amount of auth protects against it: an unauthenticated
+      # `POST /api/admin/business/logo` with `Transfer-Encoding: chunked` carries no
+      # `Content-Length` for the in-app check to read, and Starlette spools the whole
+      # multipart to disk before the 401. On a single-VM tenant that shares a disk with
+      # Postgres, filling it takes the database down. 2 MiB: the largest legitimate body is
+      # the 1 MB logo. `mem` equals `max`, so nothing is spooled to traefik's disk either.
+      traefik.http.middlewares.api-bodylimit.buffering.maxRequestBodyBytes: "2097152"
+      traefik.http.middlewares.api-bodylimit.buffering.memRequestBodyBytes: "2097152"
       # Its own router onto the same service, so the tighter bucket applies to the credential
       # endpoints only. Priority is explicit rather than left to rule length: a later, longer
       # rule on the `app` router would otherwise silently take these paths back.
+      # `/auth/me` is polled by every open tab (12/minute in Admin Mode), so leaving it in
+      # the tight bucket means a clinic behind one NAT throttles its own logins — the exact
+      # self-throttling tech-stack §14 rejected per-IP limiting of credentials for. It is a
+      # read, not a door onto a credential, so it falls to the general 300/minute bucket.
       traefik.http.routers.auth.rule: Host(`${APP_HOST:-localhost}`) && PathPrefix(`/api/auth`)
+        && !Path(`/api/auth/me`)
       traefik.http.routers.auth.entrypoints: web
       # Well above any rule length: the default priority *is* the rule's length, and a long
       # production FQDN in APP_HOST would push the `app` router past a smaller number here —
       # silently putting the credential endpoints back on the loose bucket.
       traefik.http.routers.auth.priority: "1000"
       traefik.http.routers.auth.service: app
-      traefik.http.routers.auth.middlewares: auth-ratelimit@docker
+      traefik.http.routers.auth.middlewares: auth-ratelimit@docker,api-bodylimit@docker
 
   worker:
     <<: *backend

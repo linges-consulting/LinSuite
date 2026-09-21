@@ -1,6 +1,17 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# What `.env.example` ships in place of a secret, and the one command that replaces it. The
+# placeholder is refused rather than defaulted: a deployment that forgot to change `JWT_SECRET`
+# can have an Administrator cookie minted by anybody who has read this repository, and a
+# `MFA_ENCRYPTION_KEY` that is not hex only fails at the owner's first enrolment — by which
+# time the clean-clone path (wizard → login → forced enrolment) is a 500 with no way forward.
+PLACEHOLDER = "change-me"
+GENERATE = "openssl rand -hex 32"
+JWT_SECRET_MIN = 32
+MFA_KEY_HEX = 64
 
 
 class Settings(BaseSettings):
@@ -89,6 +100,32 @@ class Settings(BaseSettings):
     # First-run setup token (tech-stack §17): written 0600 here on every boot until setup
     # completes. In compose this path is a volume, so it survives a container replacement.
     setup_token_file: str = "/var/lib/linsuite/setup-token"
+
+    @field_validator("jwt_secret", mode="after")
+    @classmethod
+    def _real_jwt_secret(cls, value: str) -> str:
+        if value.startswith(PLACEHOLDER) or len(value) < JWT_SECRET_MIN:
+            raise ValueError(
+                f"JWT_SECRET must be a real secret of at least {JWT_SECRET_MIN} characters. "
+                f"Generate one with: {GENERATE}"
+            )
+        return value
+
+    @field_validator("mfa_encryption_key", mode="after")
+    @classmethod
+    def _real_mfa_key(cls, value: str) -> str:
+        try:
+            usable = not value.startswith(PLACEHOLDER) and len(bytes.fromhex(value)) * 2 == (
+                MFA_KEY_HEX
+            )
+        except ValueError:
+            usable = False
+        if not usable:
+            raise ValueError(
+                f"MFA_ENCRYPTION_KEY must be {MFA_KEY_HEX} hex characters (32 bytes). "
+                f"Generate one with: {GENERATE}"
+            )
+        return value
 
 
 @lru_cache

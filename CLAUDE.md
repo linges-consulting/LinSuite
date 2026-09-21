@@ -26,7 +26,7 @@ Backend (`cd app/backend`, Python 3.12 via `uv`; system python is too old):
 - `uv sync` — install
 - `uv run pytest` / `uv run pytest tests/test_health.py -k name` — tests start a throwaway Postgres in Docker
 - `uv run ruff check . && uv run ruff format .`
-- `uv run alembic revision -m "..."` (needs `DATABASE_URL_MIGRATE`; copy `.env.example` to `.env` at the repo root)
+- `uv run alembic revision -m "..."` (needs `DATABASE_URL_MIGRATE`; copy `.env.example` to `.env` at the repo root and fill in the two `openssl rand -hex 32` secrets — `Settings` refuses the shipped placeholders)
 
 Frontend (`cd app/frontend`, Node 24 + npm):
 
@@ -34,7 +34,7 @@ Frontend (`cd app/frontend`, Node 24 + npm):
 - `npm test` (vitest) · `npm run lint` (oxlint + tsc) · `npm run build`
 - `npx shadcn@latest add <component>` — follow `docs/DESIGN.md`
 
-Stack: `cp .env.example .env`, then `docker compose up` from the repo root. Traefik serves the shell at `http://localhost:${TRAEFIK_HTTP_PORT}/` (Vite dev server in the `frontend` service, bind-mounted, HMR works) and routes `/api` to FastAPI.
+Stack: `cp .env.example .env`, then replace the two `change-me-…` placeholders with real secrets (`openssl rand -hex 32`, once for `JWT_SECRET` and once for `MFA_ENCRYPTION_KEY` — the app refuses to boot otherwise), then `docker compose up` from the repo root. Traefik serves the shell at `http://localhost:${TRAEFIK_HTTP_PORT}/` (Vite dev server in the `frontend` service, bind-mounted, HMR works) and routes `/api` to FastAPI.
 
 ## Testing seams
 

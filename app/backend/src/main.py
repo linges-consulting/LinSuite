@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from redis.exceptions import RedisError
 from sqlalchemy import text
 
 from auth.admin_users import router as admin_users_router
@@ -17,7 +18,7 @@ from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
 from core.config import get_settings
 from core.db import SessionDep, get_engine, get_purge_engine, session_scope
-from core.errors import UPLOAD_ORIGIN_REQUIRED, Forbidden
+from core.errors import SERVICE_UNAVAILABLE, UPLOAD_ORIGIN_REQUIRED, Forbidden
 from core.logging import configure_logging
 from core.redis import get_redis
 from customers.routes import router as customers_router
@@ -75,6 +76,23 @@ async def validation_error(_: Request, exc: RequestValidationError) -> JSONRespo
 @app.exception_handler(Forbidden)
 async def forbidden(_: Request, exc: Forbidden) -> JSONResponse:
     return JSONResponse({"detail": exc.detail, "code": exc.code}, status_code=403)
+
+
+# Redis is down. The four request-path callers — the `jti` denylist, Admin Mode, this
+# session's MFA state and the credential throttle — all fail closed and must go on doing so:
+# an attacker who can degrade Redis must not thereby get unthrottled guessing or a session
+# that cannot be revoked. What was wrong was the *surface*: an uncaught `RedisError` is a
+# bare 500, which reads as a bug in the app rather than an outage of a dependency. One
+# handler here rather than a `try`/`except` at each call site, so no future caller can forget
+# it. `scheduling/cache.py` catches its own and degrades to an uncached 200 — a cache miss is
+# a slower answer, never a weaker one — so it never reaches this.
+@app.exception_handler(RedisError)
+async def redis_unavailable(_: Request, exc: RedisError) -> JSONResponse:
+    log.error("redis: unavailable on a request path: %s", exc)
+    return JSONResponse(
+        {"detail": "Temporarily unavailable. Try again shortly.", "code": SERVICE_UNAVAILABLE},
+        status_code=503,
+    )
 
 
 # Half of the CSRF defence for the session cookie; `SameSite=Lax` is the other half.

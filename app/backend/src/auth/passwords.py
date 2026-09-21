@@ -230,7 +230,7 @@ async def change_password(
     able to rewrite that password, or a stolen credential defeats the factor meant to
     survive it.
     """
-    await mfa.assert_verified(claims)
+    await mfa.assert_verified(claims, user)
 
     # The same throttle as `/auth/login` and the Admin Mode re-authentication, on the same
     # counter: this is a third door onto one credential, and an attacker who found it

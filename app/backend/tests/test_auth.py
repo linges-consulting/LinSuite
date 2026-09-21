@@ -314,3 +314,35 @@ async def test_the_application_role_cannot_rewrite_or_erase_an_audit_event(clien
         assert "append-only" in str(caught.value) or "permission denied" in str(caught.value)
 
     assert len(await audit()) == 1
+
+
+# --- a Redis outage on an auth path (fix wave, finding 10) ----------------------------------
+#
+# Fail-closed is the policy and stays the policy: the `jti` denylist, the Admin Mode window,
+# the MFA state and the throttle all *must* refuse rather than guess when Redis is gone. 500
+# was only ever the wrong surface — it reads as a bug in the app rather than an outage of a
+# dependency, and nothing in the frontend could tell the two apart. One handler, one code.
+
+
+class _DeadRedis:
+    """Every call raises, the way a refused or wedged connection does."""
+
+    def __getattr__(self, _name):
+        async def refuse(*_args, **_kwargs):
+            from redis.exceptions import ConnectionError as RedisConnectionError
+
+            raise RedisConnectionError("Redis is down")
+
+        return refuse
+
+
+async def test_a_redis_outage_on_an_authenticated_route_is_a_coded_503(client, monkeypatch):
+    login = await client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD})
+    assert login.status_code == 200, login.text
+    # The denylist read every authenticated request makes, against a Redis that is not there.
+    monkeypatch.setattr(session_mod, "get_redis", lambda: _DeadRedis())
+
+    resp = await client.get("/api/auth/me")
+
+    assert resp.status_code == 503, resp.text
+    assert resp.json()["code"] == "service_unavailable"

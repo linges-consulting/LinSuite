@@ -353,16 +353,27 @@ async def enrolment_required(db: SessionDep, user: User) -> bool:
 # --- the gate every protected route inherits ------------------------------------------------------
 
 
-async def assert_verified(claims: dict) -> None:
+async def assert_verified(claims: dict, user: User) -> None:
     """Refuse a session that has presented a password and nothing else.
+
+    **Positive proof, not absent doubt** (fix wave, finding 5). An account with a second
+    factor enrolled has to carry `verified_at` in this session's Redis hash; the *absence*
+    of the hash is "not verified", never "nothing owed". Redis here is a cache with snapshot
+    persistence — a restart can lose the last interval of writes — and a factor whose
+    enforcement depends on a cache surviving is the wrong way round: the failure would
+    silently clear a password-only session, including its way to `/auth/password/change`.
+    `/auth/mfa/verify` runs on `UnrestrictedUser`, so the way out of a lost hash is to
+    present a code, which is exactly what the rule is asking for.
 
     Named separately from `assert_cleared` because one endpoint needs exactly this half:
     `POST /auth/password/change` runs on `UnrestrictedUser` (it is how a forced change is
-    paid) and must still be closed to a pending session — otherwise somebody holding only a
-    stolen password could rewrite the credential without ever meeting the second factor,
-    which is the whole attack this feature exists to stop.
+    paid) and must still be closed to an unverified session — otherwise somebody holding
+    only a stolen password could rewrite the credential without ever meeting the second
+    factor, which is the whole attack this feature exists to stop.
     """
-    if (await read_session(claims)).pending:
+    if user.mfa_method is None:
+        return
+    if (await read_session(claims)).verified_at is None:
         raise VERIFICATION_REQUIRED
 
 
@@ -373,7 +384,7 @@ async def assert_cleared(claims: dict, db: SessionDep, user: User) -> None:
     is real and the password was right. A 401 would send the browser to `/login`, where
     signing in again would produce another session owing the same thing.
     """
-    await assert_verified(claims)
+    await assert_verified(claims, user)
     if await enrolment_required(db, user):
         raise ENROLMENT_REQUIRED
 
