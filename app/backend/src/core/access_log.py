@@ -51,8 +51,9 @@ def LogAccess(resource_type: str) -> Callable:  # noqa: N802 — a dependency fa
                 resource_id=str(customer_id),
                 action=VIEW,
                 # The caller's address, provided uvicorn trusts the proxy's forwarded header
-                # (`FORWARDED_ALLOW_IPS` on the `app` service); None where there is no
-                # socket, as under the ASGI test transport.
+                # (`FORWARDED_ALLOW_IPS` on the `app` service). None only where there is
+                # truly no socket; httpx's `ASGITransport` supplies a loopback address
+                # (127.0.0.1) by default, so the test suite exercises a real value here too.
                 ip=request.client.host if request.client else None,
             )
         )

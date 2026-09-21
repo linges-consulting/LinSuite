@@ -201,6 +201,25 @@ async def test_the_list_is_paginated_and_reports_the_total(client):
     assert (await client.get(CUSTOMERS, params={"page": 0})).status_code == 422
 
 
+async def test_duplicate_names_across_a_page_boundary_are_stable_and_never_lost(client):
+    """The sort key alone (last, first) ties for identical names, and a tied order is free
+    to reshuffle between the two queries a paginated read makes — the count and the page
+    could each see a different arbitrary ordering. `id` as the final key removes the tie."""
+    await sign_in(client)
+    for _ in range(5):
+        made = await client.post(CUSTOMERS, json={"first_name": "Sam", "last_name": "Okonkwo"})
+        assert made.status_code == 201, made.text
+
+    seen = []
+    for page in (1, 2, 3):
+        resp = await client.get(CUSTOMERS, params={"page": page, "page_size": 2})
+        assert resp.status_code == 200, resp.text
+        seen += [c["id"] for c in resp.json()["customers"]]
+
+    assert len(seen) == 5
+    assert len(set(seen)) == 5
+
+
 async def test_the_two_capabilities_gate_the_two_verbs(client):
     role = await client.post("/api/auth/login", json={"email": EMAIL, "password": PASSWORD})
     assert role.status_code == 200

@@ -32,7 +32,12 @@ def get_engine() -> AsyncEngine:
 
 @lru_cache
 def get_purge_engine() -> AsyncEngine:
-    return create_async_engine(get_settings().database_url_purge, pool_pre_ping=True, pool_size=1)
+    # `max_overflow=0` beside `pool_size=1`: the privileged role never holds more than one
+    # connection, however many callers reach for it at once — the rest queue rather than the
+    # pool quietly handing out a second one.
+    return create_async_engine(
+        get_settings().database_url_purge, pool_pre_ping=True, pool_size=1, max_overflow=0
+    )
 
 
 @lru_cache

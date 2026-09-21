@@ -30,7 +30,10 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import create_async_engine
 
+from core.config import get_settings
 from core.db import Base, session_scope
 
 # `linsuite_app` writes everywhere except the append-only logs; `linsuite_purge` is the
@@ -46,6 +49,7 @@ PURGE_PRIVILEGES = ("SELECT", "DELETE")
 # (table, trigger) pairs that must be attached and firing.
 TRIGGERS = (
     ("appointments", "tg_appointments_staff_concurrency"),
+    ("audit_events", "audit_events_no_rewrite"),
     ("audit_access_log", "audit_access_log_no_rewrite"),
 )
 
@@ -126,6 +130,13 @@ async def test_both_roles_hold_the_privileges_they_are_meant_to_on_every_table(d
                     assert await may(PURGE_ROLE, table, privilege), (
                         f"{PURGE_ROLE} {privilege} {table}"
                     )
+                # Today, on every table: the purge role only ever reads and deletes. (Task 6
+                # amends this to "INSERT only on audit_events", once erasure needs to write
+                # the fact of its own purge from inside the purge transaction.)
+                for privilege in ("INSERT", "UPDATE"):
+                    assert not await may(PURGE_ROLE, table, privilege), (
+                        f"{PURGE_ROLE} {privilege} on {table}"
+                    )
                 # Never, for either: TRUNCATE is a DELETE that fires no trigger and leaves
                 # no row.
                 for role in (APP_ROLE, PURGE_ROLE):
@@ -144,6 +155,45 @@ async def test_each_trigger_is_attached_and_enabled(database, table, trigger):
         )
     # 'O' — fires in the origin session, which is every session this application has.
     assert enabled == "O"
+
+
+async def test_audit_events_no_rewrite_refuses_an_update_even_with_the_grant_restored(database):
+    """The grant and the trigger fail differently (module docstring) — this proves the
+    second mechanism on its own, not the grant doing all the work. As the schema owner, in
+    one transaction: GRANT UPDATE back to `linsuite_app` (revoked by 0004), `SET ROLE` into
+    it for the one statement, and roll the whole thing back — so the grant is real for that
+    statement and never committed."""
+    owner = create_async_engine(get_settings().database_url_migrate)
+    try:
+        async with owner.connect() as conn:
+            await conn.begin()
+            try:
+                await conn.execute(text("GRANT UPDATE ON audit_events TO linsuite_app"))
+                # A row to update: a `FOR EACH ROW` trigger never runs against zero rows, and
+                # an empty table would make this test pass for the wrong reason.
+                await conn.execute(
+                    text(
+                        "INSERT INTO audit_events (event_type, target_type) "
+                        "VALUES ('probe', 'probe')"
+                    )
+                )
+                await conn.execute(text("SET ROLE linsuite_app"))
+                with pytest.raises(DBAPIError) as refused:
+                    await conn.execute(text("UPDATE audit_events SET event_type = 'x'"))
+                # 42501 insufficient_privilege, raised by audit_events_append_only() — the
+                # grant just above is exactly what makes that the trigger's doing.
+                assert getattr(refused.value.orig, "sqlstate", None) == "42501", refused.value
+            finally:
+                await conn.rollback()
+    finally:
+        await owner.dispose()
+
+    # The rolled-back GRANT never happened as far as any other session is concerned.
+    async with session_scope() as db:
+        with pytest.raises(DBAPIError) as still_refused:
+            await db.execute(text("UPDATE audit_events SET event_type = 'x'"))
+        await db.rollback()
+    assert getattr(still_refused.value.orig, "sqlstate", None) == "42501"
 
 
 # --- the 403 invariant, self-discovering (fix wave, finding 20) ------------------------------

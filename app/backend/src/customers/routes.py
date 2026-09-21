@@ -145,9 +145,10 @@ async def find_customers(
     page: Annotated[int, Query(ge=1)] = 1,
     page_size: Annotated[int, Query(ge=1, le=MAX_PAGE_SIZE)] = PAGE_SIZE,
 ) -> CustomerListOut:
-    """Alphabetical by last name then first, a page at a time, with the total. `q` narrows
-    it by prefix on either name, the email, or the digits of the phone — the booking dialog
-    sends only `q` and reads the first page."""
+    """Alphabetical by last name then first, `id` breaking ties so two customers who share a
+    name never land on both sides of a page boundary and never on neither. A page at a time,
+    with the total. `q` narrows it by prefix on either name, the email, or the digits of the
+    phone — the booking dialog sends only `q` and reads the first page."""
     query = select(Customer)
     term = (q or "").strip().lower()
     if term:
@@ -162,7 +163,7 @@ async def find_customers(
         query = query.where(or_(*matches))
     total = await db.scalar(select(func.count()).select_from(query.subquery()))
     rows = await db.scalars(
-        query.order_by(func.lower(Customer.last_name), func.lower(Customer.first_name))
+        query.order_by(func.lower(Customer.last_name), func.lower(Customer.first_name), Customer.id)
         .offset((page - 1) * page_size)
         .limit(page_size)
     )

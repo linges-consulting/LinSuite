@@ -133,6 +133,9 @@ async def test_opening_a_profile_returns_it_with_its_visits_and_writes_exactly_o
     assert row["action"] == "view"
     assert row["occurred_at"] is not None
     assert row["occurred_at"].tzinfo is not None
+    # httpx's ASGITransport supplies a loopback client address by default (core/access_log.py) —
+    # not the None a bare socket-less transport would give.
+    assert str(row["ip"]) == "127.0.0.1"
 
 
 async def test_opening_a_profile_twice_is_two_rows(client):

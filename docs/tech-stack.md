@@ -9,7 +9,7 @@ Decisions are final unless a documented trigger says otherwise. Each entry recor
 ### Authentication: self-rolled JWT
 
 * **Decision:** Build auth in-house — FastAPI dependencies for the session/permission layer, `argon2-cffi` for password hashing (passlib's last release predates Argon2id being the default, and it adds a wrapper over the same library), a JWT library for token issue/verify. No third-party IdP (Auth0, Clerk), no auth framework (`fastapi-users`).
-* **Why:** The PRD's dual-mode sliding-window session policy (Admin 15–30 min hard timeout, Staff long-lived, explicit context switching between them) is a custom state machine. Off-the-shelf providers and libraries model a single session lifecycle, so the policy would have to be bolted on around them — more work than writing it directly, and harder to reason about during a security review.
+* **Why:** The PRD's dual-mode session policy — Admin Mode a sliding 15–30 min idle window with a hard limit, Staff Mode a fixed long-lived session, explicit context switching between them — is a custom state machine. Off-the-shelf providers and libraries model a single session lifecycle, so the policy would have to be bolted on around them — more work than writing it directly, and harder to reason about during a security review.
 
 ## 2. Frontend User Interface: **React + Vite + Tailwind CSS + shadcn/ui**
 
@@ -184,7 +184,7 @@ Cancelled invoices are retained rather than deleted: CRA requires business recor
 * **Owner notification** on lockout and on every password change.
 * **Forced reset on cause, not on a timer.** A `must_change_password` flag is set for administrator-created accounts and after suspected compromise. Periodic expiry is **off by default** (NIST advises against rotation without evidence of compromise) but is exposed as a per-business setting for clients whose insurer or college demands it.
 * **Reset flow:** single-use emailed token, 30–60 minute expiry, invalidating all active sessions on completion.
-* **Session revocation:** password change, reset, or MFA reset revokes outstanding refresh tokens through a `jti` denylist in Redis. Without this, a stolen long-lived Staff token would survive the password change meant to kill it.
+* **Session revocation:** password change, reset, or MFA reset sets `users.sessions_revoked_at`, so every session token issued before that instant is refused on its next use, whatever else it still carries. Logout is narrower — it denies just that one session's `jti` in Redis until it would have expired anyway. There are no refresh tokens to revoke: a session is one long-lived signed cookie. Without the `sessions_revoked_at` cut-off, a stolen long-lived Staff session would survive the password change meant to kill it.
 
 ### Multi-factor authentication
 

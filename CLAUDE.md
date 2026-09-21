@@ -66,7 +66,7 @@ Constraints any implementation must honor:
 - **Modular monolith**, one deployable app, strict domain boundaries: `auth`, `customers`, `scheduling`, `inventory`, `forms`, `billing`, `notifications`. Decoupled enough to extract later, but shipped as one app.
 - **Single-tenant**: each business gets its own VM/server + database stack. No shared multi-tenant database — never design cross-tenant data access. On-prem is a supported target, so nothing may depend on a cloud-provider-specific service.
 - **Celery workers** for notification delivery (exponential backoff retry), PDF generation, and exports. These must not run inline in request handlers.
-- **JWT sliding-window sessions**, two policies: Admin Mode short (15–30 min) timeout requiring re-auth; Staff Mode long-lived. Dual-role users explicitly switch modes — never a merged permission set.
+- **JWT sessions, two policies**: Staff Mode is a fixed long-lived session token (`STAFF_SESSION_HOURS`); Admin Mode is a short (15–30 min) sliding idle window with a hard limit, held server-side against the session, requiring re-auth once it lapses. Dual-role users explicitly switch modes — never a merged permission set.
 - **RBAC is capability-scoped**, not role-name based.
 - **Secure form links**: short-lived, single-use, high-entropy (UUIDv4/HMAC-signed, 24–48h expiry).
 - **Resource locking**: shared equipment/spaces must use atomic DB locking to prevent double-booking.
@@ -113,7 +113,7 @@ Constraints any implementation must honor:
 
 - Argon2id, 12-char min, no composition rules, breach-screened. Lockout is **escalating and temporary with auto-unlock** — never permanent (permanent lockout is a DoS vector against a known username).
 - TOTP only for MFA; **SMS MFA is never implemented**. Email OTP exists as a documented lower-assurance fallback.
-- Password/MFA changes revoke refresh tokens via a `jti` denylist in Redis.
+- Password/MFA changes revoke every session via `users.sessions_revoked_at`; logout denies just that session's `jti` in Redis until it would have expired anyway. There are no refresh tokens — a session is one long-lived cookie, reissued only by signing in again.
 - First run: token-gated setup wizard, token to stdout + `0600` file, self-disables after completion.
 
 ### Out of scope for v1 — don't build these

@@ -32,9 +32,11 @@ export class ApiError extends Error {
    */
   body: unknown
   /**
-   * Which kind of 403 this is — `admin_mode_required`, `capability_required` or
-   * `password_change_required`. Null for every other status. The server sends it precisely
-   * so the client never has to match on the prose in `detail`, which is written for a
+   * A machine-readable refusal code, read straight off the body whenever the server sent
+   * one — not only on a 403 (`admin_mode_required`, `capability_required`,
+   * `password_change_required`), but on other statuses that need one too (409 `slot_taken`,
+   * 422 `not_offered`, 503 `service_unavailable`, and more). Null when the body carries
+   * none, so the client never has to match on the prose in `detail`, which is written for a
    * person and gets reworded.
    */
   code: string | null
