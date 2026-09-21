@@ -536,6 +536,53 @@ async def test_cancelling_one_link_of_a_same_room_chain_restores_the_others_peri
     assert periods == [(room, at("09:00"), at("10:15"))]
 
 
+async def test_a_chain_in_two_different_rooms_keeps_each_links_own_turnover(client):
+    """The waiver is *per resource* (Task 18's ruling: only when both siblings hold it).
+    Ben's room was never Ana's, so trimming Ana's room at the shared edge would silently
+    delete the turnover the business actually asked for (fix wave, finding 4)."""
+    ana, ben = await two_providers(client)
+    cara = await add_colleague(client, "cara@cedar.example", "correct horse battery 3")
+    await put_hours(client, cara, [(0, 540, 1020)])
+    room1 = await make_resource(client, "space", "Room 1")
+    room2 = await make_resource(client, "space", "Room 2")
+    facial = await make_service(
+        client,
+        [ana],
+        name="Facial",
+        duration_minutes=60,
+        buffer_after_minutes=15,
+        requirements=[{"kind": "space", "resource_id": room1}],
+    )
+    massage = await make_service(
+        client,
+        [ben],
+        name="Massage",
+        duration_minutes=60,
+        requirements=[{"kind": "space", "resource_id": room2}],
+    )
+    tidy = await make_service(
+        client,
+        [cara],
+        name="Quick Tidy",
+        duration_minutes=30,
+        requirements=[{"kind": "space", "resource_id": room1}],
+    )
+
+    booked = await book_group(
+        client, [{"service_id": facial, "staff_id": ana}, {"service_id": massage, "staff_id": ben}]
+    )
+
+    assert booked.status_code == 201, booked.text
+    first, second = booked.json()["appointments"]
+    assert await resource_periods(first["id"]) == [(room1, at("09:00"), at("10:15"))]
+    assert await resource_periods(second["id"]) == [(room2, at("10:00"), at("11:00"))]
+
+    # Room 1 is still being turned over at 10:00 — nobody else gets that quarter of an hour.
+    outsider = await book(client, tidy, cara, at("10:00"))
+    assert outsider.status_code == 422, outsider.text
+    assert outsider.json()["code"] == "not_offered"
+
+
 # --- no-show on a handover chain (fix wave, findings 1 and 2) --------------------------------
 #
 # A no-show stops occupying exactly as a cancel does, so the *status update itself* must not be

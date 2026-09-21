@@ -256,11 +256,20 @@ async def busy_intervals(
             )
             for r in rows
         ]
+        # Per resource: a sibling waives a facing buffer on this room only if it holds this
+        # same room (Task 18's ruling). One row per (appointment, resource) pair, so the
+        # occupants sharing a resource are exactly the rows carrying its id.
+        sharing: dict[Id, list[Occupant]] = {}
+        for row, occupant in zip(rows, occupants, strict=True):
+            sharing.setdefault(row.resource_id, []).append(occupant)
         for row, occupant in zip(rows, occupants, strict=True):
             if excluding is not None and row.id == excluding:
                 continue
             before, after = waive_handover(
-                occupant, occupants, row.buffer_before_minutes, row.buffer_after_minutes
+                occupant,
+                sharing[row.resource_id],
+                row.buffer_before_minutes,
+                row.buffer_after_minutes,
             )
             start = row.starts_at - timedelta(minutes=before)
             end = row.ends_at + timedelta(minutes=after)

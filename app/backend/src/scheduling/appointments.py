@@ -42,6 +42,7 @@ client-facing booking endpoint (M3) must accept no `override` and run nothing re
 """
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime, time, timedelta
 from datetime import date as Date
 from typing import Annotated
@@ -366,8 +367,29 @@ def assign_resources(
     return chosen
 
 
+def _waived_period(occupant: Occupant, sharers: list[Occupant], before: int, after: int) -> Range:
+    """One resource claim's stored period: the occupant's buffered span with whichever edge
+    faces an occupying same-visit sibling **that holds this very resource** zeroed.
+
+    `sharers` is what makes the waiver per resource (Task 18's ruling, fix wave finding 4):
+    a sibling's facing buffer is waived on a resource only when both siblings hold that same
+    `resource_id`. A chain that moves between two rooms hands neither of them over, so
+    neither room loses its turnover — the staff side is a separate question, answered
+    pairwise by the trigger and by `slots.busy_intervals`."""
+    waived_before, waived_after = waive_handover(occupant, sharers, before, after)
+    return Range(
+        occupant.starts_at - timedelta(minutes=waived_before),
+        occupant.ends_at + timedelta(minutes=waived_after),
+        bounds="[)",
+    )
+
+
 async def recompute_group_periods(
-    db: AsyncSession, booking_group_id: uuid.UUID, *, also_consider: Occupant | None = None
+    db: AsyncSession,
+    booking_group_id: uuid.UUID,
+    *,
+    also_consider: Occupant | None = None,
+    also_consider_resource_ids: Sequence[uuid.UUID] = (),
 ) -> None:
     """Keep every occupying member's resource claims in sync with the group's *current*
     adjacency (fix round 2) — call this after booking, cancelling, no-showing, moving or
@@ -378,9 +400,14 @@ async def recompute_group_periods(
     (never mutated) and their current status and position — this function's only job is to
     make the stored column agree with that answer.
 
+    **The waiver is per resource** (`_waived_period`): a member's facing buffer on one room
+    is waived only against a sibling holding that same room.
+
     `also_consider` is one appointment not yet in the database — `book_group`'s next link,
     already known (its start is the previous link's own `ends_at`) but not yet inserted —
-    folded into the adjacency check without a query pretending it exists.
+    folded into the adjacency check without a query pretending it exists;
+    `also_consider_resource_ids` is what it is about to claim, so it waives a sibling's edge
+    on exactly those resources and no others.
 
     Narrower periods are written first, in their own statement, and only then anything that
     widens: the exclusion constraint is not deferred, so a member growing back into space a
@@ -419,22 +446,24 @@ async def recompute_group_periods(
         )
         for m in members
     ]
+    holders: dict[uuid.UUID, set[uuid.UUID]] = {
+        m.id: {ar.resource_id for ar in m.resources} for m in members
+    }
     if also_consider is not None:
         occupants = [*occupants, also_consider]
+        holders[also_consider.id] = set(also_consider_resource_ids)
 
     narrow: list[tuple[AppointmentResource, Range]] = []
     widen: list[tuple[AppointmentResource, Range]] = []
     for member in members:
         occupant = next(o for o in occupants if o.id == member.id)
-        before, after = waive_handover(
-            occupant, occupants, member.buffer_before_minutes, member.buffer_after_minutes
-        )
-        wanted = Range(
-            member.starts_at - timedelta(minutes=before),
-            member.ends_at + timedelta(minutes=after),
-            bounds="[)",
-        )
         for ar in member.resources:
+            wanted = _waived_period(
+                occupant,
+                [o for o in occupants if ar.resource_id in holders.get(o.id, ())],
+                member.buffer_before_minutes,
+                member.buffer_after_minutes,
+            )
             if ar.period == wanted:
                 continue
             shrinking = ar.period.lower <= wanted.lower and ar.period.upper >= wanted.upper
@@ -904,37 +933,36 @@ async def change_appointment(
     # correctly waived from the start, against its group's *other* occupying members as they
     # stand right now — never inserted full and narrowed after, which is what would risk
     # tripping the exclusion constraint against a sibling whose own period has not caught up
-    # yet. `recompute_group_periods` below is what catches the sibling side of the same move.
-    own_before, own_after = before, after
+    # yet. `recompute_group_periods` below is what catches the sibling side of the same move,
+    # and the waiver is asked per resource — a sibling waives this appointment's facing edge
+    # only on a room the two of them actually share.
+    own = Occupant(
+        id=appointment.id,
+        booking_group_id=appointment.booking_group_id,
+        status="confirmed",
+        starts_at=slot.starts_at,
+        ends_at=slot.ends_at,
+    )
+    siblings: list[Occupant] = []
+    sharing: dict[uuid.UUID, set[uuid.UUID]] = {}
     if appointment.booking_group_id is not None:
-        siblings = [
-            Occupant(
-                id=row.id,
-                booking_group_id=row.booking_group_id,
-                status=row.status,
-                starts_at=row.starts_at,
-                ends_at=row.ends_at,
+        for row in await db.scalars(
+            select(Appointment).where(
+                Appointment.booking_group_id == appointment.booking_group_id,
+                Appointment.id != appointment.id,
+                Appointment.status.not_in(NOT_OCCUPYING),
             )
-            for row in await db.scalars(
-                select(Appointment).where(
-                    Appointment.booking_group_id == appointment.booking_group_id,
-                    Appointment.id != appointment.id,
-                    Appointment.status.not_in(NOT_OCCUPYING),
+        ):
+            siblings.append(
+                Occupant(
+                    id=row.id,
+                    booking_group_id=row.booking_group_id,
+                    status=row.status,
+                    starts_at=row.starts_at,
+                    ends_at=row.ends_at,
                 )
             )
-        ]
-        own_before, own_after = waive_handover(
-            Occupant(
-                id=appointment.id,
-                booking_group_id=appointment.booking_group_id,
-                status="confirmed",
-                starts_at=slot.starts_at,
-                ends_at=slot.ends_at,
-            ),
-            siblings,
-            before,
-            after,
-        )
+            sharing[row.id] = {ar.resource_id for ar in row.resources}
 
     appointment.starts_at = slot.starts_at
     appointment.ends_at = slot.ends_at
@@ -945,10 +973,8 @@ async def change_appointment(
         AppointmentResource(
             resource_id=r.id,
             kind=r.kind,
-            period=Range(
-                slot.starts_at - timedelta(minutes=own_before),
-                slot.ends_at + timedelta(minutes=own_after),
-                bounds="[)",
+            period=_waived_period(
+                own, [o for o in siblings if r.id in sharing[o.id]], before, after
             ),
         )
         for r in claimed
@@ -1268,23 +1294,27 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
                 starts_at=slot.starts_at,
                 ends_at=slot.ends_at,
             )
-            own_before, own_after = before, after
+            # The previous link waives this one's facing edge only on a resource they both
+            # hold (fix wave, finding 4): a chain that changes rooms hands neither over.
+            previous: list[Occupant] = []
+            shared: set[uuid.UUID] = set()
             if previous_appointment is not None:
-                await recompute_group_periods(db, group_id, also_consider=own_occupant)
-                own_before, own_after = waive_handover(
-                    own_occupant,
-                    [
-                        Occupant(
-                            id=previous_appointment.id,
-                            booking_group_id=group_id,
-                            status="confirmed",
-                            starts_at=previous_appointment.starts_at,
-                            ends_at=previous_appointment.ends_at,
-                        )
-                    ],
-                    before,
-                    after,
+                await recompute_group_periods(
+                    db,
+                    group_id,
+                    also_consider=own_occupant,
+                    also_consider_resource_ids=[r.id for r in claimed],
                 )
+                previous = [
+                    Occupant(
+                        id=previous_appointment.id,
+                        booking_group_id=group_id,
+                        status="confirmed",
+                        starts_at=previous_appointment.starts_at,
+                        ends_at=previous_appointment.ends_at,
+                    )
+                ]
+                shared = {ar.resource_id for ar in previous_appointment.resources}
 
             appointment = Appointment(
                 customer_id=customer.id,
@@ -1306,10 +1336,8 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
                     AppointmentResource(
                         resource_id=r.id,
                         kind=r.kind,
-                        period=Range(
-                            slot.starts_at - timedelta(minutes=own_before),
-                            slot.ends_at + timedelta(minutes=own_after),
-                            bounds="[)",
+                        period=_waived_period(
+                            own_occupant, previous if r.id in shared else [], before, after
                         ),
                     )
                     for r in claimed
