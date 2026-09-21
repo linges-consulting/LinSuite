@@ -1,7 +1,9 @@
 import { useDraggable } from '@dnd-kit/core'
+import { CircleAlert } from 'lucide-react'
 import type { ReactNode } from 'react'
 import type { Appointment } from '@/lib/api'
 import { readableOn } from '@/lib/calendar/contrast'
+import { overrideSummary } from '@/lib/calendar/overrides'
 import { cn } from '@/lib/utils'
 
 /**
@@ -46,6 +48,7 @@ export function EventBody(
   const title = `${a.customer.first_name} ${a.customer.last_name}`
   // Two lines need 36 px; under that there is one, clipped — a 15-minute card included.
   const tiny = height < 36
+  const overridden = overrideSummary(a)
   return (
     <div
       className={cn('absolute', props.className)}
@@ -95,6 +98,18 @@ export function EventBody(
             </span>
             {height >= 56 && <span className="truncate opacity-80">{a.service.name}</span>}
           </>
+        )}
+        {overridden && (
+          // The override marker: somebody confirmed this past an advisory rule (§22). The
+          // native tooltip carries the rules and the reason; the audit log has the rest.
+          <span
+            role="img"
+            aria-label={overridden}
+            title={overridden}
+            className="absolute top-0.5 right-1"
+          >
+            <CircleAlert className="size-3" aria-hidden />
+          </span>
         )}
       </div>
       {props.children}

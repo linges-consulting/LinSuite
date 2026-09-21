@@ -1017,6 +1017,9 @@ export type RosterEntry = {
   hex: string
   dark_hex: string
   sort_order: number
+  /** The account behind the column: how this screen tells its own column from the others,
+   *  which is the line between overriding one's own evening and somebody else's. */
+  user_id: string
 }
 
 export async function fetchRoster(): Promise<RosterEntry[]> {
@@ -1075,6 +1078,9 @@ export type Appointment = {
   price_cents: number
   notes: string | null
   booking_group_id: string | null
+  /** The advisory rules this was confirmed past, and why — null when none were. */
+  overridden_rules: OverrideRule[] | null
+  override_reason: string | null
   customer: Customer
   service: { id: string; name: string }
   staff: { id: string; display_name: string; colour: string }
@@ -1109,6 +1115,25 @@ export type BookingDraft = {
   customer_id?: string
   customer?: CustomerDraft
   notes?: string | null
+} & Override
+
+/**
+ * The four advisory rules (tech-stack §22) a start may break: the ones a human may set aside,
+ * on the record. A busy room or device, or a person at their concurrency limit, is not one of
+ * these — those refusals come back as `not_offered` and nothing overrides them.
+ */
+export type OverrideRule = 'outside_shift' | 'time_off' | 'closure' | 'beyond_horizon'
+
+/**
+ * A booking or a move confirmed past the advisory rules. Own schedule: needs
+ * `schedule.override_availability`. Somebody else's: `admin`, in Admin Mode, on top.
+ */
+export type Override = { override?: boolean; override_reason?: string | null }
+
+/** The rules behind a 422 `override_available`, or null for any other refusal. */
+export function overridableRules(error: unknown): OverrideRule[] | null {
+  if (!(error instanceof ApiError) || error.code !== 'override_available') return null
+  return (error.body as { rules?: OverrideRule[] }).rules ?? []
 }
 
 export async function bookAppointment(draft: BookingDraft): Promise<Appointment> {
@@ -1120,7 +1145,15 @@ export async function bookAppointment(draft: BookingDraft): Promise<Appointment>
 // --- the calendar: one read for the grid, and the two drags -----------------------------------
 
 /** A column on the grid: the roster entry without `sort_order` (the list is already in order). */
-export type ScheduleColumn = { id: string; display_name: string; colour: string; hex: string; dark_hex: string }
+export type ScheduleColumn = {
+  id: string
+  display_name: string
+  colour: string
+  hex: string
+  dark_hex: string
+  /** How many appointments this person may run at once — the "×2" on the column header. */
+  max_concurrent_appointments: number
+}
 
 /** One shift on one business-local date, as instants — converted server-side from the
  *  weekly rule, so the shading here and the slots the server offers are one picture. */
@@ -1163,12 +1196,13 @@ export async function fetchSchedule(query: {
 
 /**
  * A move (`starts_at`), a resize (`duration_minutes`), or both. The server re-runs the
- * engine with this appointment out of its own way and refuses with 422 `not_offered` or
- * 409 `slot_taken` — the same two answers booking gives, treated the same way.
+ * engine with this appointment out of its own way and refuses with 422 `not_offered`, 422
+ * `override_available` (with the rules a human may confirm past) or 409 `slot_taken` — the
+ * same answers booking gives, treated the same way.
  */
 export async function changeAppointment(
   id: string,
-  change: { starts_at?: string; duration_minutes?: number },
+  change: { starts_at?: string; duration_minutes?: number } & Override,
 ): Promise<Appointment> {
   const res = await send('PATCH', `/api/appointments/${id}`, change)
   if (!res.ok) throw await failure(res, 'Could not move the appointment')

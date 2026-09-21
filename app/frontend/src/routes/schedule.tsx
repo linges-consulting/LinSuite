@@ -3,6 +3,7 @@ import { CalendarDays, ChevronLeft, ChevronRight, Plus } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { Grid } from '@/components/calendar/grid'
+import { OverrideConfirm } from '@/components/calendar/override-confirm'
 import type { Change, Column, Prefill } from '@/components/calendar/types'
 import { EmptyState } from '@/components/empty-state'
 import { Field, Form, FormError } from '@/components/form'
@@ -34,17 +35,21 @@ import {
   fetchCatalog,
   fetchRoster,
   fetchSchedule,
+  overridableRules,
   searchCustomers,
   type Appointment,
   type AvailabilitySlot,
   type BookingDraft,
   type Customer,
+  type Override,
+  type OverrideRule,
   type RosterEntry,
   type Schedule,
 } from '@/lib/api'
 import { useSession } from '@/lib/auth'
 import { useBranding } from '@/lib/branding'
 import { clock, today, weekdayLabel } from '@/lib/calendar/format'
+import { describeRules, whyNotOverride } from '@/lib/calendar/overrides'
 import { addDays, localDate } from '@/lib/calendar/pixels'
 import { formatPhone } from '@/lib/phone'
 import { APPOINTMENTS, AVAILABILITY, CATALOG, CUSTOMERS, ROSTER, SCHEDULE } from '@/lib/query-keys'
@@ -65,6 +70,12 @@ import { useTheme } from '@/lib/theme'
  * where it was and a toast says which. The server re-runs the engine on every move, so a
  * client that snapped to the wrong place is corrected, never trusted.
  *
+ * **An advisory refusal is a question, not a loss.** `override_available` names the rules
+ * a human may set aside (tech-stack §22); the card stays where it was dropped while the
+ * confirm dialog asks, Confirm resubmits with `override: true`, Cancel puts it back. Who may
+ * confirm is the server's decision; the dialog only leaves out a button that would be
+ * refused, and says who could press it.
+ *
  * **"Today" is the business's today.** The zone comes from the branding document the shell
  * has already read, so the first request this screen makes is for the right day — a
  * receptionist checking from home at 23:30 in another zone sees the day the clinic is in.
@@ -79,7 +90,9 @@ export function SchedulePage() {
   const [view, setView] = useState<'day' | 'week'>('day')
   const [staffFilter, setStaffFilter] = useState<string>(EVERYONE)
   const [booking, setBooking] = useState<Prefill | 'blank' | null>(null)
+  const [override, setOverride] = useState<PendingMove | null>(null)
   const roster = useQuery({ queryKey: ROSTER, queryFn: fetchRoster })
+  const ownStaffId = roster.data?.find((m) => m.user_id === user?.id)?.id ?? null
   // Until the zone is known there is no "today" to ask for.
   const date = chosen ?? (zone ? today(zone) : null)
   const range = date ? (view === 'day' ? [date, date] : weekOf(date)) : null
@@ -94,11 +107,12 @@ export function SchedulePage() {
   })
 
   const change = useMutation({
-    mutationFn: ({ appointment, change }: { appointment: Appointment; change: Change }) =>
-      changeAppointment(appointment.id, change),
-    onMutate: async ({ appointment, change }) => {
+    mutationFn: ({ appointment, change }: MoveVariables) => changeAppointment(appointment.id, change),
+    onMutate: async ({ appointment, change, before }) => {
       await queryClient.cancelQueries({ queryKey: key })
-      const before = queryClient.getQueryData<Schedule>(key)
+      // A confirmed override carries the picture from before the first attempt, so that a
+      // refusal now puts the card back where it started rather than where it was asked to go.
+      const snapshot = before ?? queryClient.getQueryData<Schedule>(key)
       queryClient.setQueryData<Schedule>(key, (current) =>
         current && {
           ...current,
@@ -107,13 +121,20 @@ export function SchedulePage() {
           ),
         },
       )
-      return { before }
+      return { before: snapshot }
     },
-    onError: (error, _variables, context) => {
+    onError: (error, variables, context) => {
+      const rules = overridableRules(error)
+      if (rules) {
+        // The card stays put while the question is asked; Cancel is what puts it back.
+        setOverride({ ...variables, rules, before: context?.before })
+        return
+      }
       if (context?.before) queryClient.setQueryData(key, context.before)
       toast.error(`Not moved: ${error.message}`, { duration: 8000 })
     },
-    onSettled: () => {
+    onSettled: (_moved, error) => {
+      if (overridableRules(error)) return
       queryClient.invalidateQueries({ queryKey: SCHEDULE })
       queryClient.invalidateQueries({ queryKey: APPOINTMENTS })
       queryClient.invalidateQueries({ queryKey: AVAILABILITY })
@@ -215,14 +236,52 @@ export function SchedulePage() {
         <BookingDialog
           date={booking === 'blank' ? date : booking.date}
           prefill={booking === 'blank' ? null : booking}
-          timezone={data.timezone}
+          schedule={data}
           roster={roster.data ?? []}
+          ownStaffId={ownStaffId}
           onClose={() => setBooking(null)}
+        />
+      )}
+
+      {override && (
+        <OverrideConfirm
+          sentences={describeRules(
+            override.rules,
+            {
+              staffId: override.appointment.staff.id,
+              name: override.appointment.staff.display_name,
+              startsAt: moved(override.appointment, override.change).starts_at,
+              endsAt: moved(override.appointment, override.change).ends_at,
+            },
+            data,
+          )}
+          forbidden={whyNotOverride(user, ownStaffId, override.appointment.staff.id)}
+          pending={change.isPending}
+          onConfirm={(reason) => {
+            const { appointment, change: asked, before } = override
+            setOverride(null)
+            change.mutate({
+              appointment,
+              change: { ...asked, override: true, override_reason: reason },
+              before,
+            })
+          }}
+          onCancel={() => {
+            if (override.before) queryClient.setQueryData(key, override.before)
+            setOverride(null)
+            queryClient.invalidateQueries({ queryKey: SCHEDULE })
+          }}
         />
       )}
     </div>
   )
 }
+
+type MoveVariables = { appointment: Appointment; change: Change; before?: Schedule }
+
+/** A move the server answered `override_available`: what was asked, the rules, and the
+ *  picture from before it, for Cancel. */
+type PendingMove = MoveVariables & { rules: OverrideRule[] }
 
 /** Radix refuses an empty `SelectItem` value; ids are UUIDs, so nothing collides with this. */
 const EVERYONE = 'everyone'
@@ -260,6 +319,7 @@ function columnsFor(
         label: weekday,
         sublabel: String(day),
         today: date === todayDate,
+        concurrency: schedule.staff.find((s) => s.id === staffFilter)?.max_concurrent_appointments,
       }
     })
   }
@@ -275,6 +335,7 @@ function columnsFor(
     staffId: s.id,
     label: s.display_name,
     today: date === todayDate,
+    concurrency: s.max_concurrent_appointments,
   }))
 }
 
@@ -312,6 +373,11 @@ function stalePick(error: unknown): error is ApiError {
  *
  * The slots are re-read whenever the three inputs above them change, and again after a
  * stale pick — the one refusal that means "what you were looking at is out of date".
+ *
+ * A time drawn on the grid that the server does not offer for a named provider stays
+ * bookable: the server answers `override_available` with the rules, the confirm dialog
+ * asks, and Confirm books it with `override: true`. That is how a therapist willing to stay
+ * past their shift end is booked from the same dialog (tech-stack §22).
  */
 function BookingDialog(props: {
   date: string
@@ -319,11 +385,13 @@ function BookingDialog(props: {
    *  range. The service is still to be chosen; once it is, that instant is picked if the
    *  server offers it, and said to be unavailable if not. */
   prefill: Prefill | null
-  timezone: string
+  schedule: Schedule
   roster: RosterEntry[]
+  ownStaffId: string | null
   onClose: () => void
 }) {
   const queryClient = useQueryClient()
+  const { user } = useSession()
   const [serviceId, setServiceId] = useState('')
   const [staffId, setStaffId] = useState(props.prefill?.staffId ?? ANY)
   const [date, setDate] = useState(props.date)
@@ -334,6 +402,7 @@ function BookingDialog(props: {
   const [customer, setCustomer] = useState<Customer | null>(null)
   const [draft, setDraft] = useState({ first_name: '', last_name: '', email: '', phone: '' })
   const [notes, setNotes] = useState('')
+  const [override, setOverride] = useState<OverrideRule[] | null>(null)
 
   const catalog = useQuery({ queryKey: CATALOG, queryFn: fetchCatalog })
   const service = catalog.data?.find((s) => s.id === serviceId)
@@ -351,12 +420,23 @@ function BookingDialog(props: {
     retry: false,
   })
   const slots = availability.data?.days[0]?.slots ?? []
-  const timezone = availability.data?.timezone ?? props.timezone
+  const timezone = availability.data?.timezone ?? props.schedule.timezone
+  const provider = providers.find((m) => m.id === staffId) ?? null
   // The drawn time is the pick as soon as a service makes it an offer — and again after
   // every change of service or provider — until a slot is picked by hand.
   const offered = wanted ? (slots.find((s) => sameInstant(s.starts_at, wanted)) ?? null) : null
-  const slot = picked ?? offered
   const drawnButGone = Boolean(wanted && service && availability.isSuccess && !offered)
+  // Drawn for one person and not offered: still sendable, as the override question. The
+  // server says which rules it breaks — or that a room is busy, which nobody overrides.
+  const drawn: AvailabilitySlot | null =
+    drawnButGone && provider && service && wanted
+      ? {
+          starts_at: wanted,
+          ends_at: new Date(new Date(wanted).getTime() + service.duration_minutes * 60_000).toISOString(),
+          staff_ids: [provider.id],
+        }
+      : null
+  const slot = picked ?? offered ?? drawn
   const pick = (chosen: AvailabilitySlot) => {
     setWanted(null)
     setPicked(chosen)
@@ -395,12 +475,13 @@ function BookingDialog(props: {
   const ready = Boolean(service && slot && customerReady)
 
   const book = useMutation({
-    mutationFn: () => {
+    mutationFn: (confirmed: Override) => {
       const body: BookingDraft = {
         service_id: serviceId,
         staff_id: staffId === ANY ? null : staffId,
         starts_at: (slot as AvailabilitySlot).starts_at,
         notes: notes.trim() || null,
+        ...confirmed,
       }
       if (existing) body.customer_id = (customer as Customer).id
       else {
@@ -424,6 +505,11 @@ function BookingDialog(props: {
       props.onClose()
     },
     onError: (error) => {
+      const rules = overridableRules(error)
+      if (rules) {
+        setOverride(rules)
+        return
+      }
       if (stalePick(error)) {
         // Longer than the default: this is the one message that changes what to do next.
         toast.error(error.message, { duration: 8000 })
@@ -435,7 +521,8 @@ function BookingDialog(props: {
     },
   })
 
-  const problem = book.error && !stalePick(book.error) ? book.error.message : null
+  const problem =
+    book.error && !stalePick(book.error) && !overridableRules(book.error) ? book.error.message : null
   const unbookable =
     availability.error instanceof ApiError && availability.error.code === 'not_bookable'
       ? ((availability.error.body as { unbookable_reasons?: string[] })?.unbookable_reasons ?? [])
@@ -453,7 +540,7 @@ function BookingDialog(props: {
           </DialogDescription>
         </DialogHeader>
 
-        <Form onSubmit={() => ready && book.mutate()}>
+        <Form onSubmit={() => ready && book.mutate({})}>
           <Field label="Service" htmlFor="booking-service">
             <Select value={serviceId} onValueChange={(id) => choose({ service: id })}>
               <SelectTrigger id="booking-service" aria-label="Service" className="w-full">
@@ -548,9 +635,9 @@ function BookingDialog(props: {
             )}
             {drawnButGone && (
               <p role="status" className="text-xs text-warning">
-                {clock(wanted as string, timezone)} is not free for this service
-                {staffId === ANY ? '' : ` with ${providers.find((m) => m.id === staffId)?.display_name ?? 'them'}`}
-                . Pick another time.
+                {provider
+                  ? `${clock(wanted as string, timezone)} is not offered for this service with ${provider.display_name}. Booking it anyway will ask you to confirm.`
+                  : `${clock(wanted as string, timezone)} is not free for this service. Pick another time.`}
               </p>
             )}
           </fieldset>
@@ -687,6 +774,28 @@ function BookingDialog(props: {
           </DialogFooter>
         </Form>
       </DialogContent>
+
+      {override && provider && slot && (
+        <OverrideConfirm
+          sentences={describeRules(
+            override,
+            { staffId: provider.id, name: provider.display_name, startsAt: slot.starts_at, endsAt: slot.ends_at },
+            props.schedule,
+          )}
+          forbidden={whyNotOverride(user, props.ownStaffId, provider.id)}
+          pending={book.isPending}
+          onConfirm={(reason) => {
+            setOverride(null)
+            book.mutate({ override: true, override_reason: reason })
+          }}
+          onCancel={() => {
+            // Back to the slot picker: the time that needed confirming is no longer the pick.
+            setOverride(null)
+            setPicked(null)
+            setWanted(null)
+          }}
+        />
+      )}
     </Dialog>
   )
 }

@@ -19,10 +19,14 @@ import { SchedulePage } from '@/routes/schedule'
  * an inline client goes as a `customer` body, and that a lost race is told and re-read.
  */
 
+// The session is u1, so Ana's column is the signed-in person's own; Bo's is somebody else's.
+// Bo may run two at once (tech-stack §20), Ana one.
 const ROSTER = [
-  { id: 's1', display_name: 'Ana Rossi', colour: 'blue', hex: '#1d4ed8', dark_hex: '#659dff', sort_order: 0 },
-  { id: 's2', display_name: 'Bo Chen', colour: 'teal', hex: '#0f766e', dark_hex: '#68b5ac', sort_order: 1 },
+  { id: 's1', display_name: 'Ana Rossi', colour: 'blue', hex: '#1d4ed8', dark_hex: '#659dff', sort_order: 0, user_id: 'u1', max_concurrent_appointments: 1 },
+  { id: 's2', display_name: 'Bo Chen', colour: 'teal', hex: '#0f766e', dark_hex: '#68b5ac', sort_order: 1, user_id: 'u2', max_concurrent_appointments: 2 },
 ]
+
+const CAN_OVERRIDE = ['schedule.view', 'schedule.manage', 'customers.manage', 'schedule.override_availability']
 
 const CATALOG = [
   {
@@ -65,10 +69,24 @@ const BOOKED = {
   price_cents: 12000,
   notes: null,
   booking_group_id: null,
+  overridden_rules: null,
+  override_reason: null,
   customer: PRIYA,
   service: { id: 'v1', name: 'Swedish Massage' },
   staff: { id: 's2', display_name: 'Bo Chen', colour: 'teal' },
   resources: [{ id: 'r1', name: 'Room 1', kind: 'space' }],
+}
+
+// Ana's last hour: 16:00–17:00 Toronto, ending exactly at the shift's end. One step down
+// runs past it.
+const LATE = {
+  ...BOOKED,
+  id: 'a4',
+  starts_at: '2026-06-15T20:00:00Z',
+  ends_at: '2026-06-15T21:00:00Z',
+  buffer_after_minutes: 0,
+  staff: { id: 's1', display_name: 'Ana Rossi', colour: 'blue' },
+  customer: { ...PRIYA, id: 'c4', first_name: 'Late', last_name: 'Day' },
 }
 
 const OVERLAPPING = {
@@ -94,12 +112,23 @@ type Call = { url: string; method: string; body?: any }
 function fakeServer({
   firstBookingTaken = false,
   firstBookingGone = false,
-  moveRefused = null as null | 'not_offered' | 'slot_taken',
+  /** POST without `override` is answered `override_available`; with it, booked and marked. */
+  bookingOverridable = false,
+  moveRefused = null as null | 'not_offered' | 'slot_taken' | 'override_available',
+  /** The rules an `override_available` answer names. */
+  rules = ['outside_shift'] as string[],
+  capabilities = CAN_OVERRIDE,
+  mode = 'staff',
   appointments = [] as any[],
   timeOff = [] as any[],
   closures = [] as any[],
   timezone = 'America/Toronto',
 } = {}) {
+  const overridable = (detail: string) =>
+    Response.json(
+      { detail: [{ type: 'value_error', loc: ['body', 'starts_at'], msg: detail }], code: 'override_available', rules },
+      { status: 422 },
+    )
   const calls: Call[] = []
   let bookings = 0
   // Copies: a PATCH changes the fake's rows, and the next test wants the originals.
@@ -126,9 +155,9 @@ function fakeServer({
           id: 'u1',
           email: 'owner@cedar.example',
           role: 'Staff',
-          capabilities: ['schedule.view', 'schedule.manage', 'customers.manage'],
-          mode: 'staff',
-          can_switch_modes: false,
+          capabilities,
+          mode,
+          can_switch_modes: capabilities.includes('admin'),
           admin_grant_expires_at: null,
           admin_hard_limit_at: null,
           must_change_password: false,
@@ -155,6 +184,7 @@ function fakeServer({
             colour: s.colour,
             hex: s.hex,
             dark_hex: s.dark_hex,
+            max_concurrent_appointments: s.max_concurrent_appointments,
           })),
           // Everybody works 09:00–17:00 Toronto on every asked-for day.
           working_blocks: dates.flatMap((date) =>
@@ -206,6 +236,9 @@ function fakeServer({
             { status: 422 },
           )
         }
+        if (moveRefused === 'override_available' && !body.override) {
+          return overridable('That time is outside availability. It can be booked with an override.')
+        }
         const id = url.split('/').pop()
         const original = appointments.find((a) => a.id === id)
         const starts_at = body.starts_at ?? original.starts_at
@@ -215,6 +248,8 @@ function fakeServer({
           starts_at,
           duration_minutes,
           ends_at: new Date(new Date(starts_at).getTime() + duration_minutes * 60_000).toISOString(),
+          overridden_rules: body.override ? rules : null,
+          override_reason: body.override ? (body.override_reason ?? null) : null,
         })
         return Response.json(original)
       }
@@ -240,6 +275,15 @@ function fakeServer({
               code: 'not_offered',
             },
             { status: 422 },
+          )
+        }
+        if (bookingOverridable && !body.override) {
+          return overridable('That time is outside availability. It can be booked with an override.')
+        }
+        if (body.override) {
+          return Response.json(
+            { ...BOOKED, overridden_rules: rules, override_reason: body.override_reason ?? null },
+            { status: 201 },
           )
         }
         return Response.json(BOOKED, { status: 201 })
@@ -383,8 +427,10 @@ test('a drawn time the server does not offer is said so', async () => {
   await user.click(await screen.findByRole('option', { name: /Swedish Massage/ }))
 
   expect(await within(dialog).findByRole('status')).toHaveTextContent(
-    '10:15 AM is not free for this service with Ana Rossi. Pick another time.',
+    '10:15 AM is not offered for this service with Ana Rossi. Booking it anyway will ask you to confirm.',
   )
+  // Nobody is chosen yet, so nothing can be sent; the time itself stays sendable (see the
+  // override tests below).
   expect(within(dialog).getByRole('button', { name: 'Book' })).toBeDisabled()
 })
 
@@ -704,4 +750,243 @@ test('a slot the engine no longer offers is treated the same way as a lost race'
   await waitFor(() =>
     expect(calls.filter((c) => c.url.startsWith('/api/availability?')).length).toBeGreaterThan(before),
   )
+})
+
+// --- overrides: the advisory rules, confirmed by a human ---------------------------------------
+
+/** Pick Ana's last hour up from the keyboard and drop it one step later: 16:15–17:15. */
+async function nudgeLateDown(user: ReturnType<typeof userEvent.setup>) {
+  const card = await screen.findByTestId('event-a4')
+  card.focus()
+  await user.keyboard('[Enter][ArrowDown][Enter]')
+  return card
+}
+
+test('a move past the shift end asks in plain words, and Confirm resubmits with the override', async () => {
+  onTheFifteenth()
+  const calls = fakeServer({ appointments: [LATE], moveRefused: 'override_available' })
+  const user = userEvent.setup()
+  renderSchedule()
+
+  await nudgeLateDown(user)
+  const dialog = await screen.findByRole('dialog', { name: 'Book outside availability?' })
+  expect(within(dialog).getByRole('list', { name: 'Rules this breaks' })).toHaveTextContent(
+    "This runs 15 minutes past Ana Rossi's shift end",
+  )
+  // The card is where it was dropped while the question is open.
+  expect(screen.getByText('4:15 PM – 5:15 PM')).toBeInTheDocument()
+  await user.type(within(dialog).getByLabelText('Reason (optional)'), 'Client is running late')
+  await user.click(within(dialog).getByRole('button', { name: 'Confirm' }))
+
+  await waitFor(() => expect(patches(calls)).toHaveLength(2))
+  expect(patches(calls)[0].body).toEqual({ starts_at: '2026-06-15T20:15:00.000Z' })
+  expect(patches(calls)[1].body).toEqual({
+    starts_at: '2026-06-15T20:15:00.000Z',
+    override: true,
+    override_reason: 'Client is running late',
+  })
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(await screen.findByText('4:15 PM – 5:15 PM')).toBeInTheDocument()
+  // And the card now carries the marker, rules and reason in its tooltip.
+  expect(
+    await screen.findByRole('img', { name: 'Booked outside availability: outside the shift — Client is running late' }),
+  ).toBeInTheDocument()
+})
+
+test('Cancel puts the card back where it was, and nothing more is sent', async () => {
+  onTheFifteenth()
+  const calls = fakeServer({ appointments: [LATE], moveRefused: 'override_available' })
+  const user = userEvent.setup()
+  renderSchedule()
+
+  await nudgeLateDown(user)
+  const dialog = await screen.findByRole('dialog', { name: 'Book outside availability?' })
+  await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(await screen.findByText('4:00 PM – 5:00 PM')).toBeInTheDocument()
+  expect(screen.queryByText('4:15 PM – 5:15 PM')).not.toBeInTheDocument()
+  expect(patches(calls)).toHaveLength(1)
+})
+
+test('each broken rule is one sentence: shift, time off, closure, horizon', async () => {
+  onTheFifteenth()
+  fakeServer({
+    appointments: [LATE],
+    moveRefused: 'override_available',
+    rules: ['outside_shift', 'time_off', 'closure', 'beyond_horizon'],
+    timeOff: [{ id: 't1', staff_id: 's1', all_day: true, reason: 'Dentist', starts_at: '2026-06-15T04:00:00Z', ends_at: '2026-06-16T04:00:00Z' }],
+    closures: [{ id: 'c1', date: DAY, name: 'Retreat' }],
+  })
+  const user = userEvent.setup()
+  renderSchedule()
+
+  await nudgeLateDown(user)
+  const list = await screen.findByRole('list', { name: 'Rules this breaks' })
+
+  expect(within(list).getAllByRole('listitem').map((li) => li.textContent)).toEqual([
+    "This runs 15 minutes past Ana Rossi's shift end",
+    'Ana Rossi is on time off that day (Dentist)',
+    'The business is closed that day (Retreat)',
+    'That date is beyond the booking window',
+  ])
+})
+
+test('without the permission the dialog says who can, and offers no Confirm', async () => {
+  onTheFifteenth()
+  const calls = fakeServer({
+    appointments: [LATE],
+    moveRefused: 'override_available',
+    capabilities: ['schedule.view', 'schedule.manage', 'customers.manage'],
+  })
+  const user = userEvent.setup()
+  renderSchedule()
+
+  await nudgeLateDown(user)
+  const dialog = await screen.findByRole('dialog', { name: 'Book outside availability?' })
+
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    'Booking outside availability needs the "override availability" permission, which your role does not hold. Ask an administrator.',
+  )
+  expect(within(dialog).queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument()
+  await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+  expect(await screen.findByText('4:00 PM – 5:00 PM')).toBeInTheDocument()
+  expect(patches(calls)).toHaveLength(1)
+})
+
+test("another person's schedule takes an administrator, and only in Admin Mode", async () => {
+  onTheFifteenth()
+  // Bo's appointment, and the session is Ana: the capability alone is not enough.
+  fakeServer({ appointments: [BOOKED], moveRefused: 'override_available' })
+  const user = userEvent.setup()
+  const first = renderSchedule()
+
+  const card = await screen.findByTestId('event-a1')
+  card.focus()
+  await user.keyboard('[Enter][ArrowDown][Enter]')
+  let dialog = await screen.findByRole('dialog', { name: 'Book outside availability?' })
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    "Only an administrator can book outside another staff member's availability.",
+  )
+  expect(within(dialog).queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument()
+  first.unmount()
+
+  // An administrator in Staff Mode is told which window is missing.
+  fakeServer({ appointments: [BOOKED], moveRefused: 'override_available', capabilities: [...CAN_OVERRIDE, 'admin'] })
+  const second = renderSchedule()
+  const again = await screen.findByTestId('event-a1')
+  again.focus()
+  await user.keyboard('[Enter][ArrowDown][Enter]')
+  dialog = await screen.findByRole('dialog', { name: 'Book outside availability?' })
+  expect(within(dialog).getByRole('alert')).toHaveTextContent(
+    "Switch to Admin Mode to book outside another staff member's availability.",
+  )
+  expect(within(dialog).queryByRole('button', { name: 'Confirm' })).not.toBeInTheDocument()
+  second.unmount()
+
+  // In Admin Mode, anybody's.
+  const calls = fakeServer({
+    appointments: [BOOKED],
+    moveRefused: 'override_available',
+    capabilities: [...CAN_OVERRIDE, 'admin'],
+    mode: 'admin',
+  })
+  renderSchedule()
+  const third = await screen.findByTestId('event-a1')
+  third.focus()
+  await user.keyboard('[Enter][ArrowDown][Enter]')
+  dialog = await screen.findByRole('dialog', { name: 'Book outside availability?' })
+  await user.click(within(dialog).getByRole('button', { name: 'Confirm' }))
+  await waitFor(() => expect(patches(calls)).toHaveLength(2))
+  expect(patches(calls)[1].body).toMatchObject({ override: true, override_reason: null })
+})
+
+test('a drawn time outside the shift is booked from the dialog after confirming', async () => {
+  onTheFifteenth()
+  const calls = fakeServer({ bookingOverridable: true })
+  const user = userEvent.setup()
+  renderSchedule()
+
+  // 16:30 on Ana's column: the hour runs half an hour past her 17:00.
+  const ana = await screen.findByRole('region', { name: 'Ana Rossi' })
+  fireEvent.pointerDown(ana, { clientY: 990, button: 0, pointerId: 1, pointerType: 'mouse' })
+  fireEvent.pointerUp(ana, { clientY: 990, pointerId: 1 })
+  const dialog = await screen.findByRole('dialog', { name: 'New appointment' })
+  await user.click(within(dialog).getByRole('combobox', { name: 'Service' }))
+  await user.click(await screen.findByRole('option', { name: /Swedish Massage/ }))
+  expect(await within(dialog).findByRole('status')).toHaveTextContent(
+    '4:30 PM is not offered for this service with Ana Rossi. Booking it anyway will ask you to confirm.',
+  )
+  await user.type(within(dialog).getByRole('textbox', { name: 'Find a client' }), 'pri')
+  await user.click(await screen.findByRole('button', { name: /Priya Nair/ }))
+  await user.click(within(dialog).getByRole('button', { name: 'Book' }))
+
+  const confirm = await screen.findByRole('dialog', { name: 'Book outside availability?' })
+  expect(within(confirm).getByRole('list', { name: 'Rules this breaks' })).toHaveTextContent(
+    "This runs 30 minutes past Ana Rossi's shift end",
+  )
+  await user.type(within(confirm).getByLabelText('Reason (optional)'), 'Happy to stay')
+  await user.click(within(confirm).getByRole('button', { name: 'Confirm' }))
+
+  await waitFor(() => expect(calls.filter((c) => c.method === 'POST')).toHaveLength(2))
+  const [asked, confirmed] = calls.filter((c) => c.method === 'POST')
+  expect(asked.body).toMatchObject({ staff_id: 's1', starts_at: '2026-06-15T20:30:00.000Z' })
+  expect(asked.body.override).toBeUndefined()
+  expect(confirmed.body).toMatchObject({
+    staff_id: 's1',
+    starts_at: '2026-06-15T20:30:00.000Z',
+    override: true,
+    override_reason: 'Happy to stay',
+  })
+  expect(await screen.findByText('Booked Priya Nair with Bo Chen in Room 1')).toBeInTheDocument()
+})
+
+test('Cancel in the dialog returns to the slot picker with nothing picked', async () => {
+  onTheFifteenth()
+  const calls = fakeServer({ bookingOverridable: true })
+  const user = userEvent.setup()
+  renderSchedule()
+
+  const ana = await screen.findByRole('region', { name: 'Ana Rossi' })
+  fireEvent.pointerDown(ana, { clientY: 990, button: 0, pointerId: 1, pointerType: 'mouse' })
+  fireEvent.pointerUp(ana, { clientY: 990, pointerId: 1 })
+  const dialog = await screen.findByRole('dialog', { name: 'New appointment' })
+  await user.click(within(dialog).getByRole('combobox', { name: 'Service' }))
+  await user.click(await screen.findByRole('option', { name: /Swedish Massage/ }))
+  await user.type(within(dialog).getByRole('textbox', { name: 'Find a client' }), 'pri')
+  await user.click(await screen.findByRole('button', { name: /Priya Nair/ }))
+  await user.click(within(dialog).getByRole('button', { name: 'Book' }))
+  const confirm = await screen.findByRole('dialog', { name: 'Book outside availability?' })
+  await user.click(within(confirm).getByRole('button', { name: 'Cancel' }))
+
+  // Cancel: the booking dialog stays, the drawn time is no longer the pick, Book is off.
+  expect(screen.queryByRole('dialog', { name: 'Book outside availability?' })).not.toBeInTheDocument()
+  expect(screen.getByRole('dialog', { name: 'New appointment' })).toBeInTheDocument()
+  expect(within(dialog).queryByRole('status')).not.toBeInTheDocument()
+  expect(within(dialog).getByRole('button', { name: 'Book' })).toBeDisabled()
+  expect(calls.filter((c) => c.method === 'POST')).toHaveLength(1)
+})
+
+test('an overridden appointment carries a marker with its rules and reason', async () => {
+  onTheFifteenth()
+  fakeServer({
+    appointments: [{ ...BOOKED, overridden_rules: ['outside_shift', 'time_off'], override_reason: 'Running late' }],
+  })
+  renderSchedule()
+
+  const bo = await screen.findByRole('region', { name: 'Bo Chen' })
+  expect(
+    within(bo).getByRole('img', { name: 'Booked outside availability: outside the shift, on time off — Running late' }),
+  ).toBeInTheDocument()
+})
+
+test('a column whose person may run two at once is headed with ×2', async () => {
+  onTheFifteenth()
+  fakeServer()
+  renderSchedule()
+
+  await screen.findByRole('region', { name: 'Bo Chen' })
+  const marker = screen.getByLabelText('Up to 2 appointments at once')
+  expect(marker).toHaveTextContent('×2')
+  expect(screen.getAllByLabelText(/Up to \d+ appointments at once/)).toHaveLength(1)
 })

@@ -324,6 +324,16 @@ export function Grid(props: {
               {column.sublabel && (
                 <span className="text-xs font-normal text-muted-foreground">{column.sublabel}</span>
               )}
+              {(column.concurrency ?? 1) > 1 && (
+                // Two chairs (tech-stack §20): this person may run that many at once.
+                <span
+                  className="rounded-sm border px-1 text-xs font-normal tabular-nums text-muted-foreground"
+                  title={`Up to ${column.concurrency} appointments at once`}
+                  aria-label={`Up to ${column.concurrency} appointments at once`}
+                >
+                  ×{column.concurrency}
+                </span>
+              )}
             </div>
           ))}
           <AllDayRow schedule={schedule} columns={columns} />
