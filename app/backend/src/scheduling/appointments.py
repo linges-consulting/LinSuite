@@ -53,7 +53,7 @@ from fastapi.responses import JSONResponse
 from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import Range
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth import modes
@@ -93,6 +93,10 @@ SLOT_TAKEN_CONSTRAINTS = (
     "ex_appointment_resources_no_overlap",
     "tg_appointments_staff_concurrency",
 )
+# A deadlock means the same thing to the person at the desk, and `book_group` can provoke one
+# on its own: it takes the trigger's `FOR UPDATE` on each link's staff row in chain order, so
+# (Ana, Ben) against (Ben, Ana) is a cycle and Postgres kills one of them.
+DEADLOCK = "40P01"
 
 
 # --- what goes over the wire ------------------------------------------------------------
@@ -622,12 +626,21 @@ def record_override(db: AsyncSession, appointment: Appointment, actor: User) -> 
     )
 
 
-def _is_slot_taken(error: IntegrityError) -> bool:
+def _is_slot_taken(error: DBAPIError) -> bool:
     """Whether the database refused because the time is taken, rather than for any other
     reason. asyncpg carries `constraint_name`; SQLAlchemy's wrapper may keep it a cause
-    down; the message is the last resort (same shape as `services._is_duplicate_name`)."""
+    down; the message is the last resort (same shape as `services._is_duplicate_name`).
+
+    A deadlock (`DEADLOCK`) counts too: it is not an `IntegrityError` — nothing would map it
+    otherwise — and the honest answer to the caller is the same 409 the constraint gives, on
+    a transaction Postgres has already rolled back. `tests/test_slot_taken.py` is the S2."""
     for candidate in (error.orig, getattr(error.orig, "__cause__", None)):
         if getattr(candidate, "constraint_name", None) in SLOT_TAKEN_CONSTRAINTS:
+            return True
+        if DEADLOCK in (
+            getattr(candidate, "sqlstate", None),
+            getattr(candidate, "pgcode", None),
+        ):
             return True
     return any(name in str(error.orig) for name in SLOT_TAKEN_CONSTRAINTS)
 
@@ -733,7 +746,7 @@ async def book_appointment(payload: BookingIn, actor: Scheduler, claims: ClaimsD
     db.add(appointment)
     try:
         await db.flush()
-    except IntegrityError as error:
+    except DBAPIError as error:
         await db.rollback()
         if not _is_slot_taken(error):
             raise
@@ -983,7 +996,7 @@ async def change_appointment(
         await db.flush()
         if appointment.booking_group_id is not None:
             await recompute_group_periods(db, appointment.booking_group_id)
-    except IntegrityError as error:
+    except DBAPIError as error:
         await db.rollback()
         if not _is_slot_taken(error):
             raise
@@ -1349,7 +1362,7 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
 
             cursor = slot.ends_at
             previous_appointment = appointment
-    except IntegrityError as error:
+    except DBAPIError as error:
         await db.rollback()
         if not _is_slot_taken(error):
             raise

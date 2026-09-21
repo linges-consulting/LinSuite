@@ -204,6 +204,21 @@ function Swatch({ colour, label }: { colour?: StaffColour; label: string }) {
   )
 }
 
+/**
+ * What deactivation actually did. Nothing is cancelled or handed over — `/api/schedule`
+ * keeps drawing a column for a departed person who is still booked — so when there is
+ * anything still ahead of them, the desk is told to go and deal with it.
+ */
+function deactivatedNote(futureAppointments: number): string {
+  const kept = 'They are signed out everywhere. Their history is kept.'
+  if (futureAppointments < 1) return kept
+  const one = futureAppointments === 1
+  return `${kept} ${futureAppointments} upcoming appointment${one ? '' : 's'} ${
+    one ? 'stays' : 'stay'
+  } on the calendar — move or cancel ${one ? 'it' : 'them'}.`
+}
+
+
 function StaffLine(props: {
   member: StaffRow
   roles: RoleOption[]
@@ -265,7 +280,7 @@ function StaffLine(props: {
         updated.active
           ? `${updated.display_name} can sign in again`
           : `Deactivated ${updated.display_name}`,
-        updated.active ? undefined : 'They are signed out everywhere. Their history is kept.',
+        updated.active ? undefined : deactivatedNote(updated.future_appointments ?? 0),
       )(),
     onError: toastErr,
   })

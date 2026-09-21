@@ -120,6 +120,8 @@ function fakeServer() {
   const calls: { url: string; method: string; body?: any }[] = []
   /** Set by a test to make the next write refuse, the way the real guards do. */
   let refuse: { status: number; detail: string; code?: string } | null = null
+  // What the deactivate response says is still booked ahead of the person being removed.
+  let future = 0
 
   const find = (url: string) => staff.find((s) => s.id === url.split('/')[4])!
 
@@ -167,7 +169,7 @@ function fakeServer() {
       if (url.endsWith('/deactivate')) {
         const row = find(url)
         row.active = false
-        return Response.json(row)
+        return Response.json({ ...row, future_appointments: future })
       }
       if (url.endsWith('/reactivate')) {
         const row = find(url)
@@ -192,7 +194,12 @@ function fakeServer() {
       return Response.json({}, { status: 404 })
     }),
   )
-  return { calls, staff, reject: (r: typeof refuse) => (refuse = r) }
+  return {
+    calls,
+    staff,
+    reject: (r: typeof refuse) => (refuse = r),
+    setFuture: (n: number) => (future = n),
+  }
 }
 
 function renderStaff() {
@@ -503,6 +510,22 @@ describe('deactivating', () => {
       expect(server.calls.some((c) => c.url === '/api/admin/staff/s2/reactivate')).toBe(true),
     )
     expect(await screen.findByText(/can sign in again/)).toBeInTheDocument()
+  })
+
+  it('says how many appointments the person still has when they are deactivated', async () => {
+    const server = fakeServer()
+    server.setFuture(2)
+    const user = userEvent.setup()
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    renderStaff()
+    await openStaff(user)
+
+    await openActions(user, 'desk@cedar.example')
+    await user.click(await screen.findByRole('menuitem', { name: 'Deactivate' }))
+
+    // Deactivating cancels nothing: the cards stay on the calendar and somebody has to
+    // decide what happens to them.
+    expect(await screen.findByText(/2 upcoming appointments/)).toBeInTheDocument()
   })
 
   it('surfaces the last-administrator refusal instead of predicting it', async () => {

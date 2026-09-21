@@ -28,7 +28,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from auth.capabilities import Requires
 from auth.models import User
@@ -36,7 +36,7 @@ from core.db import SessionDep
 from core.models import Business
 from scheduling.appointments import AppointmentOut, appointments_between
 from scheduling.clock import local_blocks_to_instants, localize
-from scheduling.models import Closure, Staff, TimeOff, WorkingHours
+from scheduling.models import Appointment, Closure, Staff, TimeOff, WorkingHours
 from scheduling.palette import BY_KEY
 from scheduling.slots import check_range, utc
 from scheduling.time_off import business_zone
@@ -112,14 +112,28 @@ async def read_schedule(
         localize(datetime.combine(to + timedelta(days=1), time.min), zone),
     )
 
+    # A column for everyone who works here **and** for anyone who does not any more but is
+    # still booked in this window (fix wave, finding 9): deactivating somebody neither
+    # cancels nor moves what they were booked for, and a card with no column is a client
+    # nobody at the desk can see, let alone cancel or hand to a colleague. Their shift and
+    # time off are *not* drawn — the column is there for the cards on it, not to suggest
+    # they can be booked.
+    booked = select(Appointment.staff_id).where(
+        Appointment.starts_at >= window[0],
+        Appointment.starts_at < window[1],
+        *([] if include_cancelled else [Appointment.status != "cancelled"]),
+    )
     roster = list(
         await db.scalars(
             select(Staff)
-            .where(Staff.active, *([Staff.id == staff_id] if staff_id else []))
+            .where(
+                or_(Staff.active, Staff.id.in_(booked)),
+                *([Staff.id == staff_id] if staff_id else []),
+            )
             .order_by(Staff.sort_order, Staff.display_name)
         )
     )
-    ids = [s.id for s in roster]
+    ids = [s.id for s in roster if s.active]
 
     hours: dict[uuid.UUID, dict[int, list[tuple[int, int]]]] = {s: {} for s in ids}
     for row in await db.execute(

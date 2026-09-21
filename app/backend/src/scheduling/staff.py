@@ -47,7 +47,7 @@ from core.models import Business
 from notifications.tasks import send_email
 from scheduling import cache
 from scheduling._admin_forms import blank_to_none, known_colour, refuse, refuse_emptied_field
-from scheduling.models import MAX_BASIS_POINTS, Staff
+from scheduling.models import MAX_BASIS_POINTS, Appointment, Staff
 from scheduling.palette import BY_KEY, PALETTE, next_free
 
 log = logging.getLogger(__name__)
@@ -105,9 +105,19 @@ class StaffOut(UserOut):
     # No password has ever been set, so the invitation is still outstanding. What the
     # "Resend invite" action is offered from, and what the row is badged with.
     invite_pending: bool
+    # How many confirmed appointments this person still has ahead of them. Only the
+    # deactivate response fills it in — it is the one answer that changes what the person
+    # clicking is about to do (`/api/schedule` keeps a column for them either way).
+    future_appointments: int | None = None
 
 
-def _out(staff: Staff, user: User, locked_until: datetime | None) -> StaffOut:
+def _out(
+    staff: Staff,
+    user: User,
+    locked_until: datetime | None,
+    *,
+    future_appointments: int | None = None,
+) -> StaffOut:
     return StaffOut(
         # `id` is the staff member's here, so the account's is left out and re-sent as
         # `user_id` — the one field this shape deliberately redefines.
@@ -127,6 +137,7 @@ def _out(staff: Staff, user: User, locked_until: datetime | None) -> StaffOut:
         active=staff.active,
         sort_order=staff.sort_order,
         invite_pending=user.password_hash is None,
+        future_appointments=future_appointments,
     )
 
 
@@ -450,6 +461,21 @@ async def update_staff(
 # --- leaving, and coming back ---------------------------------------------------------------
 
 
+async def _future_appointments(db: SessionDep, staff_id: uuid.UUID) -> int:
+    """Confirmed appointments this person still has ahead of them. Deactivation neither
+    cancels nor moves them — `/api/schedule` keeps drawing a column so the desk can — so the
+    confirm dialog says how many are out there before anybody clicks (fix wave, finding 9)."""
+    return await db.scalar(
+        select(func.count())
+        .select_from(Appointment)
+        .where(
+            Appointment.staff_id == staff_id,
+            Appointment.status == "confirmed",
+            Appointment.starts_at >= datetime.now(UTC),
+        )
+    )
+
+
 @router.post("/{staff_id}/deactivate")
 async def deactivate_staff(staff_id: uuid.UUID, admin: StaffManager, db: SessionDep) -> StaffOut:
     """They stop being able to sign in. Everything they did stays exactly where it is.
@@ -459,8 +485,9 @@ async def deactivate_staff(staff_id: uuid.UUID, admin: StaffManager, db: Session
     on a phone in their pocket.
     """
     staff, user = await _load(db, staff_id)
+    booked = await _future_appointments(db, staff.id)
     if not staff.active:
-        return _out(staff, user, None)
+        return _out(staff, user, None, future_appointments=booked)
 
     staff.active = False
     revoke_all(user)
@@ -478,7 +505,7 @@ async def deactivate_staff(staff_id: uuid.UUID, admin: StaffManager, db: Session
     await db.commit()
     await cache.bump()
     log.info("staff: %s deactivated %s", admin.email, user.email)
-    return _out(staff, user, None)
+    return _out(staff, user, None, future_appointments=booked)
 
 
 @router.post("/{staff_id}/reactivate")

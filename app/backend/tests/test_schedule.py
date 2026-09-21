@@ -162,6 +162,48 @@ async def test_staff_id_narrows_every_list_to_one_column(client):
     assert [a["staff"]["id"] for a in body["appointments"]] == [rae]
 
 
+async def test_a_deactivated_staff_members_booked_appointments_keep_their_column(client):
+    """Deactivating somebody does not cancel what they were booked for, and a card with no
+    column is a client nobody at the desk can see, move or cancel (fix wave, finding 9). The
+    deactivate response says how many are still out there, so the confirm can warn."""
+    await as_admin(client)
+    me = await me_staff_id(client)
+    rae = await add_colleague(client, "rae@cedar.example", OTHER_PASSWORD)
+    await put_hours(client, me, [(0, 540, 720)])
+    await put_hours(client, rae, [(0, 540, 720)])
+    service = await make_service(client, [me, rae])
+    booked = await book(client, service, rae, at("10:00"))
+    assert booked.status_code == 201, booked.text
+
+    gone = await client.post(f"{STAFF}/{rae}/deactivate", json={})
+    assert gone.status_code == 200, gone.text
+    assert gone.json()["future_appointments"] == 1
+
+    resp = await read(client, MONDAY, MONDAY)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert rae in [s["id"] for s in body["staff"]]
+    assert booked.json()["id"] in [a["id"] for a in body["appointments"]]
+    # Nothing else changed: they have no shift any more, so no shading is drawn for them.
+    assert rae not in {b["staff_id"] for b in body["working_blocks"]}
+
+
+async def test_a_deactivated_staff_member_with_nothing_booked_keeps_no_column(client):
+    await as_admin(client)
+    me = await me_staff_id(client)
+    rae = await add_colleague(client, "rae@cedar.example", OTHER_PASSWORD)
+    await put_hours(client, me, [(0, 540, 720)])
+
+    gone = await client.post(f"{STAFF}/{rae}/deactivate", json={})
+    assert gone.status_code == 200, gone.text
+    assert gone.json()["future_appointments"] == 0
+
+    resp = await read(client, MONDAY, MONDAY)
+
+    assert [s["id"] for s in resp.json()["staff"]] == [me]
+
+
 async def test_the_range_rules_are_the_ones_every_dated_read_shares(client):
     await as_admin(client)
 

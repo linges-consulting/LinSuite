@@ -441,6 +441,9 @@ export type StaffRow = {
   max_concurrent_appointments: number
   active: boolean
   sort_order: number
+  /** Only the deactivate response fills this in: confirmed appointments still ahead of the
+   *  person. They are not cancelled — the calendar keeps a column for them. */
+  future_appointments?: number | null
   /** No password has ever been set: the invitation is still outstanding. */
   invite_pending: boolean
 }
