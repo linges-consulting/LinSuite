@@ -196,6 +196,7 @@ async def audit_events() -> list[tuple[str, str, str | None, dict]]:
                 text(
                     "SELECT event_type, target_type, target_id, metadata FROM audit_events "
                     "WHERE event_type LIKE 'appointment.%' OR event_type LIKE 'customer.%' "
+                    "OR event_type LIKE 'group.%' "
                     "ORDER BY id"
                 )
             )
@@ -633,6 +634,10 @@ async def test_the_list_is_by_local_date_inclusive_and_filterable_by_staff(clien
         "price_cents",
         "notes",
         "booking_group_id",
+        "completed_at",
+        "cancelled_at",
+        "cancel_reason",
+        "no_show_at",
         "overridden_rules",
         "override_reason",
         "customer",

@@ -201,6 +201,76 @@ def bookable_slots(
     return result
 
 
+@dataclass(frozen=True)
+class ChainLink:
+    """One link of a booking-group chain, as the engine already answered it: every slot
+    offered for the link's service, over whatever range the caller computed. `staff_id` is
+    the link's own booking rule — a person, or "any" — carried here rather than folded into
+    `slots` so the search can apply it without going back to the database.
+
+    `staff_id` is None for "any"; `staff_order` is then the eligible staff in the order
+    "any" picks from (lowest `sort_order` first, `slots.py`'s own tie-break) — read only in
+    that case, since a named link's answer never depends on it.
+    """
+
+    slots: Sequence["Slot"]
+    staff_id: Id | None = None
+    staff_order: Sequence[Id] = ()
+
+
+@dataclass(frozen=True)
+class ChainStart:
+    """One chain-valid start: link 0's instant, and the staff resolved for every link, in
+    order — what `/api/availability/group` hands back and what booking the group re-checks."""
+
+    starts_at: datetime
+    staff_ids: tuple[Id, ...]
+
+
+def chain_starts(links: Sequence[ChainLink]) -> list[ChainStart]:
+    """Every start of `links[0]` from which the whole chain can be booked.
+
+    **The client's own time is continuous.** Each following link must be offered starting
+    at *exactly* the instant the one before it ends — `ends_at`, the span the client sees,
+    never the buffered one. Each link's own buffers already shaped its `slots` (they apply
+    to its own staff member and resources, not to the gap between two different people), so
+    this function does no arithmetic of its own beyond matching an instant.
+
+    A pure walk over what the engine already computed: no session, no clock, S2-testable —
+    the sequential search tech-stack §19 calls out as the ticket's real complexity, cut down
+    to matching timestamps once the engine has done the rest.
+    """
+    if not links:
+        return []
+    first, *rest = links
+    results: list[ChainStart] = []
+    for slot in first.slots:
+        staff = _resolve_link(first, slot)
+        if staff is None:
+            continue
+        chosen = [staff]
+        cursor = slot.ends_at
+        for link in rest:
+            found = next((s for s in link.slots if s.starts_at == cursor), None)
+            staff = _resolve_link(link, found) if found else None
+            if staff is None:
+                chosen = []
+                break
+            chosen.append(staff)
+            cursor = found.ends_at
+        if chosen:
+            results.append(ChainStart(starts_at=slot.starts_at, staff_ids=tuple(chosen)))
+    return results
+
+
+def _resolve_link(link: ChainLink, slot: "Slot") -> Id | None:
+    """Who a link resolves to at `slot` — the named person if the slot offers them, or for
+    "any" the lowest-`sort_order` eligible member the slot offers, in `staff_order`."""
+    if link.staff_id is not None:
+        return link.staff_id if link.staff_id in slot.staff_ids else None
+    return next((s for s in link.staff_order if s in slot.staff_ids), None)
+
+
 def advisory_breaches(
     *,
     timezone: str,

@@ -45,6 +45,7 @@ from core.db import SessionDep
 from core.models import Business
 from scheduling._admin_forms import refuse
 from scheduling.availability import (
+    ChainLink,
     Id,
     Interval,
     Requirement,
@@ -53,6 +54,7 @@ from scheduling.availability import (
     Slot,
     StaffSpec,
     bookable_slots,
+    chain_starts,
 )
 from scheduling.clock import localize
 from scheduling.models import (
@@ -363,18 +365,122 @@ async def availability(
     )
 
 
-def unbookable(service: CatalogServiceOut) -> JSONResponse:
-    """A service the catalog says cannot be booked: 409, with the reasons beside it."""
-    return JSONResponse(
-        status_code=409,
-        content={
-            "detail": "This service cannot be booked until its setup is complete.",
-            "code": "not_bookable",
-            "unbookable_reasons": service.unbookable_reasons,
-        },
-    )
+def unbookable(service: CatalogServiceOut, link_index: int | None = None) -> JSONResponse:
+    """A service the catalog says cannot be booked: 409, with the reasons beside it.
+    `link_index` is set when this is one link of a group booking's refusal."""
+    content = {
+        "detail": "This service cannot be booked until its setup is complete.",
+        "code": "not_bookable",
+        "unbookable_reasons": service.unbookable_reasons,
+    }
+    if link_index is not None:
+        content["link_index"] = link_index
+    return JSONResponse(status_code=409, content=content)
 
 
 def utc(moment: datetime) -> str:
     # `Z` rather than `+00:00`, the same shape `scheduling/time_off.py` sends instants in.
     return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+# --- group availability (Task 18) -----------------------------------------------------------
+
+
+class GroupSlotOut(BaseModel):
+    starts_at: str
+    # The resolved staff, one per link, in the order `services` was asked in — a named link
+    # is always itself; an "any" link is whoever the search picked for that particular start.
+    staff_ids: list[str]
+
+
+class GroupDayOut(BaseModel):
+    date: str
+    slots: list[GroupSlotOut]
+
+
+class GroupAvailabilityOut(BaseModel):
+    service_ids: list[str]
+    timezone: str
+    granularity_minutes: int
+    horizon_ends_on: str
+    days: list[GroupDayOut]
+
+
+@router.get("/group", response_model=GroupAvailabilityOut)
+async def group_availability(
+    _: Viewer,
+    db: SessionDep,
+    services: str,
+    from_: Annotated[Date, Query(alias="from")],
+    to: Date,
+    staff: str | None = None,
+):
+    """Chain-valid starts for an ordered visit (module docstring's Task 18): every start of
+    the first service from which every following one is offered, back to back, ending where
+    the one before it ends — the sequential search tech-stack §19 calls for. Same range rules
+    and horizon as `/api/availability`; each service is checked bookable exactly as one is.
+
+    `services` is comma-separated, in visit order. `staff` is the same length when sent —
+    one staff id, or `any`, per service — and defaults to `any` for every link.
+    """
+    check_range(from_, to)
+    service_ids = [s for s in services.split(",") if s]
+    if not service_ids:
+        raise refuse("services", "Name at least one service.", where="query")
+    tokens = staff.split(",") if staff else [None] * len(service_ids)
+    if len(tokens) != len(service_ids):
+        raise refuse("staff", 'Name a provider, or "any", for every service.', where="query")
+
+    links: list[ChainLink] = []
+    computed_first: Computed | None = None
+    for i, (service_id, token) in enumerate(zip(service_ids, tokens, strict=True)):
+        service = await catalog_entry(db, uuid.UUID(service_id))
+        if not service.bookable:
+            return unbookable(service, link_index=i)
+        eligible = [uuid.UUID(s) for s in service.staff_ids]
+        named = uuid.UUID(token) if token and token != "any" else None
+        if named is not None and named not in eligible:
+            raise refuse("staff", "That staff member cannot deliver this service.", where="query")
+        candidates = [named] if named else eligible
+        computed = await compute(db, service, candidates, from_, to)
+        computed_first = computed_first or computed
+        order = (
+            list(
+                await db.scalars(
+                    select(Staff.id)
+                    .where(Staff.id.in_(candidates))
+                    .order_by(Staff.sort_order, Staff.display_name, Staff.id)
+                )
+            )
+            if named is None
+            else []
+        )
+        slots = [slot for day_slots in computed.days.values() for slot in day_slots]
+        links.append(ChainLink(slots=slots, staff_id=named, staff_order=order))
+
+    zone = ZoneInfo(computed_first.timezone)
+    by_date: dict[Date, list] = {
+        from_ + timedelta(days=n): [] for n in range((to - from_).days + 1)
+    }
+    for chain in chain_starts(links):
+        by_date.setdefault(chain.starts_at.astimezone(zone).date(), []).append(chain)
+
+    return GroupAvailabilityOut(
+        service_ids=service_ids,
+        timezone=computed_first.timezone,
+        granularity_minutes=computed_first.granularity_minutes,
+        horizon_ends_on=computed_first.horizon_ends_on.isoformat(),
+        days=[
+            GroupDayOut(
+                date=day.isoformat(),
+                slots=[
+                    GroupSlotOut(
+                        starts_at=utc(chain.starts_at),
+                        staff_ids=[str(s) for s in chain.staff_ids],
+                    )
+                    for chain in sorted(chains, key=lambda c: c.starts_at)
+                ],
+            )
+            for day, chains in sorted(by_date.items())
+        ],
+    )

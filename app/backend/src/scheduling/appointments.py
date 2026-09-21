@@ -42,8 +42,8 @@ client-facing booking endpoint (M3) must accept no `override` and run nothing re
 """
 
 import uuid
+from datetime import UTC, datetime, time, timedelta
 from datetime import date as Date
-from datetime import datetime, time, timedelta
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
@@ -128,6 +128,11 @@ class AppointmentOut(BaseModel):
     price_cents: int
     notes: str | None
     booking_group_id: str | None
+    # Task 18: when each terminal state was reached, and cancellation's free-text reason.
+    completed_at: str | None
+    cancelled_at: str | None
+    cancel_reason: str | None
+    no_show_at: str | None
     # The advisory rules this was confirmed past, and why — null when none were. The card's
     # marker; the authorizer is in the audit log.
     overridden_rules: list[str] | None
@@ -159,6 +164,10 @@ def _out(appointment: Appointment) -> AppointmentOut:
         booking_group_id=str(appointment.booking_group_id)
         if appointment.booking_group_id
         else None,
+        completed_at=utc(appointment.completed_at) if appointment.completed_at else None,
+        cancelled_at=utc(appointment.cancelled_at) if appointment.cancelled_at else None,
+        cancel_reason=appointment.cancel_reason,
+        no_show_at=utc(appointment.no_show_at) if appointment.no_show_at else None,
         overridden_rules=appointment.overridden_rules,
         override_reason=appointment.override_reason,
         customer=CustomerRef(
@@ -339,49 +348,107 @@ def assign_resources(
     return chosen
 
 
-def not_offered() -> JSONResponse:
+def _with_link(content: dict, link_index: int | None) -> dict:
+    """A group booking's refusal carries which link in the chain it was — the same code and
+    detail a single booking would have sent, plus where in the chain it happened, so the
+    dialog can point at the second service rather than the first."""
+    if link_index is not None:
+        content["link_index"] = link_index
+    return content
+
+
+def not_offered(link_index: int | None = None) -> JSONResponse:
     """The engine does not offer that start. FastAPI's 422 shape, plus a code the screen can
     switch on without reading `loc`: it means the same as `slot_taken` to a person — what
     you were looking at is out of date — and a screen should treat both alike."""
     return JSONResponse(
         status_code=422,
-        content={
-            "detail": [
-                {
-                    "type": "value_error",
-                    "loc": ["body", "starts_at"],
-                    "msg": "That time is no longer available. Pick another.",
-                }
-            ],
-            "code": "not_offered",
-        },
+        content=_with_link(
+            {
+                "detail": [
+                    {
+                        "type": "value_error",
+                        "loc": ["body", "starts_at"],
+                        "msg": "That time is no longer available. Pick another.",
+                    }
+                ],
+                "code": "not_offered",
+            },
+            link_index,
+        ),
     )
 
 
-def override_available(rules: list[str]) -> JSONResponse:
+def override_available(rules: list[str], link_index: int | None = None) -> JSONResponse:
     """The engine does not offer that start, but a human may: the same 422 shape as
     `not_offered` with the advisory rules the start breaks beside it, for the screen to
     put into words and ask about."""
     return JSONResponse(
         status_code=422,
+        content=_with_link(
+            {
+                "detail": [
+                    {
+                        "type": "value_error",
+                        "loc": ["body", "starts_at"],
+                        "msg": "That time is outside availability. "
+                        "It can be booked with an override.",
+                    }
+                ],
+                "code": "override_available",
+                "rules": rules,
+            },
+            link_index,
+        ),
+    )
+
+
+def slot_taken(link_index: int | None = None) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content=_with_link(
+            {"detail": "That time was just taken. Pick another.", "code": "slot_taken"}, link_index
+        ),
+    )
+
+
+def invalid_transition(status: str) -> JSONResponse:
+    """A status endpoint (or a move) asked of an appointment that is not `confirmed`. Every
+    one of the four statuses is terminal but `confirmed` in M1 (module docstring's ruling),
+    so the only question this answers is which one it already is."""
+    return JSONResponse(
+        status_code=409,
         content={
-            "detail": [
-                {
-                    "type": "value_error",
-                    "loc": ["body", "starts_at"],
-                    "msg": "That time is outside availability. It can be booked with an override.",
-                }
-            ],
-            "code": "override_available",
-            "rules": rules,
+            "detail": f"A {status} appointment cannot be changed that way.",
+            "code": "invalid_transition",
         },
     )
 
 
-def slot_taken() -> JSONResponse:
+def not_yet_started() -> JSONResponse:
+    """A no-show marked before `starts_at`: there is nothing to have missed yet."""
     return JSONResponse(
-        status_code=409,
-        content={"detail": "That time was just taken. Pick another.", "code": "slot_taken"},
+        status_code=422,
+        content={
+            "detail": "This appointment has not started yet.",
+            "code": "not_yet_started",
+        },
+    )
+
+
+def group_refused(field: str, message: str, link_index: int) -> JSONResponse:
+    """A group link refused for a reason that is not the engine's own — the staff member
+    named cannot deliver the service, or an override was asked with nobody named. Shaped
+    like `scheduling._admin_forms.refuse`'s 422, with `link_index` for which link it was."""
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {"type": "value_error", "loc": ["body", "links", link_index, field], "msg": message}
+            ],
+            "code": "invalid_link",
+            "link_index": link_index,
+        },
     )
 
 
@@ -591,9 +658,7 @@ async def change_appointment(
     if appointment is None:
         raise HTTPException(status_code=404, detail="No such appointment.")
     if appointment.status != "confirmed":
-        raise HTTPException(
-            status_code=409, detail=f"A {appointment.status} appointment cannot be moved."
-        )
+        return invalid_transition(appointment.status)
     if payload.override:
         await authorize_override(db, actor, claims, appointment.staff_id)
     old_start, old_duration = appointment.starts_at, appointment.duration_minutes
@@ -693,15 +758,361 @@ async def change_appointment(
     return _out(await _load(db, appointment.id))
 
 
+# --- status lifecycle (Task 18) ------------------------------------------------------------
+#
+# `confirmed → completed | cancelled | no_show`, every one of the three terminal — no reopen
+# in M1. Each transition is its own endpoint rather than a generic "set status" so the
+# request itself says what happened, and each has exactly one body: `complete_appointment`
+# is the single place `completed_at` and `appointment.completed` are ever written, because
+# later phases (treatment receipts, package credits, commission) key off that event and a
+# second path to it would be a second place for them to disagree about whether it happened.
+#
+# **Cancelling frees the room.** `appointment_resources` has no WHERE clause on its exclusion
+# constraint (`scheduling/models.py`), so a cancelled booking stops claiming its resources by
+# no longer having the rows — `appointment.resources = []` deletes them (`delete-orphan`).
+# A no-show frees them too: the span is over either way, and leaving stale claims on a
+# no-show would make a room "busy" for a visit that never happened.
+
+
+class CancelIn(BaseModel):
+    """The one thing a cancellation may say beyond "not this": why. Optional, and free text
+    like `time_off.reason` — a dropdown of reasons would enumerate a client's business."""
+
+    reason: Annotated[str | None, Field(max_length=500)] = None
+
+    @field_validator("reason", mode="after")
+    @classmethod
+    def _trimmed(cls, value: str | None) -> str | None:
+        return blank_to_none(value)
+
+
+def _cancel(db: AsyncSession, appointment: Appointment, actor: User, reason: str | None) -> None:
+    """The one cancellation code path — a single member and every member of a group both
+    call this, so "cancelled" means the same three things everywhere it happens."""
+    appointment.status = "cancelled"
+    appointment.cancelled_at = datetime.now(UTC)
+    appointment.cancel_reason = reason
+    appointment.resources = []
+    record_event(
+        db,
+        "appointment.cancelled",
+        target_type="appointment",
+        target_id=str(appointment.id),
+        actor_user_id=actor.id,
+        metadata={"reason": reason},
+    )
+
+
+@router.post("/{appointment_id}/complete", response_model=AppointmentOut)
+async def complete_appointment(appointment_id: uuid.UUID, actor: Scheduler, db: SessionDep):
+    """The one explicit, recorded event later phases hang behaviour on (module docstring;
+    CLAUDE.md "package credits deduct on completion"). Only from `confirmed`."""
+    appointment = await _load(db, appointment_id)
+    if appointment is None:
+        raise HTTPException(status_code=404, detail="No such appointment.")
+    if appointment.status != "confirmed":
+        return invalid_transition(appointment.status)
+    appointment.status = "completed"
+    appointment.completed_at = datetime.now(UTC)
+    record_event(
+        db,
+        "appointment.completed",
+        target_type="appointment",
+        target_id=str(appointment.id),
+        actor_user_id=actor.id,
+        metadata={},
+    )
+    await db.commit()
+    return _out(await _load(db, appointment.id))
+
+
+@router.post("/{appointment_id}/cancel", response_model=AppointmentOut)
+async def cancel_appointment(
+    appointment_id: uuid.UUID, payload: CancelIn, actor: Scheduler, db: SessionDep
+):
+    """Cancelling one member of a group leaves the others untouched — only
+    `POST /group/{id}/cancel` acts on the whole visit."""
+    appointment = await _load(db, appointment_id)
+    if appointment is None:
+        raise HTTPException(status_code=404, detail="No such appointment.")
+    if appointment.status != "confirmed":
+        return invalid_transition(appointment.status)
+    _cancel(db, appointment, actor, payload.reason)
+    await db.commit()
+    return _out(await _load(db, appointment.id))
+
+
+@router.post("/{appointment_id}/no-show", response_model=AppointmentOut)
+async def mark_no_show(appointment_id: uuid.UUID, actor: Scheduler, db: SessionDep):
+    """Distinguishable from cancelled in reporting (acceptance criteria): the client did not
+    cancel, they did not come. Only once `starts_at` has passed — there is nothing to have
+    missed yet before then."""
+    appointment = await _load(db, appointment_id)
+    if appointment is None:
+        raise HTTPException(status_code=404, detail="No such appointment.")
+    if appointment.status != "confirmed":
+        return invalid_transition(appointment.status)
+    now = datetime.now(UTC)
+    if now < appointment.starts_at:
+        return not_yet_started()
+    appointment.status = "no_show"
+    appointment.no_show_at = now
+    appointment.resources = []
+    record_event(
+        db,
+        "appointment.no_show",
+        target_type="appointment",
+        target_id=str(appointment.id),
+        actor_user_id=actor.id,
+        metadata={},
+    )
+    await db.commit()
+    return _out(await _load(db, appointment.id))
+
+
+# --- booking groups (Task 18) ---------------------------------------------------------------
+#
+# A visit is an ordered chain of services for one customer, each link its own appointment —
+# own staff, own resources, own snapshot — sharing one `booking_group_id`. The sequential
+# search (`scheduling.availability.chain_starts`) finds the starts; this books them and
+# cancels them together.
+
+
+class GroupOut(BaseModel):
+    booking_group_id: str
+    appointments: list[AppointmentOut]
+
+
+class GroupLinkIn(OverrideIn):
+    service_id: uuid.UUID
+    # None is "any available", resolved per link the same way a single booking resolves it.
+    staff_id: uuid.UUID | None = None
+
+
+class GroupBookingIn(BaseModel):
+    """`starts_at` is link 0's start — a start `/api/availability/group` offered. Every
+    following link's start is computed here, at the link before it's `ends_at`; the client
+    never sends them."""
+
+    starts_at: AwareDatetime
+    links: Annotated[list[GroupLinkIn], Field(min_length=1)]
+    customer_id: uuid.UUID | None = None
+    customer: CustomerIn | None = None
+    notes: Annotated[str | None, Field(max_length=2000)] = None
+
+    @field_validator("notes", mode="after")
+    @classmethod
+    def _trimmed(cls, value: str | None) -> str | None:
+        return blank_to_none(value)
+
+    @model_validator(mode="after")
+    def _one_customer(self):
+        if (self.customer_id is None) == (self.customer is None):
+            raise ValueError("send customer_id or customer, and not both")
+        return self
+
+
+@router.post("/group", status_code=201, response_model=GroupOut)
+async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDep, db: SessionDep):
+    """Every link validated exactly as `book_appointment` validates one booking — offered at
+    its computed start, resources distinct per link, authorization for its own override —
+    and all of it in the one transaction this request already holds: nothing commits until
+    every link has. A refusal at link `i` is that link's own code, `link_index` beside it,
+    and (because nothing before this was committed) nothing written; a constraint race is
+    409 `slot_taken` and the same full rollback.
+    """
+    if payload.customer is not None:
+        if "customers.manage" not in actor.capabilities:
+            raise Forbidden(
+                CAPABILITY_REQUIRED,
+                f"Your role does not allow this: {BY_KEY['customers.manage'].description}",
+            )
+        customer = await create_customer(db, payload.customer, actor.id)
+    else:
+        customer = await db.get(Customer, payload.customer_id)
+        if customer is None:
+            raise refuse("customer_id", "No such customer.")
+
+    group_id = uuid.uuid4()
+    created: list[Appointment] = []
+    cursor = payload.starts_at
+    try:
+        for i, link in enumerate(payload.links):
+            service = await catalog_entry(db, link.service_id)
+            if not service.bookable:
+                return unbookable(service, link_index=i)
+            eligible = [uuid.UUID(s) for s in service.staff_ids]
+            if link.staff_id is not None and link.staff_id not in eligible:
+                return group_refused(
+                    "staff_id", "That staff member cannot deliver this service.", i
+                )
+            candidates = [link.staff_id] if link.staff_id else eligible
+            if link.override:
+                if link.staff_id is None:
+                    return group_refused(
+                        "staff_id", "Name the staff member whose availability is overridden.", i
+                    )
+                await authorize_override(db, actor, claims, link.staff_id)
+
+            computed, slot = await offered_slot(
+                db, service, candidates, cursor, relax_advisory=link.override
+            )
+            if slot is None:
+                if not link.override and link.staff_id is not None:
+                    relaxed, reachable = await offered_slot(
+                        db, service, candidates, cursor, relax_advisory=True
+                    )
+                    if reachable is not None:
+                        before = service.buffer_before_minutes
+                        after = service.buffer_after_minutes
+                        return override_available(
+                            broken_rules(relaxed, link.staff_id, reachable, before, after),
+                            link_index=i,
+                        )
+                return not_offered(link_index=i)
+
+            staff_id = link.staff_id or await db.scalar(
+                select(Staff.id)
+                .where(Staff.id.in_(slot.staff_ids))
+                .order_by(Staff.sort_order, Staff.display_name, Staff.id)
+                .limit(1)
+            )
+            span = (
+                slot.starts_at - timedelta(minutes=service.buffer_before_minutes),
+                slot.ends_at + timedelta(minutes=service.buffer_after_minutes),
+            )
+            claimed = assign_resources(
+                service.requirements, computed.resources, computed.resource_busy, span
+            )
+            if claimed is None:
+                return not_offered(link_index=i)
+            rules = (
+                broken_rules(
+                    computed,
+                    staff_id,
+                    slot,
+                    service.buffer_before_minutes,
+                    service.buffer_after_minutes,
+                )
+                if link.override
+                else []
+            )
+
+            appointment = Appointment(
+                customer_id=customer.id,
+                staff_id=staff_id,
+                service_id=uuid.UUID(service.id),
+                starts_at=slot.starts_at,
+                ends_at=slot.ends_at,
+                duration_minutes=service.duration_minutes,
+                buffer_before_minutes=service.buffer_before_minutes,
+                buffer_after_minutes=service.buffer_after_minutes,
+                price_cents=service.price_cents,
+                status="confirmed",
+                booking_group_id=group_id,
+                notes=payload.notes if i == 0 else None,
+                overridden_rules=rules or None,
+                override_reason=link.override_reason if rules else None,
+                created_by_user_id=actor.id,
+                resources=[
+                    AppointmentResource(
+                        resource_id=r.id, kind=r.kind, period=Range(span[0], span[1], bounds="[)")
+                    )
+                    for r in claimed
+                ],
+            )
+            db.add(appointment)
+            created.append(appointment)
+            cursor = slot.ends_at
+        await db.flush()
+    except IntegrityError as error:
+        await db.rollback()
+        if not _is_slot_taken(error):
+            raise
+        return slot_taken()
+
+    for appointment in created:
+        record_event(
+            db,
+            "appointment.booked",
+            target_type="appointment",
+            target_id=str(appointment.id),
+            actor_user_id=actor.id,
+            metadata={
+                "service_id": str(appointment.service_id),
+                "staff_id": str(appointment.staff_id),
+                "customer_id": str(customer.id),
+            },
+        )
+        if appointment.overridden_rules:
+            record_override(db, appointment, actor)
+    record_event(
+        db,
+        "group.booked",
+        target_type="booking_group",
+        target_id=str(group_id),
+        actor_user_id=actor.id,
+        metadata={
+            "group_id": str(group_id),
+            "appointment_ids": [str(a.id) for a in created],
+        },
+    )
+    await db.commit()
+    loaded = [await _load(db, a.id) for a in created]
+    return GroupOut(booking_group_id=str(group_id), appointments=[_out(a) for a in loaded])
+
+
+@router.post("/group/{group_id}/cancel", response_model=GroupOut)
+async def cancel_group(group_id: uuid.UUID, payload: CancelIn, actor: Scheduler, db: SessionDep):
+    """Every non-terminal member, the same code path a single cancel uses — a completed
+    member stays completed, an already-cancelled one is untouched."""
+    members = list(
+        await db.scalars(
+            select(Appointment)
+            .where(Appointment.booking_group_id == group_id)
+            .order_by(Appointment.starts_at)
+            .execution_options(populate_existing=True)
+        )
+    )
+    if not members:
+        raise HTTPException(status_code=404, detail="No such booking group.")
+    cancelled_ids = []
+    for appointment in members:
+        if appointment.status != "confirmed":
+            continue
+        _cancel(db, appointment, actor, payload.reason)
+        cancelled_ids.append(str(appointment.id))
+    if cancelled_ids:
+        record_event(
+            db,
+            "group.cancelled",
+            target_type="booking_group",
+            target_id=str(group_id),
+            actor_user_id=actor.id,
+            metadata={"group_id": str(group_id), "appointment_ids": cancelled_ids},
+        )
+    await db.commit()
+    loaded = [await _load(db, a.id) for a in members]
+    return GroupOut(booking_group_id=str(group_id), appointments=[_out(a) for a in loaded])
+
+
 # --- listing ------------------------------------------------------------------------------
 
 
 async def appointments_between(
-    db: AsyncSession, from_: Date, to: Date, zone, staff_id: uuid.UUID | None = None
+    db: AsyncSession,
+    from_: Date,
+    to: Date,
+    zone,
+    staff_id: uuid.UUID | None = None,
+    *,
+    include_cancelled: bool = False,
 ) -> list[AppointmentOut]:
     """Every appointment starting on a business-local date from `from_` to `to` inclusive,
     in start order; `staff_id` narrows to one column. Shared with `/api/schedule`, so the
-    two reads can never disagree about which day an instant is on."""
+    two reads can never disagree about which day an instant is on. Cancelled appointments
+    are left out unless `include_cancelled` — the calendar's own toggle (Task 18); the
+    default keeps the day's picture to what is actually happening."""
     window = (
         _local_midnight(from_, zone),
         _local_midnight(to + timedelta(days=1), zone),
@@ -714,6 +1125,8 @@ async def appointments_between(
     )
     if staff_id is not None:
         query = query.where(Appointment.staff_id == staff_id)
+    if not include_cancelled:
+        query = query.where(Appointment.status != "cancelled")
     return [_out(a) for a in await db.scalars(query)]
 
 
@@ -724,14 +1137,19 @@ async def list_appointments(
     from_: Annotated[Date, Query(alias="from")],
     to: Date,
     staff_id: uuid.UUID | None = None,
+    include_cancelled: bool = False,
 ) -> AppointmentsOut:
     """Every appointment starting on a business-local date from `from` to `to` inclusive (at
-    most 31 days), in start order; `staff_id` narrows to one column. Cancelled ones are
-    included — the calendar decides how to draw them — with their `status` saying so."""
+    most 31 days), in start order; `staff_id` narrows to one column. Cancelled ones are left
+    out unless `include_cancelled=true` — the calendar decides how to draw them when it asks
+    for them, with `status` saying so."""
     check_range(from_, to)
     zone = await business_zone(db)
     return AppointmentsOut(
-        timezone=str(zone), appointments=await appointments_between(db, from_, to, zone, staff_id)
+        timezone=str(zone),
+        appointments=await appointments_between(
+            db, from_, to, zone, staff_id, include_cancelled=include_cancelled
+        ),
     )
 
 

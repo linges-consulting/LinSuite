@@ -521,6 +521,14 @@ class Appointment(Base):
     status: Mapped[str] = mapped_column(String(16), server_default=text("'confirmed'"))
     # Task 18: the linked appointments of one multi-service visit share this.
     booking_group_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    # Task 18: when each terminal state was reached — `completed_at` is the event later
+    # phases (treatment receipts, package credits, commission) key off, stamped by exactly
+    # one code path (`appointments.complete_appointment`). `cancel_reason` is free text, like
+    # `time_off.reason`, for the same reason: a dropdown would enumerate a client's business.
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_reason: Mapped[str | None] = mapped_column(Text)
+    no_show_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     notes: Mapped[str | None] = mapped_column(Text)
     # The advisory rules (`availability.ADVISORY_RULES`) this booking — or its last move —
     # was confirmed past, and why; null when it needed no override (migration 0015). The

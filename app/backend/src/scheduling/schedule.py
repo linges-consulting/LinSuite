@@ -98,9 +98,11 @@ async def read_schedule(
     from_: Annotated[Date, Query(alias="from")],
     to: Date,
     staff_id: uuid.UUID | None = None,
+    include_cancelled: bool = False,
 ) -> ScheduleOut:
     """Business-local dates, `to` inclusive, at most 31 days; `staff_id` narrows every list
-    to one column."""
+    to one column. Cancelled appointments are left out unless `include_cancelled=true` — the
+    grid's "Show cancelled" toggle (Task 18)."""
     check_range(from_, to)
     zone = await business_zone(db)
     granularity = await db.scalar(select(Business.slot_granularity_minutes).where(Business.id == 1))
@@ -174,5 +176,7 @@ async def read_schedule(
             for t in absences
         ],
         closures=[ClosureOut(id=str(c.id), date=c.date.isoformat(), name=c.name) for c in closures],
-        appointments=await appointments_between(db, from_, to, zone, staff_id),
+        appointments=await appointments_between(
+            db, from_, to, zone, staff_id, include_cancelled=include_cancelled
+        ),
     )
