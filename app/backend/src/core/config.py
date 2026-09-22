@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # What `.env.example` ships in place of a secret, and the one command that replaces it. The
@@ -66,6 +66,13 @@ class Settings(BaseSettings):
     # How long an emailed one-time code stays usable. Short: it is the lower-assurance path.
     mfa_email_otp_minutes: int = 10
 
+    # --- Documents (ADR-0001 §5, `customers/keys.py`) ---------------------------------------
+    # AES-256-GCM master key, 32 bytes as hex, that every client's document key is wrapped
+    # under. Separate from the MFA key so neither's compromise or loss takes the other with
+    # it. No default. **Escrowed offline, apart from the backups** (tech-stack §9, §10): a
+    # restored database without this key is ten years of unreadable ciphertext.
+    document_master_key: str
+
     # --- Brute-force throttling (tech-stack §14, `auth/throttle.py`) -----------------------
     # Consecutive failed password checks that lock the account. Everything below it is a
     # progressive delay, and the delay is what makes reaching this number expensive.
@@ -111,9 +118,9 @@ class Settings(BaseSettings):
             )
         return value
 
-    @field_validator("mfa_encryption_key", mode="after")
+    @field_validator("mfa_encryption_key", "document_master_key", mode="after")
     @classmethod
-    def _real_mfa_key(cls, value: str) -> str:
+    def _real_aes_key(cls, value: str, info: ValidationInfo) -> str:
         try:
             usable = not value.startswith(PLACEHOLDER) and len(bytes.fromhex(value)) * 2 == (
                 MFA_KEY_HEX
@@ -122,7 +129,7 @@ class Settings(BaseSettings):
             usable = False
         if not usable:
             raise ValueError(
-                f"MFA_ENCRYPTION_KEY must be {MFA_KEY_HEX} hex characters (32 bytes). "
+                f"{info.field_name.upper()} must be {MFA_KEY_HEX} hex characters (32 bytes). "
                 f"Generate one with: {GENERATE}"
             )
         return value

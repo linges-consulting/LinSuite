@@ -19,6 +19,7 @@ VALID = {
     "database_url_migrate": DSN,
     "jwt_secret": "0" * 64,
     "mfa_encryption_key": "11" * 32,
+    "document_master_key": "22" * 32,
 }
 
 
@@ -33,7 +34,7 @@ def test_valid_secrets_boot():
 
 @pytest.mark.parametrize(
     "field",
-    ["jwt_secret", "mfa_encryption_key"],
+    ["jwt_secret", "mfa_encryption_key", "document_master_key"],
 )
 def test_the_shipped_placeholder_is_refused_with_the_command_that_fixes_it(field):
     with pytest.raises(ValidationError) as refused:
@@ -46,8 +47,18 @@ def test_a_short_jwt_secret_is_refused():
         settings(jwt_secret="tooshort")
 
 
-def test_an_mfa_key_that_is_not_32_bytes_of_hex_is_refused():
+@pytest.mark.parametrize("field", ["mfa_encryption_key", "document_master_key"])
+def test_a_key_that_is_not_32_bytes_of_hex_is_refused(field):
+    with pytest.raises(ValidationError) as refused:
+        settings(**{field: "not hex at all, but long enough to look like a key ok"})
+    assert GENERATE in str(refused.value)
+    assert field.upper() in str(refused.value)
     with pytest.raises(ValidationError):
-        settings(mfa_encryption_key="not hex at all, but long enough to look like a key ok")
+        settings(**{field: "11" * 16})
+
+
+def test_the_document_master_key_is_required(monkeypatch):
+    # The harness exports a valid one for the whole session; this test is about its absence.
+    monkeypatch.delenv("DOCUMENT_MASTER_KEY", raising=False)
     with pytest.raises(ValidationError):
-        settings(mfa_encryption_key="11" * 16)
+        Settings(_env_file=None, **{k: v for k, v in VALID.items() if k != "document_master_key"})
