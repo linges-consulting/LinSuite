@@ -182,6 +182,17 @@ class SubmitIn(BaseModel):
     answers: dict[str, Any]
 
 
+# The two refusals a submit can meet through no fault of its own, each leaving the link open:
+# the id is already filed (through another link — this one's retry is `already_received`), or
+# the client's key was purged between its read and this insert (ADR-0001 rule 7: the FK
+# refuses; a retry makes a new key). Any other integrity error is a bug and raises.
+_TRY_AGAIN_CONSTRAINTS = frozenset({"form_submissions_pkey", "form_submissions_customer_id_fkey"})
+
+
+def _try_again(constraint: str | None) -> bool:
+    return constraint in _TRY_AGAIN_CONSTRAINTS
+
+
 def _coded(status: int, code: str, detail: str, **extra: Any) -> JSONResponse:
     return JSONResponse(status_code=status, content={"detail": detail, "code": code, **extra})
 
@@ -256,6 +267,10 @@ async def submit_form(payload: SubmitIn, request: Request, db: SessionDep):
             FormLink.consumed_at.is_(None),
             FormLink.revoked_at.is_(None),
             FormLink.expires_at > func.now(),
+            # Retiring revokes open links; this closes the window before that commits.
+            ~select(FormTemplate.id)
+            .where(FormTemplate.id == version.template_id, FormTemplate.retired_at.is_not(None))
+            .exists(),
         )
         .values(consumed_at=func.now())
         .returning(FormLink.id)
@@ -297,11 +312,13 @@ async def submit_form(payload: SubmitIn, request: Request, db: SessionDep):
     )
     try:
         await db.commit()
-    except IntegrityError:
-        # The id is taken by another submission, or the client's key was purged between its
-        # read and this insert (rule 7: the FK refuses; a retry makes a new key). Nothing was
-        # written and the link is still open.
+    except IntegrityError as error:
         await db.rollback()
+        constraint = getattr(getattr(error.orig, "__cause__", None), "constraint_name", None)
+        if not _try_again(constraint):
+            raise
+        # The constraint's name only — never the payload, the token or an answer.
+        log.warning("form submission refused by %s; nothing written", constraint)
         return _coded(409, TRY_AGAIN, "That did not go through. Please try again.")
 
     try:

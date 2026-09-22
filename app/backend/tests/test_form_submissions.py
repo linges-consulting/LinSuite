@@ -220,6 +220,32 @@ def test_a_blank_undecodable_or_oversized_image_is_not_a_signature(image):
     assert not submissions.is_signed({"name": "Priya Nair", "image": image})
 
 
+def _shape(draw) -> str:
+    image = Image.new("RGBA", (600, 200), (0, 0, 0, 0))
+    draw(ImageDraw.Draw(image))
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+
+@pytest.mark.parametrize(
+    ("image", "signed"),
+    [
+        (_shape(lambda d: d.rectangle([300, 100, 304, 103], fill="#111")), False),  # 5 x 4 blob
+        (_shape(lambda d: d.rectangle([0, 0, 599, 199], fill="#000")), False),  # all black
+        (_shape(lambda d: d.point((300, 100), fill="#000")), False),  # one dot
+        (_shape(lambda d: None), False),  # blank
+        (
+            _shape(lambda d: d.line([(60, 140), (140, 60), (220, 150), (320, 70)], "#111", 3)),
+            True,
+        ),  # a realistic stroke
+    ],
+    ids=["blob_5x4", "all_black", "one_dot", "blank", "stroke"],
+)
+def test_ink_must_span_the_pad_without_filling_it(image, signed):
+    assert submissions.is_signed({"name": "Priya Nair", "image": image}) is signed
+
+
 @pytest.mark.parametrize("name", ["", "   ", "x" * (submissions.MAX_SIGNED_NAME + 1)])
 def test_a_signature_needs_a_sane_typed_name(name):
     assert not submissions.is_signed({"name": name, "image": png()})
@@ -304,6 +330,78 @@ async def test_a_retry_is_already_received_and_any_other_reuse_is_the_uniform_40
     assert wrong.status_code == 409 and wrong.json()["code"] == "version_mismatch"
     assert not await link_consumed(fresh)
     assert len(await rows(customer_id)) == 1
+
+
+async def test_a_submission_id_filed_on_another_link_is_409_and_changes_nothing(client, caplog):
+    customer_id, token, version_id, template = await sent_form(client)
+    submission_id = uuid.uuid4()
+    assert (await submit(client, token, version_id, answers(), submission_id)).status_code == 200
+    second = token_of((await issue(client, customer_id, template["id"])).json()["url"])
+    before = await hold(customer_id)
+
+    resp = await submit(client, second, version_id, answers(), submission_id)
+
+    assert resp.status_code == 409 and resp.json()["code"] == "try_again"
+    assert not await link_consumed(second)
+    assert len(await rows(customer_id)) == 1
+    assert len(await events("form.submitted")) == 1
+    assert await hold(customer_id) == before
+    assert "form_submissions_pkey" in caplog.text
+    assert second not in caplog.text and "twelve weeks" not in caplog.text
+
+
+def test_only_the_expected_constraints_read_as_try_again():
+    from forms import public
+
+    assert public._try_again("form_submissions_pkey")
+    assert public._try_again("form_submissions_customer_id_fkey")
+    assert not public._try_again("form_submissions_link_id_key")
+    assert not public._try_again("ck_form_submissions_method")
+    assert not public._try_again(None)
+
+
+async def test_retiring_a_form_revokes_its_open_links_and_its_link_cannot_submit(client):
+    customer_id, token, version_id, template = await sent_form(client)
+
+    retire = await client.post(f"/api/admin/forms/{template['id']}/retire", json={})
+    assert retire.status_code == 200, retire.text
+
+    async with session_scope() as db:
+        revoked = await db.scalar(
+            text("SELECT count(*) FROM form_links WHERE revoked_at IS NOT NULL")
+        )
+    assert revoked == 1
+    async with get_purge_engine().connect() as purge:
+        metadata = await purge.scalar(
+            text("SELECT metadata FROM audit_events WHERE event_type = 'form_template.retired'")
+        )
+    assert metadata == {"links_revoked": 1}
+    resp = await submit(client, token, version_id, answers())
+    assert resp.status_code == 404 and resp.json() == INVALID
+    assert await rows(customer_id) == []
+
+
+async def test_a_form_retired_after_the_lookup_is_refused_at_the_consume(client, monkeypatch):
+    """Retired straight in the table (no revocation) between the unlocked lookup and the
+    guarded UPDATE: the UPDATE's own WHERE refuses it."""
+    from forms import public
+
+    customer_id, token, version_id, template = await sent_form(client, health=False)
+    real_lock = public._lock_the_chart
+
+    async def lock_after_retiring(*args, **kwargs):
+        await as_owner(
+            "UPDATE form_templates SET retired_at = now() WHERE id = :id", id=template["id"]
+        )
+        return await real_lock(*args, **kwargs)
+
+    monkeypatch.setattr(public, "_lock_the_chart", lock_after_retiring)
+
+    resp = await submit(client, token, version_id, answers())
+
+    assert resp.status_code == 404 and resp.json() == INVALID
+    assert await rows(customer_id) == []
+    assert not await link_consumed(token)
 
 
 async def test_answers_are_validated_against_the_pinned_version(client):

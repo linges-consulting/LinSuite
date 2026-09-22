@@ -33,13 +33,13 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from auth.capabilities import Requires
 from auth.models import User
 from core.audit import record_event
 from core.db import SessionDep
-from forms.models import FormTemplate, FormTemplateVersion
+from forms.models import FormLink, FormTemplate, FormTemplateVersion
 from forms.schema import FormSchema, kind_problems
 from scheduling._admin_forms import refuse
 
@@ -364,7 +364,22 @@ async def retire(template_id: uuid.UUID, admin: FormManager, db: SessionDep) -> 
     template = await _template(db, template_id, lock=True)
     if template.retired_at is None:
         template.retired_at = template.updated_at = datetime.now(UTC)
-        _audit(db, "retired", template, admin)
+        # A retired form is never filled in: every link still open for it dies with it. The
+        # submit's own guarded UPDATE also checks retirement, for a link in flight (#47).
+        revoked = await db.execute(
+            update(FormLink)
+            .where(
+                FormLink.version_id.in_(
+                    select(FormTemplateVersion.id).where(
+                        FormTemplateVersion.template_id == template.id
+                    )
+                ),
+                FormLink.revoked_at.is_(None),
+                FormLink.consumed_at.is_(None),
+            )
+            .values(revoked_at=func.now())
+        )
+        _audit(db, "retired", template, admin, links_revoked=revoked.rowcount)
         await db.commit()
     return _out(template, await _latest(db, template_id))
 

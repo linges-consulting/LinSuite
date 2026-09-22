@@ -46,7 +46,17 @@ export function SignaturePad(props: {
     ctx.fillStyle = PAPER
     ctx.fillRect(0, 0, WIDTH, HEIGHT)
   }
-  useEffect(paper, [])
+  // On mount: fresh paper, then whatever signature the value still holds — a pad remounted
+  // with its answer kept must show it, not a blank that reads as "signed".
+  useEffect(() => {
+    paper()
+    const ctx = context()
+    if (!ctx || !image) return
+    const held = new Image()
+    held.onload = () => ctx.drawImage(held, 0, 0, WIDTH, HEIGHT)
+    held.src = image
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, on mount
+  }, [])
 
   const emit = (nextName: string, nextImage: string) =>
     props.onChange(nextName || nextImage ? { name: nextName, image: nextImage } : undefined)

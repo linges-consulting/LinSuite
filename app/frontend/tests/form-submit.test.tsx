@@ -321,3 +321,45 @@ test('without forms.view the card shows no completed forms', async () => {
   expect(within(card).queryByRole('table', { name: 'Completed forms' })).not.toBeInTheDocument()
   expect(calls.some((c) => c.url.endsWith('/c1/forms'))).toBe(false)
 })
+
+// --- the pad repaints what it holds ---------------------------------------------------------
+
+test('a remounted pad redraws the signature it still holds, and a new one stays blank', async () => {
+  const { render } = await import('@testing-library/react')
+  const { SignaturePad } = await import('@/components/signature-pad')
+  const painted: string[] = []
+  const context = new Proxy(
+    {},
+    {
+      get: (_, key) =>
+        key === 'drawImage' ? (image: HTMLImageElement) => painted.push(image.src) : () => {},
+      set: () => true,
+    },
+  )
+  vi.mocked(HTMLCanvasElement.prototype.getContext).mockReturnValue(
+    context as unknown as CanvasRenderingContext2D,
+  )
+  // jsdom never loads images: this one "loads" as soon as it has a source.
+  vi.stubGlobal(
+    'Image',
+    class {
+      onload: (() => void) | null = null
+      private source = ''
+      get src() {
+        return this.source
+      }
+      set src(value: string) {
+        this.source = value
+        queueMicrotask(() => this.onload?.())
+      }
+    },
+  )
+
+  render(<SignaturePad id="sig" value={{ name: 'Priya Nair', image: DRAWN }} onChange={() => {}} />)
+  await waitFor(() => expect(painted).toEqual([DRAWN]))
+
+  painted.length = 0
+  render(<SignaturePad id="blank" value={undefined} onChange={() => {}} />)
+  await Promise.resolve()
+  expect(painted).toEqual([])
+})

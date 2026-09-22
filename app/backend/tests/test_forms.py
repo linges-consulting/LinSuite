@@ -402,7 +402,7 @@ async def test_every_mutation_is_on_the_trail(client):
         "form_template.deleted",
     ]
     # Identifiers and numbers only: no label, no name, no schema.
-    assert all(set(row[2]) <= {"number"} for row in await audit())
+    assert all(set(row[2]) <= {"number", "links_revoked"} for row in await audit())
 
 
 # --- who may do any of this -------------------------------------------------------------------

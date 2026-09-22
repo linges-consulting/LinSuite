@@ -13,8 +13,9 @@ When the client's key is shredded the answers go with it.
 the shared twin's (`schema.validate_answers`); this file adds what only a server can be trusted
 with: the image is a PNG data URL, at most `SIGNATURE_MAX_BYTES`, within `SIGNATURE_MAX_SIDE`
 on each side (checked from the header, before any pixel is decoded), decodes, and has ink on
-it — a fully transparent or all-white pad is not a signature. The name is non-blank and at most
-`MAX_SIGNED_NAME` characters.
+it — spanning a minimum share of the pad each way and covering at most `MAX_INK_RATIO` of it,
+so a transparent, white, all-black, dotted or blotted pad is not a signature. The name is
+non-blank and at most `MAX_SIGNED_NAME` characters.
 
 **Staff read** (`forms.view`): the list is metadata — form name, version, method, when — and
 is not an access (pre-flight C5). Opening one returns the answers, so it is logged per open,
@@ -51,8 +52,13 @@ SIGNATURE_MAX_BYTES = 200 * 1024
 # The pad draws at 600 x 200; anything much larger is not from it.
 SIGNATURE_MAX_SIDE = 2000
 MAX_SIGNED_NAME = 200
-# Dark pixels needed for "something was drawn": more than a stray tap, less than any name.
+# "Something was drawn": dark pixels (luminance < 128 on white) that span at least this
+# share of the pad each way — a tap, a dot or a small blob is not a signature — and cover no
+# more than `MAX_INK_RATIO` of it, so a filled or all-black image is not one either.
 MIN_INK_PIXELS = 20
+MIN_INK_WIDTH = 0.05  # 30 px of the 600 px pad
+MIN_INK_HEIGHT = 0.03  # 6 px of the 200 px pad
+MAX_INK_RATIO = 0.60
 _DATA_URL = "data:image/png;base64,"
 _MAX_ENCODED = len(_DATA_URL) + (SIGNATURE_MAX_BYTES * 4) // 3 + 4
 
@@ -70,7 +76,15 @@ def _has_ink(png: bytes) -> bool:
         page.alpha_composite(image.convert("RGBA"))
     except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
         return False
-    return sum(page.convert("L").histogram()[:128]) >= MIN_INK_PIXELS
+    ink = page.convert("L").point(lambda level: 255 if level < 128 else 0)
+    dark = ink.histogram()[255]
+    box = ink.getbbox()
+    if box is None or dark < MIN_INK_PIXELS or dark > MAX_INK_RATIO * page.width * page.height:
+        return False
+    left, top, right, bottom = box
+    return (
+        right - left >= MIN_INK_WIDTH * page.width and bottom - top >= MIN_INK_HEIGHT * page.height
+    )
 
 
 def is_signed(value: dict[str, Any]) -> bool:
