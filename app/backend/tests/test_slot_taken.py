@@ -48,3 +48,30 @@ def test_any_other_refusal_is_not():
     assert not _is_slot_taken(
         _wrapped(_Orig(constraint_name="ck_appointments_span", sqlstate="23514"))
     )
+
+
+# --- the generic "try again" (Task 4 fix round 1): deadlock and serialization failures ------
+
+
+def test_a_deadlock_or_serialization_failure_is_retryable_and_nothing_else_is():
+    from core.errors import is_retryable
+
+    assert is_retryable(_wrapped(_Orig("deadlock detected", sqlstate="40P01")))
+    assert is_retryable(_wrapped(_Orig("could not serialize", sqlstate="40001")))
+    assert not is_retryable(_wrapped(_Orig(sqlstate="23514")))
+    assert not is_retryable(_wrapped(_Orig()))
+
+
+async def test_a_retryable_failure_is_a_coded_409_and_anything_else_is_re_raised():
+    import json
+
+    import pytest
+
+    from main import database_conflict
+
+    answer = await database_conflict(None, _wrapped(_Orig(sqlstate="40P01")))
+    assert answer.status_code == 409
+    assert json.loads(answer.body)["code"] == "try_again"
+
+    with pytest.raises(DBAPIError):
+        await database_conflict(None, _wrapped(_Orig(sqlstate="23514")))

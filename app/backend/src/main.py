@@ -8,6 +8,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
 from auth.admin_users import router as admin_users_router
 from auth.login import router as auth_router
@@ -18,7 +19,13 @@ from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
 from core.config import get_settings
 from core.db import SessionDep, get_engine, get_purge_engine, session_scope
-from core.errors import SERVICE_UNAVAILABLE, UPLOAD_ORIGIN_REQUIRED, Forbidden
+from core.errors import (
+    SERVICE_UNAVAILABLE,
+    TRY_AGAIN,
+    UPLOAD_ORIGIN_REQUIRED,
+    Forbidden,
+    is_retryable,
+)
 from core.logging import configure_logging
 from core.partitions import ensure_on_boot
 from core.redis import get_redis
@@ -96,6 +103,20 @@ async def redis_unavailable(_: Request, exc: RedisError) -> JSONResponse:
     return JSONResponse(
         {"detail": "Temporarily unavailable. Try again shortly.", "code": SERVICE_UNAVAILABLE},
         status_code=503,
+    )
+
+
+# A deadlock or serialization failure: Postgres rolled this transaction back whole so another
+# could finish. A coded 409 the client can retry, rather than a 500 that reads as a bug.
+# Anything else is re-raised untouched and stays a 500. See `core/errors.py`.
+@app.exception_handler(DBAPIError)
+async def database_conflict(_: Request | None, exc: DBAPIError) -> JSONResponse:
+    if not is_retryable(exc):
+        raise exc
+    log.warning("database: retryable conflict: %s", exc.orig)
+    return JSONResponse(
+        {"detail": "Somebody else changed this at the same moment. Try again.", "code": TRY_AGAIN},
+        status_code=409,
     )
 
 

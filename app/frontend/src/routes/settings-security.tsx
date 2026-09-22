@@ -138,13 +138,20 @@ const PROFILES: { value: RetentionProfile; label: string; explanation: string }[
  */
 function RetentionSection({ policy }: { policy: SecurityPolicy }) {
   const queryClient = useQueryClient()
-  const [choice, setChoice] = useState<RetentionProfile>(policy.retention_profile)
+  // Only an unsaved edit is local state; otherwise the radio shows whatever the server last
+  // said, so another administrator's save shows up on the next read without clobbering an
+  // edit somebody here is in the middle of.
+  const [draft, setDraft] = useState<RetentionProfile | null>(null)
+  const choice = draft ?? policy.retention_profile
+  const setChoice = (profile: RetentionProfile) =>
+    setDraft(profile === policy.retention_profile ? null : profile)
   const [confirming, setConfirming] = useState(false)
 
   const save = useMutation({
     mutationFn: (retention_profile: RetentionProfile) => updateSecurityPolicy({ retention_profile }),
     onSuccess: (saved) => {
       queryClient.setQueryData(SECURITY, saved)
+      setDraft(null)
       setConfirming(false)
       toast.success('Retention profile saved')
     },

@@ -20,7 +20,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
 from pydantic import AfterValidator, BaseModel, BeforeValidator, EmailStr, Field
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from auth.capabilities import Requires
 from auth.models import User
@@ -28,7 +28,6 @@ from core.audit import record_event
 from core.db import SessionDep
 from core.models import Business
 from customers import retention
-from customers.models import Customer
 from scheduling import cache
 from settings import assets, branding, images
 from settings.models import FAVICON, LOGO, BrandingAsset
@@ -247,7 +246,7 @@ async def update_timezone(
         )
         # Retention expiry is the end of a *local* day: a new zone moves every hold's instant.
         await db.flush()
-        await retention.recompute_all(db)
+        await retention.recompute_all(db, never_shorten=True)
     await db.commit()
     if was != payload.timezone:
         # Every recurring rule the engine reads is a wall-clock time against this zone.
@@ -515,9 +514,6 @@ async def update_security(
         )
     if payload.retention_profile is not None:
         was_profile = business.retention_profile
-        held_before = await db.scalar(
-            select(func.count()).where(Customer.retention_expires_at.is_not(None))
-        )
         business.retention_profile = payload.retention_profile
         business.retention_profile_set_at = datetime.now(UTC)
         await db.flush()
@@ -532,7 +528,7 @@ async def update_security(
                 "retention_profile": [was_profile, payload.retention_profile],
                 "customers_recomputed": counts["changed"],
                 "held": counts["held"],
-                "holds_released": max((held_before or 0) - counts["held"], 0),
+                "holds_released": counts["released"],
             },
         )
     await db.commit()

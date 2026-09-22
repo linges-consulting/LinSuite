@@ -3,8 +3,12 @@
 `max(last_entry + 10y, dob + 18y + 10y)`, at the *end* of that local day in the business's
 zone (so a purge can never run a few hours early), with the pre-flight rulings (D4):
 `general_business` holds nothing, no clinical entry holds nothing, an entry with no DOB is
-held with unknown expiry (`datetime.max`, stored as `'infinity'`), and 29 Feb that lands in
-a common year falls back to 28 Feb (the pre-flight ruling, not 1 Mar).
+held with unknown expiry (`datetime.max`, stored as `'infinity'`).
+
+**Where a reading is ambiguous, retention takes the later date** (fix round 1 ruling — an
+early purge is irreversible, a late one is not): a 29 Feb anniversary in a common year is
+1 Mar, the DOB arm is the later of `dob + 28y` and `(dob + 18y) + 10y`, and "end of day" is
+the instant before the next local midnight even where 23:xx happens twice.
 """
 
 from datetime import UTC, date, datetime
@@ -12,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from customers.retention import GENERAL_BUSINESS, INFINITY, REGULATED_HEALTH, expiry
+from customers.retention import GENERAL_BUSINESS, INFINITY, REGULATED_HEALTH, expiry, later
 
 TORONTO = "America/Toronto"
 REGINA = "America/Regina"
@@ -94,28 +98,37 @@ CASES = [
         INFINITY,
     ),
     (
-        "leap-day DOB, 28th birthday in a leap year: 29 Feb itself",
+        # dob + 28y = 29 Feb 2028; (dob + 18y) + 10y = 1 Mar 2018 + 10y = 1 Mar 2028: later wins.
+        "leap-day DOB 2000: the (dob + 18y) + 10y reading, 1 Mar, is later",
         REGULATED_HEALTH,
         date(2000, 2, 29),
         utc(2010, 6, 15, 16),
         TORONTO,
-        end_of(date(2028, 2, 29), TORONTO),
+        end_of(date(2028, 3, 1), TORONTO),
     ),
     (
-        "leap-day DOB, 28th birthday in a common century year: 28 Feb",
+        "leap-day DOB 2008: 1 Mar 2036, not 29 Feb 2036",
+        REGULATED_HEALTH,
+        date(2008, 2, 29),
+        utc(2010, 6, 15, 16),
+        TORONTO,
+        end_of(date(2036, 3, 1), TORONTO),
+    ),
+    (
+        "leap-day DOB 2072, 28th birthday in the common century year 2100: 1 Mar",
         REGULATED_HEALTH,
         date(2072, 2, 29),
         utc(2080, 6, 15, 16),
         TORONTO,
-        end_of(date(2100, 2, 28), TORONTO),
+        end_of(date(2100, 3, 1), TORONTO),
     ),
     (
-        "leap-day entry, 10 years on is a common year: 28 Feb",
+        "leap-day entry, 10 years on is a common year: 1 Mar",
         REGULATED_HEALTH,
         date(1980, 5, 1),
         utc(2024, 2, 29, 17),
         TORONTO,
-        end_of(date(2034, 2, 28), TORONTO),
+        end_of(date(2034, 3, 1), TORONTO),
     ),
     (
         # 04:30 UTC on 1 Jun is still 31 May in Toronto: the entry's day is the local one.
@@ -144,6 +157,25 @@ CASES = [
         REGINA,
         utc(2034, 11, 5, 5, 59, 59, 999999),
     ),
+    # Clocks fall back at midnight, so 23:00–23:59 happens twice on the expiry day: the end of
+    # the day is the *second* 23:59:59.999999 — the instant before the next local midnight.
+    # Expected values are hard-coded UTC, one hour after a fold=0 reading of 23:59.
+    *[
+        (
+            f"midnight fall-back in {zone}: the day ends before the next local midnight",
+            REGULATED_HEALTH,
+            date(1970, 1, 1),
+            datetime(day.year - 10, day.month, day.day, 12, tzinfo=ZoneInfo(zone)),
+            zone,
+            expected,
+        )
+        for zone, day, expected in [
+            ("America/Santiago", date(2026, 4, 4), utc(2026, 4, 5, 3, 59, 59, 999999)),
+            ("Asia/Beirut", date(2026, 10, 24), utc(2026, 10, 24, 21, 59, 59, 999999)),
+            ("Africa/Cairo", date(2026, 10, 29), utc(2026, 10, 29, 21, 59, 59, 999999)),
+            ("America/Asuncion", date(2024, 3, 23), utc(2024, 3, 24, 3, 59, 59, 999999)),
+        ]
+    ],
 ]
 
 
@@ -177,3 +209,23 @@ def test_an_unknown_profile_is_treated_as_regulated():
 def test_a_naive_entry_is_refused():
     with pytest.raises(ValueError):
         expiry(REGULATED_HEALTH, date(1980, 5, 1), datetime(2026, 6, 15, 12), TORONTO)
+
+
+LATE = utc(2036, 6, 17, 3, 59, 59, 999999)
+EARLY = utc(2036, 6, 16, 6, 59, 59, 999999)
+
+
+@pytest.mark.parametrize(
+    "old,new,expected",
+    [
+        (None, LATE, LATE),  # no hold before: take the recomputed one
+        (None, None, None),
+        (LATE, EARLY, LATE),  # never shorter
+        (EARLY, LATE, LATE),  # longer is fine
+        (INFINITY, LATE, INFINITY),
+        (LATE, INFINITY, INFINITY),
+        (LATE, None, LATE),
+    ],
+)
+def test_later_is_the_later_hold(old, new, expected):
+    assert later(old, new) == expected

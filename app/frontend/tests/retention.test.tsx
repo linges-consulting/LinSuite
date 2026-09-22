@@ -18,12 +18,24 @@ afterEach(() => {
 const ADMIN = { signedIn: true, dualRole: true, adminWindowMs: 15 * 60_000 }
 const SECURITY = '/api/admin/business/security'
 
-function fakeSecurity(initial: { retention_profile: string; retention_profile_chosen: boolean }) {
-  let policy = { mfa_required_for_admin: true, mfa_email_otp_allowed: false, ...initial }
+type Policy = {
+  mfa_required_for_admin: boolean
+  mfa_email_otp_allowed: boolean
+  retention_profile: string
+  retention_profile_chosen: boolean
+}
+
+function fakeSecurity(
+  initial: { retention_profile: string; retention_profile_chosen: boolean },
+  // Somebody else's save, landing between this screen's reads.
+  elsewhere?: (policy: Policy) => Policy,
+) {
+  let policy: Policy = { mfa_required_for_admin: true, mfa_email_otp_allowed: false, ...initial }
   return stubApi({
     ...ADMIN,
     respond: (url, body) => {
       if (url !== SECURITY) return undefined
+      if (elsewhere) policy = elsewhere(policy)
       if (body !== undefined) {
         policy = {
           ...policy,
@@ -115,4 +127,33 @@ test('flipping an MFA switch sends only the MFA switches', async () => {
     mfa_email_otp_allowed: true,
   })
   expect(screen.getByText(/Choose a retention profile/)).toBeInTheDocument()
+})
+
+test('the radio follows a profile somebody else saved when nothing is being edited', async () => {
+  let reads = 0
+  fakeSecurity({ retention_profile: 'regulated_health', retention_profile_chosen: true }, (p) =>
+    ++reads > 1 ? { ...p, retention_profile: 'general_business' } : p,
+  )
+  const user = await openSecurity()
+  expect(await screen.findByRole('radio', { name: /Regulated health practice/ })).toBeChecked()
+
+  // Any fresh read — here, the answer to an MFA save — carries the other administrator's change.
+  await user.click(screen.getByRole('checkbox', { name: /Allow emailed codes/ }))
+
+  await waitFor(() => expect(screen.getByRole('radio', { name: /General business/ })).toBeChecked())
+})
+
+test('a fresh read never clobbers a choice being edited', async () => {
+  let reads = 0
+  fakeSecurity({ retention_profile: 'regulated_health', retention_profile_chosen: true }, (p) =>
+    // A visible sign the fresh read landed: the server now says nothing is chosen.
+    ++reads > 1 ? { ...p, retention_profile_chosen: false } : p,
+  )
+  const user = await openSecurity()
+  await user.click(await screen.findByRole('radio', { name: /General business/ }))
+
+  await user.click(screen.getByRole('checkbox', { name: /Require two-factor/ }))
+  expect(await screen.findByText(/Choose a retention profile/)).toBeInTheDocument()
+
+  expect(screen.getByRole('radio', { name: /General business/ })).toBeChecked()
 })

@@ -625,13 +625,22 @@ const blank = <span className="text-muted-foreground">—</span>
 /** When this chart may be destroyed (ADR-0001). A chart with no date of birth is held
  *  indefinitely — never "assumed adult" — and the fix is on this page, so it says what to do. */
 function RetentionLine({ retention }: { retention: CustomerDetail['retention'] }) {
-  if (retention.status === 'held' && retention.expires_on) {
-    return <span className="tabular-nums">Held until {formatDob(retention.expires_on)}</span>
+  if (retention.status === 'held') {
+    // A held record with no date should never arrive; if it does, it still reads as held.
+    return retention.expires_on ? (
+      <span className="tabular-nums">Held until {formatDob(retention.expires_on)}</span>
+    ) : (
+      <Badge variant="warning">Held — expiry date unavailable</Badge>
+    )
   }
   if (retention.status === 'needs_dob') {
     return <Badge variant="warning">Retention cannot be computed — add a date of birth</Badge>
   }
-  return <span className="text-muted-foreground">Not under a retention hold</span>
+  if (retention.status === 'not_held') {
+    return <span className="text-muted-foreground">Not under a retention hold</span>
+  }
+  // An unknown status is never read as "free to delete".
+  return <Badge variant="warning">Retention status unknown</Badge>
 }
 
 function fullName(c: CustomerRecord): string {

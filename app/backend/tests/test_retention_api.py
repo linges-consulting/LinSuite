@@ -267,6 +267,28 @@ async def test_changing_the_timezone_recomputes_the_end_of_day(client):
     )
 
 
+async def test_a_timezone_change_never_shortens_a_hold(client):
+    """01:30 on 16 Jun in Toronto is still 15 Jun in Vancouver. Re-reading the entry's day in
+    the new zone would end the hold ~21 h early; the zone path keeps the later of the two."""
+    await as_admin(client)
+    adult, unknown, unheld = [await new_customer(client, n) for n in ("Adult", "Unknown", "None")]
+    await set_dob(client, adult, years_ago(40))
+    late_night = datetime(2026, 6, 16, 5, 30, tzinfo=UTC)  # 01:30 EDT, 16 Jun
+    await entry(adult, late_night)
+    await entry(unknown, late_night)
+    before = (await stored(adult))[1]
+    assert before == end_of(date(2036, 6, 16))
+
+    resp = await client.patch(
+        "/api/admin/business/timezone", json={"timezone": "America/Vancouver"}
+    )
+    assert resp.status_code == 200, resp.text
+
+    assert (await stored(adult))[1] == before
+    assert (await stored(unknown))[1] == datetime.max
+    assert (await stored(unheld))[1] is None
+
+
 # --- what the profile shows -----------------------------------------------------------------
 
 

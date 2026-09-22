@@ -233,6 +233,9 @@ test.each([
   // The browser's own date style, as for the DOB: "14 Mar 2041" in en-CA, "Mar 14, 2041" here.
   [{ status: 'held', expires_on: '2041-03-14' }, /^Held until (14 Mar|Mar 14,) 2041$/, false],
   [{ status: 'not_held', expires_on: null }, 'Not under a retention hold', false],
+  // Held with no date is a contradiction the server should never send — but if it does, the
+  // record reads as held, never as free to delete.
+  [{ status: 'held', expires_on: null }, 'Held — expiry date unavailable', true],
   [
     { status: 'needs_dob', expires_on: null },
     'Retention cannot be computed — add a date of birth',

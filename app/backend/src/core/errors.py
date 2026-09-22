@@ -65,3 +65,26 @@ class Forbidden(HTTPException):
     def __init__(self, code: str, detail: str) -> None:
         super().__init__(status_code=403, detail=detail)
         self.code = code
+
+
+# --- 409: the database aborted this transaction, and running it again would succeed --------
+#
+# A deadlock (40P01) or a serialization failure (40001) is not the request's fault and not a
+# bug: Postgres picked this transaction to roll back so another could finish. The honest
+# answer is "try again", coded so a client can retry without parsing a sentence. `main.py`
+# maps it once for every route (the retention writers — a DOB PATCH racing a profile switch —
+# are the known way to reach it); `scheduling.appointments` keeps its own `slot_taken`
+# mapping for a deadlock, which means something more specific there.
+TRY_AGAIN = "try_again"
+RETRYABLE_SQLSTATES = frozenset({"40P01", "40001"})
+
+
+def is_retryable(error: Exception) -> bool:
+    """Whether a SQLAlchemy `DBAPIError` is a deadlock or serialization failure. asyncpg's
+    translated error carries `sqlstate`; SQLAlchemy may keep it a cause down."""
+    orig = getattr(error, "orig", None)
+    return any(
+        code in RETRYABLE_SQLSTATES
+        for candidate in (orig, getattr(orig, "__cause__", None))
+        for code in (getattr(candidate, "sqlstate", None), getattr(candidate, "pgcode", None))
+    )
