@@ -38,9 +38,9 @@ function template(fields: FormField[], overrides: Row = {}): Row {
   }
 }
 
-function fakeServer(seed: Row) {
+function fakeServer(seed: Row, history: Row[] = []) {
   const templates: Row[] = [seed]
-  const versions: Row[] = []
+  const versions: Row[] = [...history]
   const calls: { url: string; method: string; body?: any }[] = []
 
   vi.stubGlobal(
@@ -64,6 +64,8 @@ function fakeServer(seed: Row) {
         const number = versions.length + 1
         const version = {
           number,
+          name: row!.name,
+          kind: row!.kind,
           published_at: '2026-09-22T12:00:00Z',
           requires_resignature: body.requires_resignature,
           is_health_form: row!.draft.is_health_form,
@@ -220,6 +222,47 @@ describe('the builder', () => {
 
     await user.click(within(preview).getByRole('radio', { name: 'No' }))
     expect(within(preview).queryByText('How many weeks?')).not.toBeInTheDocument()
+  })
+})
+
+describe('the builder, continued', () => {
+  it('never offers "show only if" on a signature block', async () => {
+    fakeServer(
+      template([
+        { key: crypto.randomUUID(), type: 'yes_no', label: 'Agree?', required: true },
+        { key: crypto.randomUUID(), type: 'signature', label: 'Signature', required: true },
+      ]),
+    )
+    const user = userEvent.setup()
+    renderSettings()
+    await openBuilder(user)
+
+    expect(screen.queryByRole('combobox', { name: 'Show field 2 only if' })).not.toBeInTheDocument()
+  })
+
+  it('shows each version under the title it was published with', async () => {
+    fakeServer(
+      template([{ key: crypto.randomUUID(), type: 'yes_no', label: 'Any?', required: true }], {
+        latest_version: 1,
+      }),
+      [
+        {
+          number: 1,
+          name: 'Old prenatal intake',
+          kind: 'intake',
+          published_at: '2026-09-21T12:00:00Z',
+          requires_resignature: false,
+          is_health_form: true,
+          is_mandatory: false,
+        },
+      ],
+    )
+    const user = userEvent.setup()
+    renderSettings()
+    await openBuilder(user)
+
+    const history = screen.getByRole('region', { name: 'Versions' })
+    expect(await within(history).findByText('Old prenatal intake')).toBeInTheDocument()
   })
 })
 

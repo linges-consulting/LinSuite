@@ -1025,6 +1025,9 @@ export type FormTemplate = {
 
 export type FormVersionSummary = {
   number: number
+  /** The title and kind as published — what the client saw. The template's may since differ. */
+  name: string
+  kind: FormKind
   published_at: string
   requires_resignature: boolean
   is_health_form: boolean

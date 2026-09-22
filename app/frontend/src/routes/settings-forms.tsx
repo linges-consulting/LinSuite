@@ -422,7 +422,7 @@ function FormBuilder({ template, onBack }: { template: FormTemplate; onBack: () 
   const retired = template.retired_at !== null
   const problems = [
     ...(draft.name.trim() ? [] : ['The form needs a name.']),
-    ...schemaProblems({ fields: draft.fields }),
+    ...schemaProblems({ fields: draft.fields }, draft.kind),
   ]
 
   const change = (patch: Partial<Draft>) => {
@@ -568,6 +568,7 @@ function FormBuilder({ template, onBack }: { template: FormTemplate; onBack: () 
                   field={field}
                   index={index}
                   earlier={draft.fields.slice(0, index)}
+                  kind={draft.kind}
                   last={index === draft.fields.length - 1}
                   onChange={(patch) => setField(index, patch)}
                   onMove={(by) => move(index, by)}
@@ -595,7 +596,7 @@ function FormBuilder({ template, onBack }: { template: FormTemplate; onBack: () 
 
         <div className="flex flex-col gap-6 lg:sticky lg:top-4 lg:self-start">
           <FormPreview fields={draft.fields} />
-          <section aria-labelledby="versions-title" className="rounded-xl border p-4">
+          <section aria-labelledby="versions-title" className="rounded-xl border p-4" role="region">
             <h3 id="versions-title" className="text-base font-medium">
               Versions
             </h3>
@@ -608,6 +609,8 @@ function FormBuilder({ template, onBack }: { template: FormTemplate; onBack: () 
                 {versions.data.map((v) => (
                   <li key={v.number} className="flex flex-wrap items-center gap-2 py-2 text-sm">
                     <span className="font-medium tabular-nums">v{v.number}</span>
+                    <span className="min-w-0 truncate">{v.name}</span>
+                    <Badge variant="outline">{kindLabel(v.kind)}</Badge>
                     <time className="text-muted-foreground" dateTime={v.published_at}>
                       {new Date(v.published_at).toLocaleString()}
                     </time>
@@ -665,6 +668,7 @@ function FieldEditor(props: {
   field: FormField
   index: number
   earlier: FormField[]
+  kind: FormKind
   last: boolean
   onChange: (patch: Partial<FormField>) => void
   onMove: (by: -1 | 1) => void
@@ -679,6 +683,12 @@ function FieldEditor(props: {
     source?.type === 'yes_no' ? YES_NO : (source?.options ?? [])
   const answerable = !DISPLAY.has(field.type)
   const long = field.type === 'paragraph' || field.type === 'acknowledgement'
+  // A signature is never conditional, nor is a clause agreed to on a consent or waiver: an
+  // answer must not let a client skip either. Still offered while one is set, so it can be
+  // cleared after the kind changes.
+  const mayBeConditional =
+    field.type !== 'signature' &&
+    !(field.type === 'acknowledgement' && (props.kind === 'consent' || props.kind === 'waiver'))
 
   return (
     <article className="flex flex-col gap-4 rounded-xl border p-4" aria-label={`Field ${n}`}>
@@ -769,7 +779,7 @@ function FieldEditor(props: {
         )
       )}
 
-      {sources.length > 0 && (
+      {sources.length > 0 && (mayBeConditional || field.show_if) && (
         <div className="flex flex-col gap-2">
           <Label htmlFor={id('show-if')}>Show only if…</Label>
           <Select

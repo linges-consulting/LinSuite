@@ -11,6 +11,9 @@ Create Date: 2026-09-22
   and DELETE to everyone but the table owner — the purge role included, unlike
   `audit_events`: a version holds no client data, so retention never has a reason to remove
   one, and a submission (Task 4) points at it for as long as the submission exists.
+- `name` and `kind` are copied onto the version too: the title is part of what a client
+  signed, so renaming the draft must never retitle a published version. `form_templates.name`
+  is only the administrator's label for the draft.
 - `is_health_form` / `is_mandatory` (owner ruling Q1) belong to the version: a submission of a
   health form is a clinical entry, and that must be read from what the client signed, not
   from whatever the template says today.
@@ -60,6 +63,9 @@ def upgrade() -> None:
         sa.Column("id", sa.Uuid(), primary_key=True, server_default=sa.text("gen_random_uuid()")),
         sa.Column("template_id", sa.Uuid(), sa.ForeignKey("form_templates.id"), nullable=False),
         sa.Column("number", sa.Integer(), nullable=False),
+        # The title and kind the client saw and signed, frozen with the fields.
+        sa.Column("name", sa.String(200), nullable=False),
+        sa.Column("kind", sa.Text(), nullable=False),
         sa.Column("schema", postgresql.JSONB(), nullable=False),
         sa.Column("is_health_form", sa.Boolean(), nullable=False),
         sa.Column("is_mandatory", sa.Boolean(), nullable=False),
@@ -72,6 +78,10 @@ def upgrade() -> None:
             "template_id", "number", name="uq_form_template_versions_template_number"
         ),
         sa.CheckConstraint("number >= 1", name="ck_form_template_versions_number"),
+        sa.CheckConstraint(
+            "kind IN ('intake', 'consent', 'waiver', 'other')",
+            name="ck_form_template_versions_kind",
+        ),
     )
     op.execute("REVOKE UPDATE, DELETE ON form_template_versions FROM linsuite_app")
     op.execute(

@@ -210,6 +210,52 @@ async def test_publishing_an_unchanged_draft_is_refused(client):
     assert (await publish(client, template["id"])).status_code == 201
 
 
+async def test_a_rename_alone_is_a_new_version_and_the_old_one_keeps_its_title(client):
+    """The title is part of what a client signed: it lives on the version, not the template."""
+    await as_admin(client)
+    template = await make(client)
+    await save(client, template)
+    assert (await publish(client, template["id"])).status_code == 201
+
+    await save(client, {**template, "name": "Pregnancy intake", "kind": "consent"})
+    (row,) = (await client.get(FORMS)).json()["templates"]
+    assert row["has_unpublished_changes"] is True
+    second = await publish(client, template["id"])
+    assert second.status_code == 201, second.text
+
+    v1 = (await client.get(f"{FORMS}/{template['id']}/versions/1")).json()
+    v2 = (await client.get(f"{FORMS}/{template['id']}/versions/2")).json()
+    assert (v1["name"], v1["kind"]) == ("Prenatal intake", "intake")
+    assert (v2["name"], v2["kind"]) == ("Pregnancy intake", "consent")
+    history = (await client.get(f"{FORMS}/{template['id']}/versions")).json()["versions"]
+    assert [v["name"] for v in history] == ["Pregnancy intake", "Prenatal intake"]
+
+
+async def test_the_first_version_cannot_require_re_signature(client):
+    await as_admin(client)
+    template = await make(client)
+    await save(client, template)
+    resp = await publish(client, template["id"], requires_resignature=True)
+    assert resp.status_code == 422
+    assert resp.json()["code"] == "nothing_to_resign"
+
+
+async def test_a_consent_cannot_make_an_acknowledgement_conditional(client):
+    await as_admin(client)
+    template = await make(client)
+    conditional = schema()
+    conditional["fields"][1]["type"] = "acknowledgement"
+    conditional["fields"][1]["label"] = "I accept the risks."
+    # Fine on an intake form ...
+    await save(client, template, schema=conditional)
+    # ... refused once the same draft is a consent.
+    resp = await client.put(
+        f"{FORMS}/{template['id']}/draft",
+        json={"name": "Prenatal intake", "kind": "consent", "schema": conditional},
+    )
+    assert resp.status_code == 422, resp.text
+
+
 async def test_an_empty_draft_cannot_be_published(client):
     await as_admin(client)
     template = await make(client)
@@ -440,6 +486,7 @@ async def _published(client) -> str:
     "statement",
     [
         "UPDATE form_template_versions SET schema = '{\"fields\": []}'::jsonb",
+        "UPDATE form_template_versions SET name = 'Renamed'",
         "DELETE FROM form_template_versions",
     ],
 )

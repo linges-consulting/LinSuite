@@ -64,6 +64,10 @@ class FormTemplateVersion(Base):
     __table_args__ = (
         UniqueConstraint("template_id", "number", name="uq_form_template_versions_template_number"),
         CheckConstraint("number >= 1", name="ck_form_template_versions_number"),
+        CheckConstraint(
+            "kind IN (" + ", ".join(f"'{k}'" for k in KINDS) + ")",
+            name="ck_form_template_versions_kind",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -71,6 +75,10 @@ class FormTemplateVersion(Base):
     )
     template_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("form_templates.id"))
     number: Mapped[int] = mapped_column(Integer)
+    # The title and kind as published — what a link shows and a signed record is called.
+    # `FormTemplate.name` is only the draft's label and changes freely.
+    name: Mapped[str] = mapped_column(String(200))
+    kind: Mapped[str] = mapped_column(Text)
     schema: Mapped[dict[str, Any]] = mapped_column(JSONB)
     # A submission of a health form is a clinical entry that extends the client's retention
     # hold (Task 4); a mandatory one is on the essential-forms checklist (Task 8).

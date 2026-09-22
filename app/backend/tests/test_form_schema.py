@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from forms.schema import FormSchema, kept_answers, validate_answers, visible_keys
+from forms.schema import FormSchema, kept_answers, kind_problems, validate_answers, visible_keys
 
 CASES = json.loads(
     (Path(__file__).resolve().parents[2] / "shared" / "form-schema-cases.json").read_text()
@@ -21,11 +21,17 @@ BASE = FormSchema.model_validate(CASES["base"])
 
 @pytest.mark.parametrize("case", CASES["schemas"], ids=lambda c: c["name"])
 def test_schema_cases(case):
+    def problems() -> list[str]:
+        try:
+            schema = FormSchema.model_validate(case["schema"])
+        except ValidationError as error:
+            return [str(error)]
+        return kind_problems(schema, case.get("kind", "other"))
+
     if case["valid"]:
-        FormSchema.model_validate(case["schema"])
+        assert problems() == []
     else:
-        with pytest.raises(ValidationError):
-            FormSchema.model_validate(case["schema"])
+        assert problems() != []
 
 
 @pytest.mark.parametrize("case", CASES["answers"], ids=lambda c: c["name"])

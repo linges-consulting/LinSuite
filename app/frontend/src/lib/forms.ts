@@ -72,8 +72,12 @@ export const FIELD_TYPE_LABELS: Record<FieldType, string> = {
   signature: 'Signature',
 }
 
-/** Every problem with a schema, as sentences; empty means the server will accept it. */
-export function schemaProblems(schema: FormSchema): string[] {
+/** Kinds whose acknowledgements are clauses the client must agree to: never conditional. */
+const BINDING_KINDS: ReadonlySet<string> = new Set(['consent', 'waiver'])
+
+/** Every problem with a schema, as sentences; empty means the server will accept it. `kind`
+ *  is the template's, because some rules depend on it. */
+export function schemaProblems(schema: FormSchema, kind = 'other'): string[] {
   const problems: string[] = []
   const fields = Array.isArray(schema?.fields) ? schema.fields : []
   if (fields.length > MAX_FIELDS) problems.push(`A form has at most ${MAX_FIELDS} fields.`)
@@ -109,6 +113,13 @@ export function schemaProblems(schema: FormSchema): string[] {
     } else if (field.options !== undefined && field.options !== null) {
       problems.push(`${at}: only a choice field has options.`)
     }
+    if (field.show_if && field.type === 'signature') {
+      // A signature block present means signing is required; no answer may skip it.
+      problems.push(`${at}: a signature block cannot be conditional.`)
+    }
+    if (field.show_if && field.type === 'acknowledgement' && BINDING_KINDS.has(kind)) {
+      problems.push(`${at}: an acknowledgement on a ${kind} cannot be conditional.`)
+    }
     if (field.show_if) {
       const source = earlier.get(field.show_if.key?.toLowerCase())
       const equals = field.show_if.equals ?? []
@@ -121,6 +132,9 @@ export function schemaProblems(schema: FormSchema): string[] {
         const allowed: readonly string[] =
           source.type === 'yes_no' ? YES_NO : (source.options ?? []).map((o) => o.trim())
         if (equals.length === 0) problems.push(`${at}: choose which answers show it.`)
+        if (new Set(equals).size !== equals.length) {
+          problems.push(`${at}: the same answer is listed twice.`)
+        }
         if (equals.some((v) => !allowed.includes(v))) {
           problems.push(`${at}: “show only if” names an answer that field cannot have.`)
         }

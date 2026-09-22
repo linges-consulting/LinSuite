@@ -7,6 +7,7 @@ import {
   visibleKeys,
   type FormSchema,
 } from '@/lib/forms'
+import type { FormKind } from '@/lib/api'
 
 /**
  * `lib/forms.ts` is the twin of the backend's `forms/schema.py`: the builder's preview and
@@ -19,7 +20,8 @@ const base = cases.base as FormSchema
 describe('schema cases', () => {
   for (const c of cases.schemas) {
     it(c.name, () => {
-      const problems = schemaProblems(c.schema as unknown as FormSchema)
+      const kind = 'kind' in c ? (c.kind as FormKind) : 'other'
+      const problems = schemaProblems(c.schema as unknown as FormSchema, kind)
       if (c.valid) expect(problems).toEqual([])
       else expect(problems).not.toEqual([])
     })

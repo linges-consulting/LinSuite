@@ -75,6 +75,13 @@ class ShowIf(BaseModel):
     key: str
     equals: Annotated[list[str], Field(min_length=1, max_length=MAX_OPTIONS)]
 
+    @field_validator("equals")
+    @classmethod
+    def _distinct(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("the same answer is listed twice")
+        return value
+
     @field_validator("key")
     @classmethod
     def _key(cls, value: str) -> str:
@@ -141,6 +148,10 @@ class FormSchema(BaseModel):
             if field.key in earlier:
                 raise ValueError("two fields share one key")
             if field.show_if is not None:
+                if field.type == "signature":
+                    # Owner ruling Q3: a signature block present means signing is required. A
+                    # conditional one would let a client answer their way out of signing.
+                    raise ValueError("a signature block cannot be conditional")
                 source = earlier.get(field.show_if.key)
                 if source is None:
                     raise ValueError("“show only if” must refer to an earlier field")
@@ -156,6 +167,20 @@ class FormSchema(BaseModel):
         if signatures > 1:
             raise ValueError("a form has at most one signature block")
         return self
+
+
+# Kinds whose statements are the point of the form: an acknowledgement on a consent or a waiver
+# is a clause the client agrees to, and "show only if" would let an answer skip it.
+BINDING_KINDS = frozenset({"consent", "waiver"})
+
+
+def kind_problems(schema: FormSchema, kind: str) -> list[str]:
+    """The rules that depend on the template's kind, which the schema itself does not carry."""
+    if kind in BINDING_KINDS and any(
+        f.type == "acknowledgement" and f.show_if is not None for f in schema.fields
+    ):
+        return [f"an acknowledgement on a {kind} cannot be conditional"]
+    return []
 
 
 # --- answers ---------------------------------------------------------------------------------

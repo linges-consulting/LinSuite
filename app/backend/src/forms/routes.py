@@ -8,7 +8,8 @@ schema, name, kind and the two versioned flags — after `forms.schema.FormSchem
 validated it. `POST …/publish` copies the draft into `form_template_versions` as the next
 number; that row is never rewritten (REVOKE + trigger, 0027). Publishing a draft identical to
 the latest version is 409 `draft_unchanged`: two numbers for one form would make "which
-version did she sign" a question with two right answers.
+version did she sign" a question with two right answers. The name and kind are frozen on the
+version with the fields: a rename is a new version, and `template.name` is only the list label.
 
 **Keys are the builder's**, minted with `crypto.randomUUID()` when a field is added and kept
 through every rewording. The server checks their shape and uniqueness (`FormSchema`) and one
@@ -31,7 +32,7 @@ from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import func, select
 
 from auth.capabilities import Requires
@@ -39,7 +40,7 @@ from auth.models import User
 from core.audit import record_event
 from core.db import SessionDep
 from forms.models import FormTemplate, FormTemplateVersion
-from forms.schema import FormSchema
+from forms.schema import FormSchema, kind_problems
 from scheduling._admin_forms import refuse
 
 router = APIRouter(prefix="/admin/forms", tags=["forms"])
@@ -72,6 +73,9 @@ class TemplateOut(BaseModel):
 
 class VersionSummary(BaseModel):
     number: int
+    # As published. Read these, never the template's, wherever a client or a record is shown.
+    name: str
+    kind: Kind
     published_at: datetime
     requires_resignature: bool
     is_health_form: bool
@@ -109,6 +113,12 @@ class DraftIn(_Named):
     is_health_form: bool = False
     is_mandatory: bool = False
 
+    @model_validator(mode="after")
+    def _kind_rules(self) -> "DraftIn":
+        for problem in kind_problems(self.schema_, self.kind):
+            raise ValueError(problem)
+        return self
+
 
 class PublishIn(BaseModel):
     requires_resignature: bool = False
@@ -119,9 +129,16 @@ def _coded(status: int, code: str, detail: str) -> JSONResponse:
 
 
 def _flags(row: FormTemplate | FormTemplateVersion) -> tuple:
+    """Everything a version freezes. Any difference is something to publish."""
     if isinstance(row, FormTemplate):
-        return (row.draft_schema, row.draft_is_health_form, row.draft_is_mandatory)
-    return (row.schema, row.is_health_form, row.is_mandatory)
+        return (
+            row.name,
+            row.kind,
+            row.draft_schema,
+            row.draft_is_health_form,
+            row.draft_is_mandatory,
+        )
+    return (row.name, row.kind, row.schema, row.is_health_form, row.is_mandatory)
 
 
 def _out(template: FormTemplate, latest: FormTemplateVersion | None) -> TemplateOut:
@@ -150,6 +167,8 @@ def _version_out(version: FormTemplateVersion) -> VersionOut:
         id=str(version.id),
         template_id=str(version.template_id),
         number=version.number,
+        name=version.name,
+        kind=version.kind,
         published_at=version.published_at,
         requires_resignature=version.requires_resignature,
         is_health_form=version.is_health_form,
@@ -312,12 +331,21 @@ async def publish(
     if not template.draft_schema["fields"]:
         return _coded(422, "draft_empty", "Add at least one field before publishing.")
     latest = await _latest(db, template_id)
+    if latest is None and payload.requires_resignature:
+        return _coded(
+            422,
+            "nothing_to_resign",
+            "The first version has no earlier signatures to replace. Publish it without "
+            "requiring re-signature.",
+        )
     if latest is not None and _flags(latest) == _flags(template):
         return _coded(409, "draft_unchanged", f"Nothing has changed since version {latest.number}.")
 
     version = FormTemplateVersion(
         template_id=template.id,
         number=(latest.number if latest else 0) + 1,
+        name=template.name,
+        kind=template.kind,
         schema=template.draft_schema,
         is_health_form=template.draft_is_health_form,
         is_mandatory=template.draft_is_mandatory,
