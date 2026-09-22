@@ -58,7 +58,8 @@ import {
 } from '@/lib/api'
 import { useSession } from '@/lib/auth'
 import { formatPhone } from '@/lib/phone'
-import { APPOINTMENTS, CUSTOMERS } from '@/lib/query-keys'
+import { invalidateScheduling } from '@/lib/query-client'
+import { CUSTOMER_PROFILE as PROFILE, CUSTOMERS } from '@/lib/query-keys'
 
 const PAGE_SIZE = 50
 
@@ -199,8 +200,6 @@ export function ClientsPage() {
     </div>
   )
 }
-
-const PROFILE = ['customer-profile'] as const
 
 /**
  * One client: who they are, how to reach them, and every visit past and upcoming with the
@@ -499,7 +498,7 @@ function ErasureDialog({
       queryClient.invalidateQueries({ queryKey: [...PROFILE, customer.id] })
       queryClient.invalidateQueries({ queryKey: CUSTOMERS })
       // Calendar cards carry the client's name and contacts; after an erasure they are stale.
-      queryClient.invalidateQueries({ queryKey: APPOINTMENTS })
+      invalidateScheduling(queryClient)
       toast.success('Erasure recorded')
       onClose()
     },
@@ -626,8 +625,8 @@ function ErasureBanner({ erasure }: { erasure: Erasure }) {
           // Not held, not finished: a hold that has since ended, or a purge still queued. The
           // nightly job finishes either, so nothing is promised gone before it has run.
           <p>
-            No longer held. Anything personal still on this record is removed by tonight at the
-            latest; visit history stays against an anonymous record.
+            Not under a retention hold. Anything personal still on this record is removed by
+            tonight at the latest; visit history stays against an anonymous record.
           </p>
         ) : (
           <p>
@@ -1017,7 +1016,7 @@ function ClientEditDialog({ customer, onClose }: { customer: CustomerDetail; onC
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [...PROFILE, customer.id] })
       queryClient.invalidateQueries({ queryKey: CUSTOMERS })
-      queryClient.invalidateQueries({ queryKey: APPOINTMENTS })
+      invalidateScheduling(queryClient)
       toast.success('Client details saved')
       onClose()
     },

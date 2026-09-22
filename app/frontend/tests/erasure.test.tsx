@@ -1,6 +1,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient } from '@tanstack/react-query'
+import { invalidateScheduling } from '@/lib/query-client'
 import { afterEach, expect, test, vi } from 'vitest'
 import { renderApp, stubApi, type Call } from './harness'
 
@@ -250,7 +251,8 @@ test('an erasure refreshes the calendar too, whose cards carry the client name a
   await user.click(within(dialog).getByRole('button', { name: 'Erase client' }))
 
   await waitFor(() => expect(erasureCalls(calls)).toHaveLength(1))
-  await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['appointments'] }))
+  // The calendar's one read is `['schedule', …]`; `['appointments']` backs no query.
+  await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['schedule'] }))
 })
 
 test('an erased, held client offers only a date-of-birth correction, and sends only that', async () => {
@@ -284,7 +286,7 @@ test('an erased, held client offers only a date-of-birth correction, and sends o
   )
 })
 
-test('once the hold has ended but the purge has not run, the banner says what is still to go', async () => {
+test('not held and the purge not yet run, the banner says what is still to go', async () => {
   fake({
     customer: {
       ...DETAIL,
@@ -297,6 +299,8 @@ test('once the hold has ended but the purge has not run, the banner says what is
 
   const banner = await screen.findByRole('status', { name: 'Erasure requested' })
   expect(banner).not.toHaveTextContent(/Nothing personal is retained/)
+  expect(banner).toHaveTextContent(/Not under a retention hold/)
+  expect(banner).not.toHaveTextContent(/No longer held/) // wrong for a client never held
   expect(banner).toHaveTextContent(/still on this record is removed by tonight/)
 })
 
@@ -337,4 +341,14 @@ test("a 409 upcoming_appointments from the server shows the same message with th
 
   expect(await within(dialog).findByText(UPCOMING_BLOCK)).toBeInTheDocument()
   expect(within(dialog).queryByRole('button', { name: 'Erase client' })).not.toBeInTheDocument()
+})
+
+test('any appointment change marks every cached client profile stale, so a blocked erasure clears', async () => {
+  // The dialog counts upcoming visits from the profile; a cancel on the calendar must reach it.
+  const client = new QueryClient()
+  client.setQueryData(['customer-profile', 'c1'], { appointments: [] })
+
+  invalidateScheduling(client)
+
+  expect(client.getQueryState(['customer-profile', 'c1'])?.isInvalidated).toBe(true)
 })

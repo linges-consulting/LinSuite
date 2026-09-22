@@ -46,3 +46,7 @@ export const CUSTOMERS = ['customers'] as const
 /** The grid's one read (`/api/schedule`); takes the range and the staff filter after it.
  *  Booking, moving and resizing invalidate the prefix. */
 export const SCHEDULE = ['schedule'] as const
+/** One client's profile, with their visit list; takes the client id after it. Scheduling
+ *  changes invalidate the prefix, because the profile's visits (and the erasure dialog's
+ *  upcoming-visit count) are read from it. */
+export const CUSTOMER_PROFILE = ['customer-profile'] as const

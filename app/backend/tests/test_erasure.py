@@ -22,6 +22,7 @@ from core.config import get_settings
 from core.db import get_purge_engine, session_scope
 from customers import erasure, retention, tasks
 from customers.models import Customer
+from scheduling.models import Appointment
 from tests.test_access_log import access_rows, add_role, clean_access_log  # noqa: F401
 from tests.test_appointments import (  # noqa: F401 — the autouse fixture comes along
     APPOINTMENTS,
@@ -797,26 +798,50 @@ async def test_a_group_booking_counts_each_upcoming_link(client):
     await assert_refused_for_upcoming(await erase(client, customer_id), 2, customer_id)
 
 
-async def test_a_booking_committed_just_before_the_erasure_takes_its_lock_blocks_it(
-    client, monkeypatch
-):
+async def test_a_booking_in_flight_when_the_erasure_arrives_is_counted(client, monkeypatch):
+    """The booking holds the customer `FOR KEY SHARE` with its row inserted and uncommitted.
+    The erasure's `FOR UPDATE` waits for it, and only then counts, so it sees the booking.
+    Counting before the lock would read zero and erase a client with a live booking."""
     await as_admin(client)
     customer_id, service, me = await ready_customer(client)
     await fill_profile(client, customer_id, years_ago(30))
     reached, release = asyncio.Event(), asyncio.Event()
-    original = retention._rules
+    original = AsyncSession.commit
 
-    async def slowed(db, **kwargs):
-        reached.set()
-        await release.wait()
-        return await original(db, **kwargs)
+    async def commit(self):
+        holds_booking = any(isinstance(o, Appointment) for o in self.identity_map.values())
+        if holds_booking and not reached.is_set():
+            reached.set()
+            await release.wait()
+        await original(self)
 
-    monkeypatch.setattr(retention, "_rules", slowed)
-    erasing = asyncio.create_task(erase(client, customer_id))
+    monkeypatch.setattr(AsyncSession, "commit", commit)
+    booking = asyncio.create_task(book(client, service, me, at("15:00"), customer_id=customer_id))
     await asyncio.wait_for(reached.wait(), 10)
-    monkeypatch.setattr(retention, "_rules", original)
-    made = await book(client, service, me, at("15:00"), customer_id=customer_id)
-    assert made.status_code == 201, made.text
+    erasing = asyncio.create_task(erase(client, customer_id))
+    await _wait_for_a_lock_wait(erasing)
     release.set()
 
+    assert (await booking).status_code == 201
     await assert_refused_for_upcoming(await erasing, 1, customer_id)
+
+
+async def test_an_erased_clients_past_booking_cannot_be_moved_into_the_future(client):
+    """A past `confirmed` visit survives erasure (it cannot happen). Dragging it forward would
+    give the erased client a live booking, which erasure refuses to leave behind."""
+    await as_admin(client)
+    customer_id, service, me = await ready_customer(client)
+    made = await book(client, service, me, at("15:00"), customer_id=customer_id)
+    assert made.status_code == 201, made.text
+    appointment_id = made.json()["id"]
+    await as_owner(
+        "UPDATE appointments SET starts_at = starts_at - interval '28 days', "
+        "ends_at = ends_at - interval '28 days' WHERE id = :id",
+        id=appointment_id,
+    )
+    assert (await erase(client, customer_id)).status_code == 201
+
+    moved = await client.patch(f"{APPOINTMENTS}/{appointment_id}", json={"starts_at": at("16:00")})
+
+    assert moved.status_code == 422, moved.text
+    assert moved.json()["code"] == "customer_suppressed"

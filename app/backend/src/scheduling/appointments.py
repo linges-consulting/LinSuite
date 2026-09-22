@@ -594,8 +594,16 @@ def customer_suppressed() -> JSONResponse:
     (on insert) the staff row `FOR UPDATE` in the concurrency trigger, then takes the FK's own
     `KEY SHARE` on the customer again. It never locks the business row, and `_lock_group`
     belongs to cancel/move, never to booking. The two share one lockable row, the customer's.
-    One shared lock cannot form a cycle. KEY SHARE conflicts with nothing a profile PATCH
-    takes (`FOR NO KEY UPDATE`), so front-desk edits never queue behind a booking."""
+    One shared lock cannot form a cycle.
+
+    A profile PATCH takes the customer `FOR UPDATE` too (business `FOR SHARE` first), so it
+    can queue behind a booking and a booking behind it. Neither deadlocks: the PATCH locks
+    nothing after the customer, and a booking locks nothing before it.
+
+    A move into the future checks suppression the same way. It locks its appointment (or its
+    group's rows) first, then the customer `FOR KEY SHARE`, then the staff row by trigger.
+    No holder of a conflicting customer lock waits on appointment rows: erasure, the PATCH
+    and `record_clinical_entry` read appointments unlocked, if at all. So no cycle."""
     return JSONResponse(
         status_code=422,
         content={
@@ -923,6 +931,16 @@ async def change_appointment(
         await authorize_override(db, actor, claims, appointment.staff_id)
     old_start, old_duration = appointment.starts_at, appointment.duration_minutes
     starts_at = payload.starts_at or old_start
+    if starts_at > datetime.now(UTC):
+        # An erased client keeps their past visits, never a future one (ADR-0001 rule 3).
+        customer = await db.get(
+            Customer,
+            appointment.customer_id,
+            with_for_update={"key_share": True},
+            populate_existing=True,
+        )
+        if customer.suppressed_at is not None:
+            return customer_suppressed()
     duration = payload.duration_minutes or old_duration
 
     # The catalog's view of the service for its requirements and eligibility; the
