@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, test, vi } from 'vitest'
 import { renderApp, stubApi, type Call } from './harness'
@@ -21,6 +21,7 @@ const PRIYA = {
   email: 'priya@example.com',
   phone: '4165550199',
   created_at: '2026-01-05T15:00:00Z',
+  classification: 'vip' as const,
 }
 const SAM = {
   id: 'c2',
@@ -29,10 +30,24 @@ const SAM = {
   email: null,
   phone: null,
   created_at: '2026-02-01T15:00:00Z',
+  classification: 'new' as const,
+}
+
+const PRIYA_DETAIL = {
+  ...PRIYA,
+  date_of_birth: null,
+  emergency_contact_name: null,
+  emergency_contact_phone: null,
+  emergency_contact_relationship: null,
+  secondary_contact_name: null,
+  secondary_contact_phone: null,
+  secondary_contact_email: null,
+  notes: null,
+  updated_at: '2026-01-05T15:00:00Z',
 }
 
 const PROFILE = {
-  customer: PRIYA,
+  customer: PRIYA_DETAIL,
   timezone: 'America/Toronto',
   appointments: [
     {
@@ -56,12 +71,36 @@ const PROFILE = {
   ],
 }
 
-function fake() {
+/** An account holding `customers.manage`, so the edit dialog is reachable. Mirrors the shape
+ *  `/api/auth/me` actually sends — the app shell reads `mode` and `mfa` too. */
+const ME_WITH_MANAGE = {
+  id: 'u1',
+  email: 'owner@cedar.example',
+  role: 'Front desk',
+  capabilities: ['customers.view', 'customers.manage', 'schedule.view'],
+  mode: 'staff',
+  can_switch_modes: false,
+  admin_grant_expires_at: null,
+  admin_hard_limit_at: null,
+  must_change_password: false,
+  mfa: {
+    enrolled: false,
+    method: null,
+    pending: false,
+    enrolment_required: false,
+    verified_at: null,
+    email_otp_allowed: false,
+  },
+}
+
+function fake({ canEdit = false }: { canEdit?: boolean } = {}) {
+  let profile = { ...PROFILE }
   return stubApi({
     signedIn: true,
     dualRole: false,
-    respond: (url: string) => {
+    respond: (url: string, body: unknown) => {
       const parsed = new URL(url, 'http://test')
+      if (canEdit && url === '/api/auth/me') return Response.json(ME_WITH_MANAGE)
       if (parsed.pathname === '/api/customers') {
         const q = (parsed.searchParams.get('q') ?? '').toLowerCase()
         const digits = q.replace(/\D/g, '')
@@ -72,7 +111,21 @@ function fake() {
         )
         return Response.json({ customers, total: customers.length })
       }
-      if (parsed.pathname === '/api/customers/c1') return Response.json(PROFILE)
+      if (parsed.pathname === '/api/customers/c1') {
+        // A PATCH carries a body; a GET (the profile open) does not — the fake tells the
+        // two apart the same way it tells every other pair of verbs on one path apart.
+        if (body !== undefined) {
+          if ((body as { email?: string }).email === 'taken@example.com') {
+            return Response.json(
+              { detail: 'A customer with that email already exists.' },
+              { status: 409 },
+            )
+          }
+          profile = { ...profile, customer: { ...profile.customer, ...(body as object) } }
+          return Response.json(profile.customer)
+        }
+        return Response.json(profile)
+      }
       return undefined
     },
   })
@@ -91,6 +144,9 @@ test('the list renders the server page with the phone formatted for a person', a
   expect(within(table).getByText('priya@example.com')).toBeInTheDocument()
   expect(within(table).getByText('Sam Okonkwo')).toBeInTheDocument()
   expect(screen.getByText('2 clients')).toBeInTheDocument()
+  // Classification on every row — VIP for Priya, New for Sam, never derived client-side.
+  expect(within(table).getByText('VIP')).toBeInTheDocument()
+  expect(within(table).getByText('New')).toBeInTheDocument()
 })
 
 test('typing in the search box narrows the list through q', async () => {
@@ -169,4 +225,67 @@ test('a profile with no visits says so', async () => {
 
   expect(await screen.findByRole('heading', { name: 'Priya Nair' })).toBeInTheDocument()
   expect(screen.getByText('No appointments yet')).toBeInTheDocument()
+})
+
+/**
+ * The "Edit details" dialog. What is worth pinning: only the fields somebody actually
+ * touched are on the wire (never the whole draft, and never a value nobody changed), and a
+ * refusal from the server lands under the field it is about rather than as a bare toast.
+ */
+
+test('a customers.view-only session sees no edit control', async () => {
+  fake({ canEdit: false })
+  renderApp('/clients/c1')
+  await screen.findByRole('heading', { name: 'Priya Nair' })
+
+  expect(screen.queryByRole('button', { name: 'Edit details' })).not.toBeInTheDocument()
+})
+
+test('the edit dialog submits only the field that changed', async () => {
+  const { calls } = fake({ canEdit: true })
+  const user = userEvent.setup()
+  renderApp('/clients/c1')
+  await user.click(await screen.findByRole('button', { name: 'Edit details' }))
+
+  await user.type(screen.getByLabelText('Notes'), 'Prefers the corner chair.')
+  await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  const patches = calls.filter((c) => c.url === '/api/customers/c1' && c.method === 'PATCH')
+  expect(patches).toHaveLength(1)
+  expect(patches[0].body).toEqual({ notes: 'Prefers the corner chair.' })
+})
+
+test('a duplicate email refusal lands under the email field', async () => {
+  fake({ canEdit: true })
+  const user = userEvent.setup()
+  renderApp('/clients/c1')
+  await user.click(await screen.findByRole('button', { name: 'Edit details' }))
+
+  // `getByLabelText('Email')` would be ambiguous — the secondary contact has one too.
+  // `fireEvent.change` rather than `user.type`: the field starts with Priya's own address,
+  // and typing would append onto it instead of replacing it.
+  fireEvent.change(document.getElementById('client-email')!, {
+    target: { value: 'taken@example.com' },
+  })
+  await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+  const emailField = (await screen.findByText('A customer with that email already exists.'))
+    .closest('div')!
+  expect(within(emailField).getByText('Email')).toBeInTheDocument()
+  expect(screen.getByRole('dialog')).toBeInTheDocument()
+})
+
+test('a date of birth in the future is refused before the round trip', async () => {
+  fake({ canEdit: true })
+  const user = userEvent.setup()
+  renderApp('/clients/c1')
+  await user.click(await screen.findByRole('button', { name: 'Edit details' }))
+
+  const tomorrow = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10)
+  const dob = screen.getByLabelText('Date of birth')
+  fireEvent.change(dob, { target: { value: tomorrow } })
+  fireEvent.blur(dob)
+
+  expect(screen.getByText('Date of birth cannot be in the future.')).toBeInTheDocument()
 })

@@ -6,6 +6,7 @@ import { CancelConfirm } from '@/components/calendar/cancel-confirm'
 import { Grid } from '@/components/calendar/grid'
 import { OverrideConfirm } from '@/components/calendar/override-confirm'
 import type { Change, Column, Prefill } from '@/components/calendar/types'
+import { ClassificationBadge } from '@/components/classification-badge'
 import { EmptyState } from '@/components/empty-state'
 import { Field, Form, FormError } from '@/components/form'
 import { Button } from '@/components/ui/button'
@@ -930,13 +931,14 @@ function BookingDialog(props: {
             {existing ? (
               customer ? (
                 <div className="flex items-center justify-between gap-2 rounded-lg border px-3 py-2 text-sm">
-                  <span className="flex flex-wrap items-baseline gap-x-2">
+                  <span className="flex flex-wrap items-center gap-x-2">
                     <span className="font-medium">
                       {customer.first_name} {customer.last_name}
                     </span>
                     {customer.phone && (
                       <span className="tabular-nums text-muted-foreground">{formatPhone(customer.phone)}</span>
                     )}
+                    <ClassificationBadge classification={customer.classification} />
                   </span>
                   <Button type="button" variant="ghost" size="sm" onClick={() => setCustomer(null)}>
                     Change
@@ -962,8 +964,11 @@ function BookingDialog(props: {
                             className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm hover:bg-accent"
                             onClick={() => setCustomer(c)}
                           >
-                            <span className="font-medium">
-                              {c.first_name} {c.last_name}
+                            <span className="flex items-center gap-2">
+                              <span className="font-medium">
+                                {c.first_name} {c.last_name}
+                              </span>
+                              <ClassificationBadge classification={c.classification} />
                             </span>
                             <span className="tabular-nums text-muted-foreground">
                               {c.phone ? formatPhone(c.phone) : (c.email ?? '')}

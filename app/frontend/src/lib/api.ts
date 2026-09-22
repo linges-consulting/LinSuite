@@ -1,3 +1,15 @@
+/** FastAPI's 422 says which field it is unhappy about in `loc`; put the message under it.
+ *  Shared by every edit form that shows a server error inline rather than as a toast. */
+export function fieldErrors(error: unknown): Record<string, string> {
+  const detail = (error as { body?: { detail?: unknown } })?.body?.detail
+  if (!Array.isArray(detail)) return {}
+  return Object.fromEntries(
+    detail
+      .filter((entry) => Array.isArray(entry.loc) && entry.loc[0] === 'body')
+      .map((entry) => [String(entry.loc[1]), entry.msg as string]),
+  )
+}
+
 export type Health = { status: 'ok' | 'degraded'; database: 'ok' | 'unreachable' }
 
 export type SetupStatus = { required: boolean }
@@ -216,6 +228,8 @@ export type BusinessProfile = {
   slot_granularity_minutes: number
   /** How far ahead availability is computed at all: 1–365. */
   booking_horizon_days: number
+  /** A client becomes "vip" at this many `completed` appointments: 2–1000. */
+  vip_visit_threshold: number
 }
 
 export type Business = BusinessProfile & {
@@ -1046,12 +1060,18 @@ export async function fetchCatalog(): Promise<CatalogService[]> {
   return (await res.json()).services
 }
 
+/** Derived at read time from completed-appointment counts (never stored, never PHI) — see
+ *  `vip_visit_threshold` on the business profile. Carried on every row the server sends,
+ *  including the booking dialog's search results. */
+export type Classification = 'new' | 'repeat' | 'vip'
+
 export type Customer = {
   id: string
   first_name: string
   last_name: string
   email: string | null
   phone: string | null
+  classification: Classification
 }
 
 export type CustomerDraft = {
@@ -1104,8 +1124,23 @@ export type Visit = {
   staff: { id: string; display_name: string; colour: string }
 }
 
+/** The profile's own fields, beyond what the list and the search carry — DOB, both
+ *  contacts, front-desk notes. PHI: only the profile `GET` and the `PATCH` that edited it
+ *  ever send these; the list and the booking dialog's search never do. */
+export type CustomerDetail = CustomerRecord & {
+  date_of_birth: string | null
+  emergency_contact_name: string | null
+  emergency_contact_phone: string | null
+  emergency_contact_relationship: string | null
+  secondary_contact_name: string | null
+  secondary_contact_phone: string | null
+  secondary_contact_email: string | null
+  notes: string | null
+  updated_at: string
+}
+
 export type CustomerProfile = {
-  customer: CustomerRecord
+  customer: CustomerDetail
   timezone: string
   /** Newest first, upcoming included, cancelled and no-shows too. */
   appointments: Visit[]
@@ -1116,6 +1151,33 @@ export type CustomerProfile = {
 export async function fetchCustomerProfile(id: string): Promise<CustomerProfile> {
   const res = await fetch(`/api/customers/${encodeURIComponent(id)}`)
   if (!res.ok) throw await failure(res, 'Could not load this client')
+  return res.json()
+}
+
+/** Every field the edit dialog can send. A key left out of the object is left alone on the
+ *  server — never sent as `null` by accident — which is what lets the dialog submit only
+ *  what actually changed. */
+export type CustomerPatch = Partial<{
+  first_name: string
+  last_name: string
+  email: string | null
+  phone: string | null
+  date_of_birth: string | null
+  emergency_contact_name: string | null
+  emergency_contact_phone: string | null
+  emergency_contact_relationship: string | null
+  secondary_contact_name: string | null
+  secondary_contact_phone: string | null
+  secondary_contact_email: string | null
+  notes: string | null
+}>
+
+/** Not a PHI access in its own right (server side: audited in `audit_events` by field name,
+ *  not `LogAccess`) — it returns the fields that changed, not a profile-plus-history open.
+ *  Invalidate the profile query afterwards; that refetch is the one that logs. */
+export async function updateCustomer(id: string, patch: CustomerPatch): Promise<CustomerDetail> {
+  const res = await send('PATCH', `/api/customers/${encodeURIComponent(id)}`, patch)
+  if (!res.ok) throw await failure(res, 'Could not save this client')
   return res.json()
 }
 

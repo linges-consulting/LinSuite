@@ -73,7 +73,14 @@ const SLOTS = [
   { starts_at: TEN_FIFTEEN, ends_at: '2026-06-15T15:15:00Z', staff_ids: ['s2'] },
 ]
 
-const PRIYA = { id: 'c1', first_name: 'Priya', last_name: 'Nair', email: null, phone: '4165550199' }
+const PRIYA = {
+  id: 'c1',
+  first_name: 'Priya',
+  last_name: 'Nair',
+  email: null,
+  phone: '4165550199',
+  classification: 'new' as const,
+}
 
 const BOOKED = {
   id: 'a1',

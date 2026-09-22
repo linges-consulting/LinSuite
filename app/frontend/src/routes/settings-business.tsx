@@ -27,6 +27,7 @@ import { Textarea } from '@/components/ui/textarea'
 import {
   fetchAdminBusiness,
   fetchProvinces,
+  fieldErrors,
   updateBusiness,
   updateTimezone,
   type BusinessProfile,
@@ -185,6 +186,22 @@ export function BusinessPanel() {
               max={365}
               value={shown(form.booking_horizon_days)}
               onChange={(e) => set({ booking_horizon_days: e.target.valueAsNumber })}
+            />
+          </Field>
+          <Field
+            label="VIP threshold (visits)"
+            htmlFor="vip_visit_threshold"
+            error={errors.vip_visit_threshold}
+            hint="A client is shown as VIP once they reach this many completed appointments."
+          >
+            <Input
+              id="vip_visit_threshold"
+              type="number"
+              required
+              min={2}
+              max={1000}
+              value={shown(form.vip_visit_threshold)}
+              onChange={(e) => set({ vip_visit_threshold: e.target.valueAsNumber })}
             />
           </Field>
         </div>
@@ -385,7 +402,11 @@ function shown(value: number): number | '' {
 }
 
 function incomplete(form: BusinessProfile): boolean {
-  return Number.isNaN(form.slot_granularity_minutes) || Number.isNaN(form.booking_horizon_days)
+  return (
+    Number.isNaN(form.slot_granularity_minutes) ||
+    Number.isNaN(form.booking_horizon_days) ||
+    Number.isNaN(form.vip_visit_threshold)
+  )
 }
 
 /** Only the profile fields go to the server; `country`, `timezone` and the rest are read-only. */
@@ -405,6 +426,7 @@ function strip(form: BusinessProfile): BusinessProfile {
     receipt_footer,
     slot_granularity_minutes,
     booking_horizon_days,
+    vip_visit_threshold,
   } = form
   return {
     name,
@@ -421,16 +443,7 @@ function strip(form: BusinessProfile): BusinessProfile {
     receipt_footer,
     slot_granularity_minutes,
     booking_horizon_days,
+    vip_visit_threshold,
   }
 }
 
-/** FastAPI's 422 says which field it is unhappy about in `loc`; put the message under it. */
-function fieldErrors(error: unknown): Record<string, string> {
-  const detail = (error as { body?: { detail?: unknown } })?.body?.detail
-  if (!Array.isArray(detail)) return {}
-  return Object.fromEntries(
-    detail
-      .filter((entry) => Array.isArray(entry.loc) && entry.loc[0] === 'body')
-      .map((entry) => [String(entry.loc[1]), entry.msg as string]),
-  )
-}

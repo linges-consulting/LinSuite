@@ -68,6 +68,7 @@ const EMPTY_PROFILE = {
   receipt_footer: null,
   slot_granularity_minutes: 15,
   booking_horizon_days: 90,
+  vip_visit_threshold: 10,
 }
 
 /**
