@@ -53,3 +53,6 @@ export const CUSTOMER_PROFILE = ['customer-profile'] as const
 /** Settings → Forms: the template list, and one template's version history (id after it). */
 export const FORM_TEMPLATES = ['form-templates'] as const
 export const FORM_VERSIONS = ['form-versions'] as const
+/** The "Send form" dialog's choices (`forms.issue`), and one client's open links (id after). */
+export const SENDABLE_FORMS = ['sendable-forms'] as const
+export const FORM_LINKS = ['form-links'] as const

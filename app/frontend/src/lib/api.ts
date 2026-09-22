@@ -1089,6 +1089,77 @@ export async function deleteFormTemplate(id: string): Promise<void> {
   if (!res.ok) throw await failure(res, 'Could not delete the form')
 }
 
+// --- forms: sending a link to a client, and the page the client opens -----------------------
+
+/** A form the front desk may send: published, not retired, at its latest version. */
+export type SendableForm = { template_id: string; name: string; kind: FormKind; version: number }
+
+/** The one answer that carries the link's URL. Never stored or refetched: gone on close. */
+export type IssuedFormLink = {
+  id: string
+  url: string
+  expires_at: string
+  /** The address the link was queued to, or null when the client has none on file. */
+  emailed_to: string | null
+}
+
+export type OpenFormLink = {
+  id: string
+  template_name: string
+  version: number
+  issued_at: string
+  expires_at: string
+}
+
+/** `forms.issue`, Staff Mode. */
+export async function fetchSendableForms(): Promise<SendableForm[]> {
+  const res = await fetch('/api/forms/templates')
+  if (!res.ok) throw await failure(res, 'Could not load the forms')
+  return (await res.json()).templates
+}
+
+export async function issueFormLink(customerId: string, templateId: string): Promise<IssuedFormLink> {
+  const res = await post(`/api/customers/${customerId}/form-links`, { template_id: templateId })
+  if (!res.ok) throw await failure(res, 'Could not send the form')
+  return res.json()
+}
+
+export async function fetchOpenFormLinks(customerId: string): Promise<OpenFormLink[]> {
+  const res = await fetch(`/api/customers/${customerId}/form-links`)
+  if (!res.ok) throw await failure(res, 'Could not load the sent forms')
+  return (await res.json()).links
+}
+
+export async function revokeFormLink(customerId: string, linkId: string): Promise<void> {
+  const res = await post(`/api/customers/${customerId}/form-links/${linkId}/revoke`, {})
+  if (!res.ok) throw await failure(res, 'Could not revoke the link')
+}
+
+/** What `/f/:token` renders: the pinned version, the business, and a first name. */
+export type PublicForm = {
+  version_id: string
+  template_name: string
+  schema: FormSchema
+  business: { name: string; logo_url: string | null }
+  client_first_name: string
+  expires_at: string
+}
+
+/**
+ * The public lookup. `credentials: 'omit'`: a staff browser opening a client's link must not
+ * send its session along — the page is the client's, not the signed-in user's. The token
+ * rides in the path, so no referrer and no cache either (the server says the same).
+ */
+export async function fetchPublicForm(token: string): Promise<PublicForm> {
+  const res = await fetch(`/api/public/forms/${encodeURIComponent(token)}`, {
+    credentials: 'omit',
+    referrerPolicy: 'no-referrer',
+    cache: 'no-store',
+  })
+  if (!res.ok) throw await failure(res, 'Could not open the form')
+  return res.json()
+}
+
 // --- availability: the bookable slots -------------------------------------------------------
 
 /** One start that can be booked. Instants in UTC (`...Z`); `staff_ids` is everyone eligible

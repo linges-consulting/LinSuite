@@ -12,6 +12,7 @@ import { LoginPage } from '@/routes/login'
 import { MfaEnrolPage } from '@/routes/mfa-enrol'
 import { MfaVerifyPage } from '@/routes/mfa-verify'
 import { PlaceholderPage } from '@/routes/placeholder'
+import { PublicFormPage } from '@/routes/public-form'
 import { ResetPasswordPage } from '@/routes/reset-password'
 import { SchedulePage } from '@/routes/schedule'
 import { SecurityPage } from '@/routes/security'
@@ -40,7 +41,14 @@ export default function App() {
   // Outside the gates: the login screen and the browser tab are this business's too, and
   // the branding document is anonymous precisely so they can be.
   useApplyBranding()
-  return <AppRoutes />
+  return (
+    <Routes>
+      {/* A client's form link, outside every gate below and before the setup and session
+          reads: the page is the client's, whoever is signed in on this browser (#46). */}
+      <Route path="/f/:token" element={<PublicFormPage />} />
+      <Route path="*" element={<AppRoutes />} />
+    </Routes>
+  )
 }
 
 function AppRoutes() {

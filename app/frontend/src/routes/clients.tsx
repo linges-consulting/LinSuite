@@ -17,6 +17,7 @@ import { useDeferredValue, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
 import { ClassificationBadge } from '@/components/classification-badge'
+import { ClientFormsCard } from '@/components/client-forms'
 import { EmptyState } from '@/components/empty-state'
 import { Field as FormField, Form, FormError } from '@/components/form'
 import { Badge } from '@/components/ui/badge'
@@ -213,6 +214,7 @@ export function ClientPage() {
   const { user } = useSession()
   const canEdit = user?.capabilities.includes('customers.manage') ?? false
   const canAudit = user?.capabilities.includes('audit.view') ?? false
+  const canSendForms = user?.capabilities.includes('forms.issue') ?? false
   // An Admin Mode capability: offered only while the window is open, never as a refusal.
   const canErase =
     (user?.capabilities.includes('customers.erase') ?? false) && user?.mode === 'admin'
@@ -417,6 +419,14 @@ export function ClientPage() {
               </p>
             </CardContent>
           </Card>
+
+          {canSendForms && (
+            <ClientFormsCard
+              customerId={id}
+              timezone={profile.data.timezone}
+              suppressed={profile.data.customer.suppressed}
+            />
+          )}
 
           {editing && (
             <ClientEditDialog customer={profile.data.customer} onClose={() => setEditing(false)} />
