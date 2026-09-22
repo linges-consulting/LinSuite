@@ -21,9 +21,9 @@ A partitioned table's children are checked too — a REVOKE on the parent does n
 partition created afterwards, so whatever creates one must revoke on it as well.
 
 **The triggers.** `tg_appointments_staff_concurrency` is policy that no constraint can
-express, and `audit_access_log_no_rewrite` is the second half of append-only (a grant is
-undone by one careless `GRANT ALL`, a trigger by one `DISABLE TRIGGER`); nothing but this
-says either is still attached and still enabled.
+express, and `audit_access_log_no_rewrite` and `audit_events_no_rewrite` are the second half
+of append-only (a grant is undone by one careless `GRANT ALL`, a trigger by one `DISABLE
+TRIGGER`); nothing but this says each is still attached and still enabled.
 """
 
 from pathlib import Path
