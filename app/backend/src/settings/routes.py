@@ -137,6 +137,10 @@ class BusinessProfile(BaseModel):
         int, Field(ge=5, le=60), AfterValidator(_five_minute_step)
     ] = 15
     booking_horizon_days: Annotated[int, Field(ge=1, le=365)] = 90
+    # Classification (pre-flight D8): a client becomes "vip" at this many `completed`
+    # appointments. The CHECK on `businesses` (migration 0020) refuses the same range at the
+    # database; this is the 422 a person sees first.
+    vip_visit_threshold: Annotated[int, Field(ge=2, le=1000)] = 10
 
 
 class BusinessOut(BaseModel):
@@ -163,6 +167,7 @@ class BusinessOut(BaseModel):
     receipt_footer: str | None
     slot_granularity_minutes: int
     booking_horizon_days: int
+    vip_visit_threshold: int
     # Read-only here on purpose: the country is fixed, the timezone has its own endpoint, and
     # `setup_completed_at` is written once by the wizard and never again.
     country: str

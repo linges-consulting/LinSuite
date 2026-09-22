@@ -17,9 +17,9 @@ can actually type.
 """
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import DateTime, Index, String, func, text
+from sqlalchemy import CheckConstraint, Date, DateTime, Index, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
@@ -34,6 +34,13 @@ class Customer(Base):
             unique=True,
             postgresql_where=text("email IS NOT NULL"),
         ),
+        # A data-entry typo (year 1250, or next week) is caught with a better message by
+        # `CustomerPatch`'s own validator; the database only needs the cheap half of the
+        # invariant — nobody's birthday is in the future.
+        CheckConstraint(
+            "date_of_birth IS NULL OR date_of_birth <= CURRENT_DATE",
+            name="ck_customers_dob_not_future",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -43,4 +50,17 @@ class Customer(Base):
     last_name: Mapped[str] = mapped_column(String(100))
     email: Mapped[str | None] = mapped_column(String(254))
     phone: Mapped[str | None] = mapped_column(String(32))
+    # --- Task 3 (#38): the rest of PRD §2's profile ----------------------------------------
+    date_of_birth: Mapped[date | None] = mapped_column(Date)
+    # One of each, columns rather than a table — purge (Task 4/#39) is a `SET NULL` on these.
+    emergency_contact_name: Mapped[str | None] = mapped_column(String(100))
+    emergency_contact_phone: Mapped[str | None] = mapped_column(String(32))
+    emergency_contact_relationship: Mapped[str | None] = mapped_column(String(100))
+    secondary_contact_name: Mapped[str | None] = mapped_column(String(100))
+    secondary_contact_phone: Mapped[str | None] = mapped_column(String(32))
+    secondary_contact_email: Mapped[str | None] = mapped_column(String(254))
+    # Front-desk notes — non-clinical. A session note is a different, lockable document
+    # (Phase 9); this is "prefers the corner chair", not a chart entry.
+    notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

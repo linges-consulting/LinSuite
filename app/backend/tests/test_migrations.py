@@ -43,18 +43,25 @@ async def _present() -> tuple[bool, bool, int]:
     return bool(table), bool(function), int(partitions)
 
 
-async def _run(step: str) -> None:
+async def _downgrade_to(revision: str) -> None:
     # `alembic/env.py` calls `asyncio.run`, which refuses a thread that already has a running
     # loop — so the migration runs on a worker thread, not this test's.
-    runner = command.downgrade if step == "-1" else command.upgrade
-    await asyncio.to_thread(runner, _alembic(), step)
+    await asyncio.to_thread(command.downgrade, _alembic(), revision)
 
 
-async def test_the_newest_migration_round_trips(database):
+async def _upgrade_to(revision: str) -> None:
+    await asyncio.to_thread(command.upgrade, _alembic(), revision)
+
+
+async def test_migration_0019_round_trips(database):
+    """0019's own round trip — pinned to explicit revisions rather than `-1`/`head`, which
+    are relative to whatever the newest migration happens to be. A later ticket (0020, and
+    whatever comes after it) adds migrations on top without turning this test into an
+    assertion about somebody else's schema."""
     assert await _present() == (True, True, 2)
 
-    await _run("-1")
+    await _downgrade_to("0018")
     assert await _present() == (False, False, 0)
 
-    await _run("head")
+    await _upgrade_to("head")
     assert await _present() == (True, True, 2)

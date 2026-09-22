@@ -64,6 +64,9 @@ class Business(Base):
         CheckConstraint(
             "booking_horizon_days BETWEEN 1 AND 365", name="ck_businesses_booking_horizon"
         ),
+        CheckConstraint(
+            "vip_visit_threshold BETWEEN 2 AND 1000", name="ck_businesses_vip_visit_threshold"
+        ),
     )
 
     id: Mapped[int] = mapped_column(
@@ -120,6 +123,10 @@ class Business(Base):
     slot_granularity_minutes: Mapped[int] = mapped_column(Integer, server_default="15")
     # How far ahead anything is computed. A year at most: a horizon caps the cost of a request.
     booking_horizon_days: Mapped[int] = mapped_column(Integer, server_default="90")
+    # Classification (pre-flight D8): a client is "vip" once they reach this many `completed`
+    # appointments. Never stored on the customer — computed at read time from the count, so
+    # lowering this number reclassifies everybody on the next read with no write to `customers`.
+    vip_visit_threshold: Mapped[int] = mapped_column(Integer, server_default="10")
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
