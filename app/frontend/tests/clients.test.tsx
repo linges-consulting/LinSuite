@@ -44,6 +44,7 @@ const PRIYA_DETAIL = {
   secondary_contact_email: null,
   notes: null,
   updated_at: '2026-01-05T15:00:00Z',
+  retention: { status: 'not_held' as const, expires_on: null as string | null },
 }
 
 const PROFILE = {
@@ -225,6 +226,33 @@ test('a profile with no visits says so', async () => {
 
   expect(await screen.findByRole('heading', { name: 'Priya Nair' })).toBeInTheDocument()
   expect(screen.getByText('No appointments yet')).toBeInTheDocument()
+})
+
+/** The "Records" line: when this chart may be destroyed (ADR-0001), in its three states. */
+test.each([
+  // The browser's own date style, as for the DOB: "14 Mar 2041" in en-CA, "Mar 14, 2041" here.
+  [{ status: 'held', expires_on: '2041-03-14' }, /^Held until (14 Mar|Mar 14,) 2041$/, false],
+  [{ status: 'not_held', expires_on: null }, 'Not under a retention hold', false],
+  [
+    { status: 'needs_dob', expires_on: null },
+    'Retention cannot be computed — add a date of birth',
+    true,
+  ],
+] as const)('the Records line reads %j as %s', async (retention, words, warning) => {
+  stubApi({
+    signedIn: true,
+    dualRole: false,
+    respond: (url: string) =>
+      url === '/api/customers/c1'
+        ? Response.json({ ...PROFILE, customer: { ...PRIYA_DETAIL, retention } })
+        : undefined,
+  })
+
+  renderApp('/clients/c1')
+
+  const line = await screen.findByText(words)
+  expect(line.closest('[data-slot="badge"]') !== null).toBe(warning)
+  if (warning) expect(line.closest('[data-slot="badge"]')).toHaveAttribute('data-variant', 'warning')
 })
 
 /**

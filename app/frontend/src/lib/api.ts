@@ -864,10 +864,20 @@ export async function deleteClosure(id: string): Promise<void> {
   if (!res.ok) throw await failure(res, 'Could not remove the closure')
 }
 
+export type RetentionProfile = 'regulated_health' | 'general_business'
+
 export type SecurityPolicy = {
   mfa_required_for_admin: boolean
   mfa_email_otp_allowed: boolean
+  retention_profile: RetentionProfile
+  /** False until an administrator has saved the profile once — the default is not a choice. */
+  retention_profile_chosen: boolean
 }
+
+/** A field left out is left alone: the MFA switches and the retention profile save apart. */
+export type SecurityChange = Partial<
+  Pick<SecurityPolicy, 'mfa_required_for_admin' | 'mfa_email_otp_allowed' | 'retention_profile'>
+>
 
 export async function fetchSecurityPolicy(): Promise<SecurityPolicy> {
   const res = await fetch('/api/admin/business/security')
@@ -875,7 +885,7 @@ export async function fetchSecurityPolicy(): Promise<SecurityPolicy> {
   return res.json()
 }
 
-export async function updateSecurityPolicy(policy: SecurityPolicy): Promise<SecurityPolicy> {
+export async function updateSecurityPolicy(policy: SecurityChange): Promise<SecurityPolicy> {
   const res = await send('PATCH', '/api/admin/business/security', policy)
   if (!res.ok) throw await failure(res, 'Could not save the security policy')
   return res.json()
@@ -1145,6 +1155,9 @@ export type CustomerDetail = CustomerRecord & {
   secondary_contact_email: string | null
   notes: string | null
   updated_at: string
+  /** When this chart may be destroyed (ADR-0001). `expires_on` is a business-local date,
+   *  only for `held`; `needs_dob` is held indefinitely until a date of birth is added. */
+  retention: { status: 'held' | 'not_held' | 'needs_dob'; expires_on: string | null }
 }
 
 export type CustomerProfile = {

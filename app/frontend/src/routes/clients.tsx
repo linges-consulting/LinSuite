@@ -299,6 +299,9 @@ export function ClientPage() {
                     blank
                   )}
                 </Field>
+                <Field label="Records">
+                  <RetentionLine retention={profile.data.customer.retention} />
+                </Field>
               </dl>
             </CardContent>
           </Card>
@@ -619,6 +622,18 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 
 const blank = <span className="text-muted-foreground">—</span>
 
+/** When this chart may be destroyed (ADR-0001). A chart with no date of birth is held
+ *  indefinitely — never "assumed adult" — and the fix is on this page, so it says what to do. */
+function RetentionLine({ retention }: { retention: CustomerDetail['retention'] }) {
+  if (retention.status === 'held' && retention.expires_on) {
+    return <span className="tabular-nums">Held until {formatDob(retention.expires_on)}</span>
+  }
+  if (retention.status === 'needs_dob') {
+    return <Badge variant="warning">Retention cannot be computed — add a date of birth</Badge>
+  }
+  return <span className="text-muted-foreground">Not under a retention hold</span>
+}
+
 function fullName(c: CustomerRecord): string {
   return `${c.first_name} ${c.last_name}`
 }
@@ -643,7 +658,7 @@ function whenAt(instant: string, timezone: string): string {
   }).format(new Date(instant))
 }
 
-/** `date_of_birth` is a bare `YYYY-MM-DD`, with no clock and no zone — read its digits
+/** `date_of_birth` (and a retention `expires_on`) is a bare `YYYY-MM-DD`, with no clock and no zone — read its digits
  *  directly rather than through `Date`'s local-timezone parsing, which can print the day
  *  before in any zone west of UTC. */
 function formatDob(iso: string): string {
