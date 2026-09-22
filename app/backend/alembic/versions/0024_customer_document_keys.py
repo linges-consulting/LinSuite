@@ -17,7 +17,8 @@ Create Date: 2026-09-21
 - The guard pins `search_path = pg_catalog, pg_temp` and qualifies every relation, as 0021
   does: both runtime roles hold TEMP, and `pg_temp` is otherwise searched first, so a temp
   `customers` or `pg_class` could answer the guard's questions for it. Same pin, via
-  `ALTER FUNCTION`, for the two append-only guards from 0004 and 0019.
+  `ALTER FUNCTION`, for the two append-only guards from 0004 and 0019, and `pg_catalog,
+  public, pg_temp` for 0018's staff-concurrency trigger, whose body names its tables bare.
 - The FK has no `ON DELETE CASCADE`: a cascade runs as the table owner, which the guard lets
   through, so deleting the customer would be a way round it.
 
@@ -40,6 +41,10 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 AUDIT_GUARDS = ("public.audit_events_append_only()", "public.audit_access_log_append_only()")
+# 0018's body names `staff` and `appointments` bare, so `public` stays on its path — ahead of
+# `pg_temp`, which is listed last explicitly and so can no longer shadow either. The body is
+# untouched: `ALTER FUNCTION` changes only its configuration.
+STAFF_CONCURRENCY = "public.appointments_enforce_staff_concurrency()"
 
 
 def upgrade() -> None:
@@ -97,12 +102,13 @@ def upgrade() -> None:
     # path is the whole fix.
     for function in AUDIT_GUARDS:
         op.execute(f"ALTER FUNCTION {function} SET search_path = pg_catalog, pg_temp")
+    op.execute(f"ALTER FUNCTION {STAFF_CONCURRENCY} SET search_path = pg_catalog, public, pg_temp")
 
     op.execute("GRANT INSERT ON audit_events TO linsuite_purge")
 
 
 def downgrade() -> None:
-    for function in AUDIT_GUARDS:
+    for function in (*AUDIT_GUARDS, STAFF_CONCURRENCY):
         op.execute(f"ALTER FUNCTION {function} RESET search_path")
     op.execute("REVOKE INSERT ON audit_events FROM linsuite_purge")
     op.execute("DROP TRIGGER IF EXISTS customer_document_keys_guard ON customer_document_keys")

@@ -920,6 +920,57 @@ async def test_s5_the_trigger_does_not_count_a_no_show_row(client):
         await db.commit()
 
 
+# The trigger reads `staff` and `appointments` by bare name, and `pg_temp` is otherwise searched
+# first: the app role (it holds TEMP) could shadow either with its own answer — a limit of 99,
+# or nobody else booked — and walk past the limit. Its `search_path` is pinned (0024).
+STAFF_SHADOWS = {
+    "staff": (
+        "CREATE TEMP TABLE staff (id uuid, max_concurrent_appointments integer)",
+        "INSERT INTO staff VALUES (cast(:s AS uuid), 99)",
+    ),
+    "appointments": ("CREATE TEMP TABLE appointments (LIKE public.appointments)", None),
+}
+
+
+@pytest.mark.parametrize("shadowed", sorted(STAFF_SHADOWS))
+async def test_s5_a_temp_table_cannot_talk_the_trigger_past_the_staff_limit(client, shadowed):
+    await as_admin(client)
+    seed = await _seed_rows()
+    async with session_scope() as db:
+        await _insert_appointment(db, seed, at("10:00"), at("11:00"))
+        await db.commit()
+    create, fill = STAFF_SHADOWS[shadowed]
+
+    async with session_scope() as db:
+        await db.execute(text(create))
+        if fill:
+            await db.execute(text(fill), {"s": seed[0]})
+        with pytest.raises(IntegrityError) as refused:
+            # Qualified: the unqualified helper would land in the shadow itself.
+            staff_id, customer_id, service_id, user_id = seed
+            await db.execute(
+                text(
+                    _INSERT_APPOINTMENT.text.replace(
+                        "INTO appointments", "INTO public.appointments"
+                    )
+                ),
+                {
+                    "c": customer_id,
+                    "s": staff_id,
+                    "v": service_id,
+                    "start": datetime.fromisoformat(at("10:30")),
+                    "end": datetime.fromisoformat(at("11:30")),
+                    "before": 0,
+                    "after": 0,
+                    "status": "confirmed",
+                    "u": user_id,
+                },
+            )
+        # The temp table goes with the transaction.
+        await db.rollback()
+    assert constraint_of(refused.value) == "tg_appointments_staff_concurrency"
+
+
 # --- moving and resizing (Task 16) ---------------------------------------------------------------
 
 

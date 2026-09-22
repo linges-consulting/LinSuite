@@ -116,8 +116,8 @@ async def test_migration_0023_round_trips(database):
 
 
 async def _document_keys() -> tuple[bool, bool, bool, int]:
-    """(table exists, guard function exists, purge may INSERT into audit_events, append-only
-    guards with a pinned search_path)."""
+    """(table exists, guard function exists, purge may INSERT into audit_events, older
+    trigger functions with a pinned search_path)."""
     async with session_scope() as db:
         table = await db.scalar(text("SELECT to_regclass('customer_document_keys') IS NOT NULL"))
         function = await db.scalar(
@@ -129,7 +129,8 @@ async def _document_keys() -> tuple[bool, bool, bool, int]:
         pinned = await db.scalar(
             text(
                 "SELECT count(*) FROM pg_proc WHERE proconfig IS NOT NULL AND proname IN "
-                "('audit_events_append_only', 'audit_access_log_append_only')"
+                "('audit_events_append_only', 'audit_access_log_append_only', "
+                "'appointments_enforce_staff_concurrency')"
             )
         )
     return bool(table), bool(function), bool(insert), int(pinned)
@@ -137,12 +138,12 @@ async def _document_keys() -> tuple[bool, bool, bool, int]:
 
 async def test_migration_0024_round_trips(database):
     """0024 adds the key table, its guard and the purge role's one INSERT; the downgrade takes
-    all three back and unpins the two append-only guards it pinned, so the re-upgrade's
+    all three back and unpins the three M1/M2 functions it pinned, so the re-upgrade's
     CREATE, GRANT and ALTER succeed."""
-    assert await _document_keys() == (True, True, True, 2)
+    assert await _document_keys() == (True, True, True, 3)
 
     await _downgrade_to("0023")
     assert await _document_keys() == (False, False, False, 0)
 
     await _upgrade_to("head")
-    assert await _document_keys() == (True, True, True, 2)
+    assert await _document_keys() == (True, True, True, 3)

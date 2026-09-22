@@ -199,23 +199,56 @@ async def test_audit_events_no_rewrite_refuses_an_update_even_with_the_grant_res
     assert getattr(still_refused.value.orig, "sqlstate", None) == "42501"
 
 
-# Every trigger function that decides *who* may rewrite or delete. Each reads a relation by
-# name (`pg_class` for the owner check, `public.customers` for the hold), and an unpinned
-# `search_path` searches `pg_temp` first — so a role with TEMP could shadow it (0024).
-GUARD_FUNCTIONS = (
-    "audit_events_append_only",
-    "audit_access_log_append_only",
-    "customer_document_keys_guard",
-)
+# Every trigger function, and every SECURITY DEFINER one, runs with a `search_path` it did not
+# choose unless it pins one — and `pg_temp` is searched first for any relation it names bare.
+# Both runtime roles hold TEMP, so an unpinned guard answers whatever a temp table tells it
+# (0024, fix rounds 1 and 2). Self-discovering: a future migration's unpinned trigger fails
+# here without anybody having to remember to list it.
+_PINNABLE = """
+SELECT DISTINCT p.proname, p.proconfig
+  FROM pg_proc p
+  JOIN pg_namespace n ON n.oid = p.pronamespace
+ WHERE n.nspname = 'public'
+   AND (p.prosecdef OR EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgfoid = p.oid))
+"""
 
 
-@pytest.mark.parametrize("function", GUARD_FUNCTIONS)
-async def test_each_guard_function_pins_its_search_path(database, function):
+def _pinned_path(config: list[str] | None) -> list[str] | None:
+    for entry in config or ():
+        if entry.startswith("search_path="):
+            return [part.strip() for part in entry.removeprefix("search_path=").split(",")]
+    return None
+
+
+async def test_every_trigger_and_security_definer_function_pins_its_search_path(database):
     async with session_scope() as db:
-        config = await db.scalar(
-            text("SELECT proconfig FROM pg_proc WHERE proname = :f"), {"f": function}
-        )
-    assert config == ["search_path=pg_catalog, pg_temp"]
+        found = {name: _pinned_path(config) for name, config in await db.execute(text(_PINNABLE))}
+
+    # Not vacuously: the guards this suite knows about are all in the sweep.
+    assert {
+        "audit_events_append_only",
+        "audit_access_log_append_only",
+        "customer_document_keys_guard",
+        "appointments_enforce_staff_concurrency",
+        "ensure_access_log_partitions",
+    } <= set(found)
+    unpinned = {
+        name: path
+        for name, path in found.items()
+        if path is None or path[0] != "pg_catalog" or path[-1] != "pg_temp"
+    }
+    assert unpinned == {}, "pin `SET search_path = pg_catalog, ..., pg_temp` on these"
+
+
+async def test_neither_runtime_role_may_create_in_public(database):
+    """`appointments_enforce_staff_concurrency` pins `pg_catalog, public, pg_temp` (its body
+    names tables bare): `public` in the path is only safe while nobody but the owner can put
+    anything there."""
+    async with session_scope() as db:
+        for role in (APP_ROLE, PURGE_ROLE):
+            assert not await db.scalar(
+                text("SELECT has_schema_privilege(:r, 'public', 'CREATE')"), {"r": role}
+            ), role
 
 
 async def test_a_temp_pg_class_cannot_make_the_app_role_the_owner_of_audit_events(database):
