@@ -16,11 +16,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from core.config import get_settings
 from core.db import get_purge_engine, session_scope
 from customers import erasure, retention, tasks
+from customers.models import Customer
 from tests.test_access_log import access_rows, add_role, clean_access_log  # noqa: F401
 from tests.test_appointments import (  # noqa: F401 — the autouse fixture comes along
     APPOINTMENTS,
@@ -40,7 +41,7 @@ from tests.test_appointments import (  # noqa: F401 — the autouse fixture come
 from tests.test_customer_profile import complete_visits, ready_customer
 from tests.test_document_keys import key_rows
 from tests.test_groups import book_group
-from tests.test_retention_api import entry, switch, years_ago
+from tests.test_retention_api import SECURITY, entry, stored, switch, years_ago
 
 NOW = datetime(2026, 9, 21, 12, tzinfo=UTC)
 TORONTO = "America/Toronto"
@@ -621,3 +622,112 @@ async def test_a_booking_racing_an_erasure_waits_for_it_and_is_refused(client, k
             text("SELECT count(*) FROM appointments WHERE customer_id = :id"), {"id": customer_id}
         )
     assert booked == 0
+
+
+# --- final fix wave: the PATCH takes the lock order ---------------------------------------
+
+
+def pause_after_customer_load(monkeypatch, customer_id: str) -> tuple[asyncio.Event, asyncio.Event]:
+    """The first `AsyncSession.get(Customer, customer_id)` — the PATCH's own load — returns
+    and then waits for `release`. Any later load of that customer runs straight through."""
+    loaded, release = asyncio.Event(), asyncio.Event()
+    original = AsyncSession.get
+
+    async def get(self, entity, ident, **kwargs):
+        found = await original(self, entity, ident, **kwargs)
+        if entity is Customer and str(ident) == customer_id and not loaded.is_set():
+            loaded.set()
+            await release.wait()
+        return found
+
+    monkeypatch.setattr(AsyncSession, "get", get)
+    return loaded, release
+
+
+async def test_a_patch_racing_an_erasure_never_writes_contacts_back(client, monkeypatch):
+    """I1: the PATCH loaded the row, an erasure ran to completion, the PATCH wrote its stale
+    edit over the tombstone. With the customer locked at load, the erasure queues behind the
+    PATCH and anonymises what it wrote."""
+    await as_admin(client)
+    await switch(client, "general_business")
+    customer_id, _, _ = await ready_customer(client)
+    await fill_profile(client, customer_id, years_ago(30))
+    loaded, release = pause_after_customer_load(monkeypatch, customer_id)
+
+    patch = asyncio.create_task(
+        client.patch(
+            f"{CUSTOMERS}/{customer_id}",
+            json={"first_name": "Renamed", "email": "back@example.com"},
+        )
+    )
+    await asyncio.wait_for(loaded.wait(), 10)
+    erasing = asyncio.create_task(erase(client, customer_id))
+    await _wait_for_a_lock_wait(erasing)
+    release.set()
+    patched, erased = await patch, await erasing
+
+    assert erased.status_code == 201, erased.text
+    assert patched.status_code == 200, patched.text  # it ran first; the erasure then won
+    stored = await row(customer_id)
+    assert (stored["first_name"], stored["last_name"]) == ("Erased", "Client")
+    for field in ALWAYS_PURGED:
+        assert stored[field] is None, field
+    assert (await request_row(customer_id))["purged_at"] is not None
+
+
+async def test_a_dob_patch_racing_a_clinical_entry_keeps_the_new_entrys_hold(client, monkeypatch):
+    """I1's latent twin: `on_dob_changed` recomputed from the PATCH's stale snapshot of
+    `last_clinical_entry_at`, storing a hold that ignored a newer entry — a shortened hold."""
+    await as_admin(client)
+    customer_id, _, _ = await ready_customer(client)
+    await entry(customer_id)
+    dob, newer = years_ago(40), datetime.now(UTC)
+    loaded, release = pause_after_customer_load(monkeypatch, customer_id)
+
+    patch = asyncio.create_task(
+        client.patch(f"{CUSTOMERS}/{customer_id}", json={"date_of_birth": dob.isoformat()})
+    )
+    await asyncio.wait_for(loaded.wait(), 10)
+    recording = asyncio.create_task(entry(customer_id, newer))
+    await _wait_for_a_lock_wait(recording)
+    release.set()
+    patched = await patch
+    await recording
+
+    assert patched.status_code == 200, patched.text
+    last, expires = await stored(customer_id)
+    assert last == newer
+    assert expires == retention.expiry(retention.REGULATED_HEALTH, dob, newer, TORONTO)
+
+
+async def test_a_dob_patch_racing_a_profile_switch_no_longer_deadlocks(client, monkeypatch):
+    """The PATCH used to lock the customer, then ask for the business row; the switch holds
+    the business row and then updates customers. Business first in both: the switch waits."""
+    await as_admin(client)
+    customer_id, _, _ = await ready_customer(client)
+    await entry(customer_id)  # held, so the switch to general_business rewrites this row
+    reached, release = asyncio.Event(), asyncio.Event()
+    original = retention.on_dob_changed
+
+    async def on_dob_changed(db, customer):
+        reached.set()
+        await release.wait()
+        await original(db, customer)
+
+    monkeypatch.setattr(retention, "on_dob_changed", on_dob_changed)
+
+    patch = asyncio.create_task(
+        client.patch(f"{CUSTOMERS}/{customer_id}", json={"date_of_birth": "1980-01-01"})
+    )
+    await asyncio.wait_for(reached.wait(), 10)
+    switching = asyncio.create_task(
+        client.patch(SECURITY, json={"retention_profile": "general_business"})
+    )
+    await _wait_for_a_lock_wait(switching)
+    release.set()
+    patched, switched = await patch, await switching
+
+    assert patched.status_code == 200, patched.text
+    assert switched.status_code == 200, switched.text
+    assert (await row(customer_id))["date_of_birth"] == date(1980, 1, 1)
+    assert (await stored(customer_id))[1] is None

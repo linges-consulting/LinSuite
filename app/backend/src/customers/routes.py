@@ -497,8 +497,19 @@ async def update_customer(
     Concurrent edits are last-write-wins, per field: two overlapping `PATCH`es each apply
     whatever they were sent over whatever the row held when they ran, with no version check
     between them. Front-desk profile edits are not a contended enough path to be worth one.
+
+    **Locks, in the codebase's order:** the business row `FOR SHARE`, then the customer
+    `FOR UPDATE` with `populate_existing`, *before* the suppression check — so the check and
+    `on_dob_changed` read the row as committed, not a snapshot an erasure or a clinical entry
+    has since overtaken. This cannot deadlock: erasure and `record_clinical_entry` take the
+    same two locks in the same order (they queue); a profile or timezone switch takes the
+    business row first and customers after (it queues behind us, or we behind it, on the
+    business row, before either holds a customer); a booking takes no business lock and holds
+    the customer `FOR KEY SHARE` before its staff row, and this PATCH locks nothing past the
+    customer, so the two only queue on the customer row.
     """
-    customer = await db.get(Customer, customer_id)
+    await retention._rules(db)  # the business row FOR SHARE
+    customer = await db.get(Customer, customer_id, with_for_update=True, populate_existing=True)
     if customer is None:
         raise HTTPException(status_code=404, detail="No such customer.")
 

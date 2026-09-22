@@ -24,9 +24,9 @@ back at midnight (23:xx twice); and a timezone change never shortens a hold (`la
 
 **Locking.** Every writer reads the business's profile and zone `FOR SHARE`, and a profile
 switch takes that row `FOR UPDATE` before its bulk recompute, so a writer never stores an
-expiry computed from a profile that is being switched underneath it. The two can deadlock
-(a DOB PATCH has already locked its customer row when it asks for the business row); Postgres
-then aborts one of them whole, which is an error for somebody to retry, never a wrong date.
+expiry computed from a profile that is being switched underneath it. Every writer takes the
+business row before the customer row (the DOB PATCH included), so a writer and a switch queue
+on the business row and never deadlock.
 """
 
 import uuid
