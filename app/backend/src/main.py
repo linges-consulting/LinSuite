@@ -36,6 +36,7 @@ from customers.routes import router as customers_router
 from forms.links import router as form_links_router
 from forms.public import router as public_forms_router
 from forms.routes import router as forms_router
+from forms.submissions import router as form_submissions_router
 from scheduling.appointments import router as appointments_router
 from scheduling.closures import router as closures_router
 from scheduling.hours import router as hours_router
@@ -254,6 +255,8 @@ api.include_router(forms_router)
 # Sending a form to a client (`forms.issue`, Staff Mode), and the page the client opens —
 # the one router with no auth dependency at all (`forms/public.py`).
 api.include_router(form_links_router)
+# Completed forms, staff side (`forms.view`): the list, and the logged read of one.
+api.include_router(form_submissions_router)
 api.include_router(public_forms_router)
 api.include_router(business_router)
 api.include_router(branding_router)

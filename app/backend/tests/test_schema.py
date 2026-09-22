@@ -54,6 +54,8 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "form_template_versions": ("SELECT", "INSERT"),
     # The app stamps `revoked_at`/`consumed_at` (trigger-guarded); it never deletes a link.
     "form_links": ("SELECT", "INSERT", "UPDATE"),
+    # A filled-in form is immutable; only the purge role removes one, when not held (0029).
+    "form_submissions": ("SELECT", "INSERT"),
 }
 # The purge role reads and deletes everywhere and writes nowhere — except the fact of its own
 # purge, which ADR-0001 §6 puts in the purge transaction (0024, pre-flight D11).
@@ -70,6 +72,7 @@ TRIGGERS = (
     ("documents", "documents_guard"),
     ("form_template_versions", "form_template_versions_append_only"),
     ("form_links", "form_links_guard"),
+    ("form_submissions", "form_submissions_guard"),
 )
 
 

@@ -555,13 +555,21 @@ async def test_a_passed_hold_reads_as_expired_and_nothing_is_promised_kept(clien
 
 async def test_a_tombstone_that_later_gains_a_hold_still_refuses_a_dob(client):
     """The DOB exception is for a chart that was held when erasure was asked — not for an
-    anonymous tombstone that a later clinical entry happened to put under a hold."""
+    anonymous tombstone that later came under a hold. `record_clinical_entry` now refuses a
+    suppressed client (#47), so no code path does that; the hold is put there as the owner (a
+    restore, or rows from before #47), and the PATCH must still refuse."""
     await as_admin(client)
     await switch(client, "general_business")
     customer_id, _, _ = await ready_customer(client)
     assert (await erase(client, customer_id)).status_code == 201
     await switch(client, "regulated_health")
-    await entry(customer_id)
+    with pytest.raises(retention.CustomerSuppressed):
+        await entry(customer_id)
+    await as_owner(
+        "UPDATE customers SET last_clinical_entry_at = now(), "
+        "retention_expires_at = 'infinity' WHERE id = :id",
+        id=customer_id,
+    )
     assert (await row(customer_id))["retention_expires_at"] == retention.INFINITY
 
     resp = await client.patch(f"{CUSTOMERS}/{customer_id}", json={"date_of_birth": "1990-01-01"})

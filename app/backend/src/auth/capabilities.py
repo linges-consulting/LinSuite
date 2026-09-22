@@ -109,6 +109,8 @@ CAPABILITIES: tuple[Capability, ...] = (
     # Front-desk work, so Staff Mode: the clinic tablet is never signed in, and staff hand
     # it over by showing the link's QR code (owner ruling, #46).
     Capability("forms.issue", "Send forms to clients and take scans.", "Customers"),
+    # Reading a completed form is a PHI access (logged per open); the list is metadata (#47).
+    Capability("forms.view", "Open clients' completed forms.", "Customers"),
 )
 
 BY_KEY: dict[str, Capability] = {c.key: c for c in CAPABILITIES}

@@ -479,6 +479,7 @@ def test_only_the_guards_own_refusals_read_as_held():
     held = tasks._refused_by_guard
     assert held("documents: DELETE is not permitted for linsuite_purge on customer x")
     assert held("customer_document_keys: DELETE is not permitted for linsuite_purge on x")
+    assert held("form_submissions: DELETE is not permitted for linsuite_purge on customer x")
     assert not held("form_documents: DELETE is not permitted for linsuite_purge on customer x")
     assert not held("permission denied for table documents")
     assert not held("documents: UPDATE is not permitted for linsuite_purge on customer x")

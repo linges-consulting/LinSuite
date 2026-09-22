@@ -61,6 +61,8 @@ LOGGED = {
     ("GET", "/api/customers/{customer_id}"),
     # Its answer names the day the hold ends, which discloses the DOB (Task 7).
     ("POST", "/api/customers/{customer_id}/erasure"),
+    # A completed form's answers, signature included (#47). Its list is metadata: not here.
+    ("GET", "/api/customers/{customer_id}/forms/{submission_id}"),
 }
 # Customer-scoped GETs that deliberately do not log. Empty: nothing under a customer's path
 # is metadata yet (the access report itself will live under `/api/admin/...`).

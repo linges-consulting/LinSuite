@@ -56,6 +56,8 @@ PHI_FIELDS: frozenset[str] = frozenset(
         # An erasure's hold: its end date and the sentence stating it disclose the DOB too.
         "held_until",
         "held_reason",
+        # A completed form's answers — signature included (#47).
+        "answers",
     }
 )
 
@@ -100,9 +102,14 @@ def declares_a_model(annotation: object) -> bool:
     return any(declares_a_model(arg) for arg in get_args(annotation))
 
 
-def LogAccess(resource_type: str) -> Callable:  # noqa: N802 — a dependency factory, like `Requires`
+def LogAccess(resource_type: str, resource_param: str | None = None) -> Callable:  # noqa: N802
     """`dependencies=[..., Depends(LogAccess("customer_profile"))]` on a route whose path
-    carries `{customer_id}`. One row, `action="view"`, committed before the handler runs."""
+    carries `{customer_id}`. One row, `action="view"`, committed before the handler runs.
+
+    `resource_param` names another path parameter to record as `resource_id` — a submission
+    id rather than the client's (pre-flight C3). The handler must then check that the resource
+    belongs to `{customer_id}`, or the row names the wrong chart. A dependency factory, like
+    `Requires`."""
 
     async def dependency(
         customer_id: uuid.UUID, user: CurrentUser, request: Request, db: SessionDep
@@ -113,7 +120,9 @@ def LogAccess(resource_type: str) -> Callable:  # noqa: N802 — a dependency fa
                 actor_role=user.role.name,
                 customer_id=customer_id,
                 resource_type=resource_type,
-                resource_id=str(customer_id),
+                resource_id=(
+                    str(request.path_params[resource_param]) if resource_param else str(customer_id)
+                ),
                 action=VIEW,
                 # The caller's address, provided uvicorn trusts the proxy's forwarded header
                 # (`FORWARDED_ALLOW_IPS` on the `app` service). None only where there is

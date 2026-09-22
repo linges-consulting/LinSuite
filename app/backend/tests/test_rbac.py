@@ -240,8 +240,9 @@ async def test_the_two_system_roles_are_seeded_and_marked(client):
         "schedule.manage",
         "customers.view",
         "customers.manage",
-        # Sending a form is front-desk work (0028, #46).
+        # Sending a form is front-desk work (0028, #46); reading one back is too (0029, #47).
         "forms.issue",
+        "forms.view",
     }
 
 

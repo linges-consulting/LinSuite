@@ -250,5 +250,34 @@ async def test_migration_0028_round_trips(database):
     await _downgrade_to("0027")
     assert await _form_links() == (False, False, 0)
 
-    await _upgrade_to("0028")
+    await _upgrade_to("head")
     assert await _form_links() == (True, True, 2)
+
+
+async def _form_submissions() -> tuple[bool, bool, int]:
+    async with session_scope() as db:
+        table = await db.scalar(text("SELECT to_regclass('form_submissions') IS NOT NULL"))
+        trigger = await db.scalar(
+            text("SELECT count(*) > 0 FROM pg_trigger WHERE tgname = 'form_submissions_guard'")
+        )
+        holders = await db.scalar(
+            text("SELECT count(*) FROM role_capabilities WHERE capability = 'forms.view'")
+        )
+    return bool(table), bool(trigger), int(holders)
+
+
+async def test_migration_0029_round_trips(database):
+    """0029 adds `form_submissions` with its guard trigger (0026's shared function, which the
+    downgrade leaves alone) and gives both seeded roles `forms.view`; the downgrade takes the
+    table and the grant back out, to the explicit revision."""
+    assert await _form_submissions() == (True, True, 2)
+
+    await _downgrade_to("0028")
+    assert await _form_submissions() == (False, False, 0)
+    async with session_scope() as db:
+        assert await db.scalar(
+            text("SELECT to_regprocedure('public.customer_record_guard()') IS NOT NULL")
+        )
+
+    await _upgrade_to("0029")
+    assert await _form_submissions() == (True, True, 2)

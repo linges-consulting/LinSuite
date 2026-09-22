@@ -16,7 +16,9 @@ from celery.signals import setup_logging, worker_init
 from core.config import get_settings
 from core.logging import configure_logging
 
-celery_app = Celery("linsuite", include=["core.tasks", "customers.tasks", "notifications.tasks"])
+celery_app = Celery(
+    "linsuite", include=["core.tasks", "customers.tasks", "forms.tasks", "notifications.tasks"]
+)
 
 
 @celery_app.on_configure.connect

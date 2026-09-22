@@ -94,7 +94,8 @@ def is_retryable(error: Exception) -> bool:
 
 
 class DocumentIntegrityError(Exception):
-    """A stored document failed authentication or its SHA-256 check (`core.documents`).
+    """A stored document (or a sealed submission) failed authentication or its digest check
+    (`core.documents`, `forms.submissions.open_answers`).
 
     Deliberately not an `HTTPException`: nothing a request did caused it and no retry will
     fix it — the row, the key or the database was altered — so it surfaces as a 500 and the

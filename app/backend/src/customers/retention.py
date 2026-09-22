@@ -1,9 +1,9 @@
 """When a client's record may be destroyed (ADR-0001 §2, pre-flight D3/D4).
 
 `expiry` is the rule, and the only place it is computed. Everything else here is a writer
-that feeds it: `record_clinical_entry` (Phases 8 and 9 call it when a form submission or
-session note is inserted — nothing in #7 does), `on_dob_changed` (the one DOB writer in
-`customers/routes.py`), and `recompute_all` (a retention-profile or timezone switch).
+that feeds it: `record_clinical_entry` (a health form's submission calls it, in the insert's
+transaction — `forms/public.py`; Phase 9's session notes will too), `on_dob_changed` (the one
+DOB writer in `customers/routes.py`), and `recompute_all` (a retention-profile or timezone switch).
 Appointment completion is deliberately none of these: a booking is not an entry in the chart.
 
 `retention_expires_at` semantics, which the purge job's predicate
@@ -126,11 +126,19 @@ def _recompute(customer: Customer, profile: str, zone: str) -> None:
     )
 
 
+class CustomerSuppressed(Exception):
+    """The client asked to be erased: nothing new goes into their chart (ADR-0001 rule 7)."""
+
+
 async def record_clinical_entry(db: AsyncSession, customer_id: uuid.UUID, at: datetime) -> None:
     """A form submission or session note was added to this client's chart at `at`.
 
     Staged in the caller's transaction (the caller commits, alongside the entry itself).
     `last_clinical_entry_at` only ever moves forward: a back-dated entry never shortens a hold.
+
+    Raises `CustomerSuppressed` for a client with an erasure request, before changing anything:
+    a nameless tombstone must never be put back under a hold. Checked under the customer row
+    lock the erasure also takes, so the two cannot interleave. The caller rolls back.
     """
     if at.tzinfo is None:
         raise ValueError("a clinical entry is an instant: pass an aware datetime")
@@ -138,6 +146,8 @@ async def record_clinical_entry(db: AsyncSession, customer_id: uuid.UUID, at: da
     customer = await db.get(Customer, customer_id, with_for_update=True, populate_existing=True)
     if customer is None:
         raise LookupError(f"no customer {customer_id}")
+    if customer.suppressed_at is not None:
+        raise CustomerSuppressed(str(customer_id))
     if customer.last_clinical_entry_at is None or at > customer.last_clinical_entry_at:
         customer.last_clinical_entry_at = at
     _recompute(customer, profile, zone)

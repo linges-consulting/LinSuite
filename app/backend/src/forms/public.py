@@ -33,21 +33,34 @@ opened, and when" is answerable without writing PHI anywhere.
 """
 
 import hmac
-from datetime import datetime
+import logging
+import uuid
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
 from core.audit import record_event
 from core.db import SessionDep
+from core.errors import TRY_AGAIN
 from core.redis import get_redis
+from customers.keys import data_key
 from customers.models import Customer
+from customers.retention import CustomerSuppressed, record_clinical_entry
 from forms.links import PUBLIC_LOOKUPS_PER_MINUTE, digest
-from forms.models import FormLink, FormTemplate, FormTemplateVersion
+from forms.models import FormLink, FormSubmission, FormTemplate, FormTemplateVersion
+from forms.schema import FormSchema, kept_answers
+from forms.submissions import answer_errors, seal_answers
+from forms.tasks import render_submission
 from settings.routes import branding_document
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/public", tags=["public"])
 
@@ -79,6 +92,35 @@ def _invalid() -> JSONResponse:
     )
 
 
+async def _live_link(
+    db: AsyncSession, token: str
+) -> tuple[FormLink, FormTemplateVersion, str] | None:
+    """(link, its pinned version, the client's first name) for a link that can still be used,
+    else None. Every condition is in the one `WHERE`, so every dead link takes the same path."""
+    if len(token) > _MAX_TOKEN:
+        return None
+    wanted = digest(token)
+    row = (
+        await db.execute(
+            select(FormLink, FormTemplateVersion, Customer.first_name)
+            .join(FormTemplateVersion, FormTemplateVersion.id == FormLink.version_id)
+            .join(FormTemplate, FormTemplate.id == FormTemplateVersion.template_id)
+            .join(Customer, Customer.id == FormLink.customer_id)
+            .where(
+                FormLink.token_sha256 == wanted,
+                FormLink.expires_at > func.now(),
+                FormLink.consumed_at.is_(None),
+                FormLink.revoked_at.is_(None),
+                Customer.suppressed_at.is_(None),
+                FormTemplate.retired_at.is_(None),
+            )
+        )
+    ).first()
+    if row is None or not hmac.compare_digest(bytes(row[0].token_sha256), wanted):
+        return None
+    return row[0], row[1], row[2]
+
+
 async def throttle(request: Request) -> None:
     """A dependency, so it runs before the body is validated: a malformed request counts too."""
     address = request.client.host if request.client else "unknown"
@@ -102,30 +144,12 @@ async def throttle(request: Request) -> None:
 )
 async def public_form(payload: LookupIn, request: Request, db: SessionDep):
     token = payload.token
-    if len(token) > _MAX_TOKEN:
-        return _invalid()
-    wanted = digest(token)
-    row = (
-        await db.execute(
-            select(FormLink.id, FormLink.token_sha256, FormLink.expires_at, FormTemplateVersion)
-            .add_columns(Customer.first_name)
-            .join(FormTemplateVersion, FormTemplateVersion.id == FormLink.version_id)
-            .join(FormTemplate, FormTemplate.id == FormTemplateVersion.template_id)
-            .join(Customer, Customer.id == FormLink.customer_id)
-            .where(
-                FormLink.token_sha256 == wanted,
-                FormLink.expires_at > func.now(),
-                FormLink.consumed_at.is_(None),
-                FormLink.revoked_at.is_(None),
-                Customer.suppressed_at.is_(None),
-                FormTemplate.retired_at.is_(None),
-            )
-        )
-    ).first()
-    if row is None or not hmac.compare_digest(bytes(row.token_sha256), wanted):
+    row = await _live_link(db, token)
+    if row is None:
         return _invalid()
 
-    link_id, _, expires, version, first_name = row
+    link, version, first_name = row
+    link_id, expires = link.id, link.expires_at
     # Where it was opened from — the one fact that tells a forwarded link from the client's own.
     record_event(
         db,
@@ -144,3 +168,145 @@ async def public_form(payload: LookupIn, request: Request, db: SessionDep):
         client_first_name=first_name,
         expires_at=expires,
     )
+
+
+# --- submitting (#47) ------------------------------------------------------------------------
+
+
+class SubmitIn(BaseModel):
+    token: str
+    # Minted by the page once and resent on every retry, so a retry is recognisable.
+    submission_id: uuid.UUID
+    # The version the page rendered; it must be the link's pinned one.
+    version_id: uuid.UUID
+    answers: dict[str, Any]
+
+
+def _coded(status: int, code: str, detail: str, **extra: Any) -> JSONResponse:
+    return JSONResponse(status_code=status, content={"detail": detail, "code": code, **extra})
+
+
+async def _already_received(db: AsyncSession, token: str, submission_id: uuid.UUID) -> bool:
+    """This submission, through this link, is already filed — a retry after a lost answer."""
+    if len(token) > _MAX_TOKEN:
+        return False
+    found = await db.scalar(
+        select(FormSubmission.id)
+        .join(FormLink, FormLink.id == FormSubmission.link_id)
+        .where(FormSubmission.id == submission_id, FormLink.token_sha256 == digest(token))
+    )
+    return found is not None
+
+
+async def _lock_the_chart(
+    db: AsyncSession, customer_id: uuid.UUID, health: bool, at: datetime
+) -> None:
+    """Take the client's row before the link's, in the erasure's own order, and refuse a
+    suppressed client under that lock (`CustomerSuppressed`). A health form is a clinical
+    entry (owner ruling Q1), recorded here, staged in this transaction. Anything else only
+    waits for an erasure in flight: `FOR KEY SHARE` conflicts with its `FOR UPDATE`."""
+    if health:
+        await record_clinical_entry(db, customer_id, at)
+        return
+    suppressed = await db.scalar(
+        select(Customer.suppressed_at)
+        .where(Customer.id == customer_id)
+        .with_for_update(key_share=True)
+    )
+    if suppressed is not None:
+        raise CustomerSuppressed(str(customer_id))
+
+
+@router.post("/forms/submit", dependencies=[Depends(throttle)])
+async def submit_form(payload: SubmitIn, request: Request, db: SessionDep):
+    """One transaction (ADR-0001 rule 7): the client's row (and, for a health form, the new
+    hold), the link consumed by a guarded `UPDATE`, the key (made if missing), the sealed
+    submission and its audit row commit together — or none of it does.
+
+    200 `received`; 200 `already_received` for a retry of a filed submission; 404
+    `link_invalid` for every dead link, another submission on a used one, and an erased
+    client; 409 `version_mismatch`; 422 `invalid_answers` with `{key: code}`."""
+    token, submission_id = payload.token, payload.submission_id
+    if await _already_received(db, token, submission_id):
+        return {"status": "already_received"}
+    row = await _live_link(db, token)
+    if row is None:
+        return _invalid()
+    link, version, _ = row
+    if payload.version_id != version.id:
+        return _coded(409, "version_mismatch", "This form has changed. Please ask for a new link.")
+    schema = FormSchema.model_validate(version.schema)
+    errors = answer_errors(schema, payload.answers)
+    if errors:
+        return _coded(422, "invalid_answers", "Some answers need attention.", errors=errors)
+
+    submitted_at = datetime.now(UTC)
+    customer_id = link.customer_id
+    try:
+        await _lock_the_chart(db, customer_id, version.is_health_form, submitted_at)
+    except CustomerSuppressed:
+        await db.rollback()
+        return _invalid()
+    # Single use: the statement is the lock. A concurrent submit of this link waits on the
+    # row here, then finds it consumed.
+    consumed = await db.scalar(
+        update(FormLink)
+        .where(
+            FormLink.id == link.id,
+            FormLink.consumed_at.is_(None),
+            FormLink.revoked_at.is_(None),
+            FormLink.expires_at > func.now(),
+        )
+        .values(consumed_at=func.now())
+        .returning(FormLink.id)
+    )
+    if consumed is None:
+        await db.rollback()
+        if await _already_received(db, token, submission_id):
+            return {"status": "already_received"}
+        return _invalid()
+
+    key = await data_key(db, customer_id)
+    db.add(
+        FormSubmission(
+            id=submission_id,
+            customer_id=customer_id,
+            version_id=version.id,
+            template_id=version.template_id,
+            link_id=link.id,
+            method="link",
+            # Visible, non-empty answers only: a hidden field's leftover is never filed.
+            answers_sealed=seal_answers(
+                kept_answers(schema, payload.answers), key, submission_id, customer_id
+            ),
+            submitted_at=submitted_at,
+            source_ip=request.client.host if request.client else None,
+        )
+    )
+    record_event(
+        db,
+        "form.submitted",
+        target_type="form_submission",
+        target_id=str(submission_id),
+        # Identifiers only — never an answer, a name or the token.
+        metadata={
+            "link_id": str(link.id),
+            "template_id": str(version.template_id),
+            "version": version.number,
+        },
+    )
+    try:
+        await db.commit()
+    except IntegrityError:
+        # The id is taken by another submission, or the client's key was purged between its
+        # read and this insert (rule 7: the FK refuses; a retry makes a new key). Nothing was
+        # written and the link is still open.
+        await db.rollback()
+        return _coded(409, TRY_AGAIN, "That did not go through. Please try again.")
+
+    try:
+        render_submission.delay(str(submission_id))
+    except Exception:
+        # Committed already; the PDF can be rendered later (Task 5).
+        log.exception("render_submission could not be enqueued for %s", submission_id)
+    return {"status": "received"}

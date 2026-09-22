@@ -52,6 +52,7 @@ async def _wipe_forms() -> None:
     owner = create_async_engine(os.environ["DATABASE_URL_MIGRATE"])
     try:
         async with owner.begin() as conn:
+            await conn.execute(text("DELETE FROM form_submissions"))  # they pin a link
             await conn.execute(text("DELETE FROM form_links"))  # they pin a version
             await conn.execute(text("DELETE FROM form_template_versions"))
             await conn.execute(text("DELETE FROM form_templates"))

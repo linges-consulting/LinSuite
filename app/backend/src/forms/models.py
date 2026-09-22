@@ -17,6 +17,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     LargeBinary,
     String,
@@ -26,7 +27,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import INET, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
@@ -117,3 +118,41 @@ class FormLink(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class FormSubmission(Base):
+    """A filled-in form: immutable, and its answers sealed under the client's DEK (#47).
+
+    `answers_sealed` is the only copy of the answers — signature and typed name included —
+    and `forms.submissions.open_answers` the only reader. It references the *version* it was
+    filled against, so republishing never changes what a record says. Append-only for the app
+    role (0029: REVOKE and `customer_record_guard`); only the purge role deletes, only while the
+    client is not held. Its FK is to the client's key row, not `customers` (ADR-0001 rule 7)."""
+
+    __tablename__ = "form_submissions"
+    __table_args__ = (
+        CheckConstraint("method IN ('link', 'scan')", name="ck_form_submissions_method"),
+        CheckConstraint(
+            "method = 'scan' OR (link_id IS NOT NULL AND answers_sealed IS NOT NULL)",
+            name="ck_form_submissions_link_answers",
+        ),
+        Index(
+            "ix_form_submissions_customer_template_submitted",
+            "customer_id",
+            "template_id",
+            "submitted_at",
+        ),
+    )
+
+    # Chosen by the client's page, so a retry after a lost answer is recognisably the same.
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
+    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customer_document_keys.customer_id"))
+    version_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("form_template_versions.id"))
+    template_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("form_templates.id"))
+    link_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("form_links.id"), unique=True)
+    method: Mapped[str] = mapped_column(Text)
+    answers_sealed: Mapped[bytes | None] = mapped_column(LargeBinary)
+    submitted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    source_ip: Mapped[str | None] = mapped_column(INET)
