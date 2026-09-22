@@ -3,10 +3,13 @@ import {
   ArrowLeft,
   ChevronLeft,
   ChevronRight,
+  Ellipsis,
+  Eraser,
   History,
   Pencil,
   SearchX,
   ShieldCheck,
+  ShieldOff,
   UserRound,
   Users,
 } from 'lucide-react'
@@ -27,6 +30,12 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -38,9 +47,11 @@ import {
   fetchCustomerProfile,
   fetchCustomers,
   fieldErrors,
+  requestErasure,
   updateCustomer,
   type AccessEntry,
   type CustomerDetail,
+  type Erasure,
   type CustomerPatch,
   type CustomerRecord,
   type Visit,
@@ -203,7 +214,11 @@ export function ClientPage() {
   const { user } = useSession()
   const canEdit = user?.capabilities.includes('customers.manage') ?? false
   const canAudit = user?.capabilities.includes('audit.view') ?? false
+  // An Admin Mode capability: offered only while the window is open, never as a refusal.
+  const canErase =
+    (user?.capabilities.includes('customers.erase') ?? false) && user?.mode === 'admin'
   const [editing, setEditing] = useState(false)
+  const [erasing, setErasing] = useState(false)
   const profile = useQuery({
     queryKey: [...PROFILE, id],
     queryFn: () => fetchCustomerProfile(id),
@@ -243,18 +258,39 @@ export function ClientPage() {
         />
       ) : (
         <>
+          {profile.data.customer.erasure && (
+            <ErasureBanner erasure={profile.data.customer.erasure} />
+          )}
           <Card>
             <CardHeader className="flex-row items-center justify-between">
               <CardTitle className="flex items-center gap-2 text-base font-medium">
                 <h2>{fullName(profile.data.customer)}</h2>
                 <ClassificationBadge classification={profile.data.customer.classification} />
               </CardTitle>
-              {canEdit && (
-                <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
-                  <Pencil aria-hidden />
-                  Edit details
-                </Button>
-              )}
+              <div className="flex items-center gap-1">
+                {/* An erased tombstone is not refilled; a held chart still takes a DOB fix. */}
+                {canEdit &&
+                  (!profile.data.customer.suppressed || profile.data.customer.erasure?.held) && (
+                    <Button variant="outline" size="sm" onClick={() => setEditing(true)}>
+                      <Pencil aria-hidden />
+                      Edit details
+                    </Button>
+                  )}
+                {canErase && !profile.data.customer.suppressed && (
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="icon-sm" aria-label="More actions">
+                        <Ellipsis aria-hidden />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem variant="destructive" onSelect={() => setErasing(true)}>
+                        <Eraser aria-hidden /> Request erasure
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                )}
+              </div>
             </CardHeader>
             <CardContent>
               <dl className="grid gap-x-8 gap-y-3 sm:grid-cols-3">
@@ -386,6 +422,9 @@ export function ClientPage() {
           {editing && (
             <ClientEditDialog customer={profile.data.customer} onClose={() => setEditing(false)} />
           )}
+          {erasing && (
+            <ErasureDialog customer={profile.data.customer} onClose={() => setErasing(false)} />
+          )}
 
           <section aria-labelledby="visits" className="space-y-2">
             <h2 id="visits" className="text-base font-medium">
@@ -421,6 +460,135 @@ export function ClientPage() {
           {canAudit && <AccessHistory customerId={id} adminMode={user?.mode === 'admin'} />}
         </>
       )}
+    </div>
+  )
+}
+
+/**
+ * What an erasure request will do, said before it is sent (ADR-0001 §3, pre-flight D5b). The
+ * split is the chart's retention hold, which the profile already carries: held, and the name,
+ * DOB and visits stay until the hold ends; not held, and only the visits stay, against an
+ * anonymous record. Contact details, both contacts and notes go either way.
+ */
+function ErasureDialog({ customer, onClose }: { customer: CustomerDetail; onClose: () => void }) {
+  const queryClient = useQueryClient()
+  const [note, setNote] = useState('')
+  const held = customer.retention.status !== 'not_held'
+  const erase = useMutation({
+    mutationFn: () => requestErasure(customer.id, note.trim() || null),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: [...PROFILE, customer.id] })
+      queryClient.invalidateQueries({ queryKey: CUSTOMERS })
+      toast.success('Erasure recorded')
+      onClose()
+    },
+  })
+  const removed = [
+    ...(held ? [] : ['Name — replaced with “Erased Client”', 'Date of birth']),
+    'Email and phone',
+    'Emergency and secondary contacts',
+    'Notes',
+    ...(held ? [] : ["The client's document key — every stored document becomes unreadable"]),
+  ]
+  const kept = held
+    ? ['Name', 'Date of birth', 'Visit history']
+    : ["Visit history, against an anonymous record — appointments are the business's own records"]
+  const why =
+    customer.retention.status === 'held' && customer.retention.expires_on
+      ? `Regulated health record, held until ${formatDob(customer.retention.expires_on)}; destroyed automatically after that.`
+      : customer.retention.status === 'held' || customer.retention.status === 'needs_dob'
+        ? 'Regulated health record with no end date yet — held until a date of birth is recorded.'
+        : 'Not under a retention hold, so everything personal goes now.'
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Erase this client?</DialogTitle>
+          <DialogDescription>
+            {fullName(customer)} will disappear from the client list, search and booking. This
+            cannot be undone.
+          </DialogDescription>
+        </DialogHeader>
+        <p className="text-sm">{why}</p>
+        <div className="grid gap-4 text-sm sm:grid-cols-2">
+          <div>
+            <h3 id="erase-removed" className="font-medium">
+              Removed now
+            </h3>
+            <ul aria-labelledby="erase-removed" className="mt-1 list-disc space-y-0.5 pl-5">
+              {removed.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </div>
+          <div>
+            <h3 id="erase-kept" className="font-medium">
+              Kept
+            </h3>
+            <ul aria-labelledby="erase-kept" className="mt-1 list-disc space-y-0.5 pl-5">
+              {kept.map((item) => (
+                <li key={item}>{item}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+        <FormField label="Note (optional)" htmlFor="erase-note">
+          <Textarea
+            id="erase-note"
+            maxLength={2000}
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="How the client asked"
+          />
+        </FormField>
+        {erase.isError && <FormError>{erase.error.message}</FormError>}
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={erase.isPending}
+            onClick={() => erase.mutate()}
+          >
+            Erase client
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** After an erasure request: what was kept and why, in the words the client was given. */
+function ErasureBanner({ erasure }: { erasure: Erasure }) {
+  return (
+    <div
+      role="status"
+      aria-label="Erasure requested"
+      className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm"
+    >
+      <ShieldOff aria-hidden className="mt-0.5 size-4 shrink-0 text-destructive" />
+      <div className="space-y-1">
+        <p className="font-medium">
+          Erasure requested on{' '}
+          <time dateTime={erasure.requested_at}>{shortDate(erasure.requested_at)}</time>
+        </p>
+        {erasure.held ? (
+          <p>
+            Retained: {erasure.retained.join(', ')}. {erasure.held_reason}.
+          </p>
+        ) : (
+          <p>
+            Nothing personal is retained. Visit history stays against an anonymous record,
+            because appointments are the business's own records.
+          </p>
+        )}
+        <p className="text-muted-foreground">
+          This client is hidden from the client list, search and booking.
+        </p>
+      </div>
     </div>
   )
 }

@@ -1,0 +1,201 @@
+import { screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, expect, test, vi } from 'vitest'
+import { renderApp, stubApi, type Call } from './harness'
+
+afterEach(() => vi.unstubAllGlobals())
+
+/**
+ * Erasure on the client profile (Task 7, ADR-0001 §3). What is worth pinning: the action is
+ * in the profile's overflow menu for an Admin Mode holder of `customers.erase` and nowhere
+ * else; the confirm dialog says, before anything is sent, exactly what goes and what stays —
+ * which depends on whether the chart is under a retention hold; and afterwards a banner on
+ * the profile states what was kept and until when.
+ */
+
+const DETAIL = {
+  id: 'c1',
+  first_name: 'Priya',
+  last_name: 'Nair',
+  email: 'priya@example.com',
+  phone: '4165550199',
+  created_at: '2026-01-05T15:00:00Z',
+  classification: 'new' as const,
+  date_of_birth: '2014-03-14',
+  emergency_contact_name: 'Ravi Nair',
+  emergency_contact_phone: null,
+  emergency_contact_relationship: null,
+  secondary_contact_name: null,
+  secondary_contact_phone: null,
+  secondary_contact_email: null,
+  notes: 'Prefers the corner room.',
+  updated_at: '2026-01-05T15:00:00Z',
+  retention: { status: 'not_held', expires_on: null as string | null },
+  suppressed: false,
+  erasure: null as object | null,
+}
+
+const HELD = { status: 'held', expires_on: '2042-03-14' }
+
+const ERASED_HELD = {
+  id: 'r1',
+  requested_at: '2026-09-21T15:00:00Z',
+  held: true,
+  held_until: '2042-03-14',
+  held_reason: 'Regulated health record — retained until 14 Mar 2042, then destroyed',
+  retained: ['Name', 'Date of birth', 'Visit history'],
+  purged_at: null,
+}
+
+const ME = {
+  id: 'u1',
+  email: 'owner@cedar.example',
+  role: 'Administrator',
+  capabilities: ['admin', 'customers.view', 'customers.manage', 'customers.erase'],
+  mode: 'admin',
+  can_switch_modes: true,
+  admin_grant_expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
+  admin_hard_limit_at: new Date(Date.now() + 30 * 60_000).toISOString(),
+  must_change_password: false,
+  mfa: {
+    enrolled: true,
+    method: 'totp',
+    pending: false,
+    enrolment_required: false,
+    verified_at: null,
+    email_otp_allowed: false,
+  },
+}
+
+const STAFF_MODE = { ...ME, mode: 'staff', admin_grant_expires_at: null, admin_hard_limit_at: null }
+
+function fake({ me = ME as object, customer = DETAIL as object } = {}) {
+  let current: Record<string, unknown> = { ...customer }
+  return stubApi({
+    signedIn: true,
+    dualRole: false,
+    respond: (url: string) => {
+      const path = new URL(url, 'http://test').pathname
+      if (url === '/api/auth/me') return Response.json(me)
+      if (path === '/api/customers/c1/erasure') {
+        const held = (current.retention as { status: string }).status !== 'not_held'
+        const erasure = held
+          ? ERASED_HELD
+          : { ...ERASED_HELD, held: false, held_until: null, held_reason: null, retained: [] }
+        current = held
+          ? { ...current, email: null, phone: null, notes: null, suppressed: true, erasure }
+          : {
+              ...current,
+              first_name: 'Erased',
+              last_name: 'Client',
+              date_of_birth: null,
+              email: null,
+              phone: null,
+              notes: null,
+              suppressed: true,
+              erasure,
+            }
+        return Response.json(erasure, { status: 201 })
+      }
+      if (path === '/api/customers/c1') {
+        return Response.json({ customer: current, timezone: 'America/Toronto', appointments: [] })
+      }
+      return undefined
+    },
+  })
+}
+
+const erasureCalls = (calls: Call[]) => calls.filter((c) => c.url.endsWith('/erasure'))
+
+async function openDialog() {
+  const user = userEvent.setup()
+  renderApp('/clients/c1')
+  // By keyboard: after one render in a module, a Radix `DropdownMenu` stops answering a fresh
+  // `userEvent.setup()`'s pointerdown (see `schedule-lifecycle-complete.test.tsx`). Enter on
+  // the focused trigger is also the path a keyboard user takes.
+  ;(await screen.findByRole('button', { name: 'More actions' })).focus()
+  await user.keyboard('{Enter}')
+  await user.click(await screen.findByRole('menuitem', { name: 'Request erasure' }))
+  return { user, dialog: await screen.findByRole('dialog', { name: 'Erase this client?' }) }
+}
+
+test('with no hold, the dialog says names and DOB go too, and nothing is sent until confirmed', async () => {
+  const { calls } = fake()
+  const { user, dialog } = await openDialog()
+
+  expect(within(dialog).getByText(/Not under a retention hold/)).toBeInTheDocument()
+  const removed = within(dialog).getByRole('list', { name: 'Removed now' })
+  for (const item of [/Name/, /Date of birth/, /Email and phone/, /contacts/, /Notes/, /document key/]) {
+    expect(within(removed).getByText(item)).toBeInTheDocument()
+  }
+  const kept = within(dialog).getByRole('list', { name: 'Kept' })
+  expect(within(kept).getByText(/Visit history/)).toBeInTheDocument()
+  expect(within(kept).queryByText(/Date of birth/)).not.toBeInTheDocument()
+  expect(erasureCalls(calls)).toHaveLength(0)
+
+  await user.type(within(dialog).getByLabelText('Note (optional)'), 'Asked by phone')
+  await user.click(within(dialog).getByRole('button', { name: 'Erase client' }))
+
+  await waitFor(() => expect(erasureCalls(calls)).toHaveLength(1))
+  expect(erasureCalls(calls)[0].body).toEqual({ note: 'Asked by phone' })
+  const banner = await screen.findByRole('status', { name: 'Erasure requested' })
+  expect(banner).toHaveTextContent(/Nothing personal is retained/)
+  expect(await screen.findByRole('heading', { name: 'Erased Client' })).toBeInTheDocument()
+})
+
+test('under a hold, the dialog says what is kept, why and until when', async () => {
+  fake({ customer: { ...DETAIL, retention: HELD } })
+  const { dialog } = await openDialog()
+
+  expect(within(dialog).getByText(/regulated health record/i)).toHaveTextContent(/2042/)
+  const removed = within(dialog).getByRole('list', { name: 'Removed now' })
+  expect(within(removed).queryByText(/^Name/)).not.toBeInTheDocument()
+  expect(within(removed).getByText(/Email and phone/)).toBeInTheDocument()
+  const kept = within(dialog).getByRole('list', { name: 'Kept' })
+  for (const item of [/Name/, /Date of birth/, /Visit history/]) {
+    expect(within(kept).getByText(item)).toBeInTheDocument()
+  }
+})
+
+test('a chart held with no date of birth says it is held until one is recorded', async () => {
+  fake({ customer: { ...DETAIL, date_of_birth: null, retention: { status: 'needs_dob', expires_on: null } } })
+  const { dialog } = await openDialog()
+
+  expect(within(dialog).getByText(/until a date of birth is recorded/)).toBeInTheDocument()
+})
+
+test('an erased, held profile shows the banner with what is kept and the date', async () => {
+  fake({
+    customer: {
+      ...DETAIL,
+      email: null,
+      phone: null,
+      notes: null,
+      retention: HELD,
+      suppressed: true,
+      erasure: ERASED_HELD,
+    },
+  })
+  renderApp('/clients/c1')
+
+  const banner = await screen.findByRole('status', { name: 'Erasure requested' })
+  expect(banner).toHaveTextContent('Retained: Name, Date of birth, Visit history')
+  expect(banner).toHaveTextContent('retained until 14 Mar 2042, then destroyed')
+  expect(banner).toHaveTextContent(/hidden from the client list/)
+  // Already erased: nothing to ask for again.
+  expect(screen.queryByRole('button', { name: 'More actions' })).not.toBeInTheDocument()
+})
+
+test('outside Admin Mode, or without the capability, there is no erasure action', async () => {
+  fake({ me: STAFF_MODE })
+  const { unmount } = renderApp('/clients/c1')
+  await screen.findByRole('heading', { name: 'Priya Nair' })
+  expect(screen.queryByRole('button', { name: 'More actions' })).not.toBeInTheDocument()
+  unmount()
+  vi.unstubAllGlobals()
+
+  fake({ me: { ...ME, capabilities: ['admin', 'customers.view', 'customers.manage'] } })
+  renderApp('/clients/c1')
+  await screen.findByRole('heading', { name: 'Priya Nair' })
+  expect(screen.queryByRole('button', { name: 'More actions' })).not.toBeInTheDocument()
+})

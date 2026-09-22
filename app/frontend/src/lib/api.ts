@@ -1158,6 +1158,22 @@ export type CustomerDetail = CustomerRecord & {
   /** When this chart may be destroyed (ADR-0001). `expires_on` is a business-local date,
    *  only for `held`; `needs_dob` is held indefinitely until a date of birth is added. */
   retention: { status: 'held' | 'not_held' | 'needs_dob'; expires_on: string | null }
+  /** Erasure was requested: hidden from the list, search and booking. */
+  suppressed: boolean
+  /** What was kept and why — null until an erasure is requested. */
+  erasure: Erasure | null
+}
+
+/** An erasure request's outcome (ADR-0001 §3). `retained` is empty when nothing is held;
+ *  `held_until` is a business-local date, null for an indefinite hold (no DOB on file). */
+export type Erasure = {
+  id: string
+  requested_at: string
+  held: boolean
+  held_until: string | null
+  held_reason: string | null
+  retained: string[]
+  purged_at: string | null
 }
 
 export type CustomerProfile = {
@@ -1239,6 +1255,14 @@ export type CustomerPatch = Partial<{
 export async function updateCustomer(id: string, patch: CustomerPatch): Promise<CustomerRecord> {
   const res = await send('PATCH', `/api/customers/${encodeURIComponent(id)}`, patch)
   if (!res.ok) throw await failure(res, 'Could not save this client')
+  return res.json()
+}
+
+/** Admin Mode + `customers.erase`. Irreversible: removes what is not held at once, and the
+ *  answer says what was kept and why. Its response is a PHI access on the server. */
+export async function requestErasure(id: string, note: string | null): Promise<Erasure> {
+  const res = await post(`/api/customers/${encodeURIComponent(id)}/erasure`, { note })
+  if (!res.ok) throw await failure(res, 'Could not erase this client')
   return res.json()
 }
 
