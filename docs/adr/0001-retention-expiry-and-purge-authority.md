@@ -46,6 +46,18 @@ Each customer has a data encryption key in `customer_document_keys`, wrapped by 
 
 **6. Every purge writes to the audit log** — the fact of erasure and its authority, never the erased content.
 
+## Amendment — 2026-09-21 (M2 Task 7, #42): rules the document phases must follow
+
+Written when the erasure path shipped, before any document table exists. **Rule 7 is a Phase 8 blocker:** `store_document` does not merge until it holds.
+
+**7. Every document row references `customer_document_keys(customer_id)` by foreign key, with no cascade, and any retention-hold change is committed in the same transaction as the document insert.**
+
+Why: the key's guard trigger (0024) reads the client's hold *without a lock* — the purge role cannot lock `customers` (`FOR SHARE` needs `UPDATE`, which the purge role must never hold). So a hold committed in the same instant as a purge `DELETE` could be missed. The foreign key closes that window: inserting a document takes `FOR KEY SHARE` on the key row, and the purge's `DELETE` of that row needs a conflicting lock, so the two serialise. If the document insert and the hold it creates (`retention.record_clinical_entry`) commit together, the purge either runs first (and the insert then fails on the missing key — the caller retries, `data_key` makes a new key, and the new hold protects it) or runs after (and sees the new hold, and the trigger refuses). Without the FK, or with the hold committed separately, neither is guaranteed. No `ON DELETE CASCADE`: a cascade runs as the table owner, which the guard lets through.
+
+**8. The purge transaction's order is fixed:** the `audit_events` row, then the client's documents, then the key — all in one `linsuite_purge` transaction (`customers/tasks.py::_shred`, which carries the hook where Phase 8's document delete goes). Profile anonymisation follows in an app-role transaction, because the purge role holds `UPDATE` on nothing. Eligibility stays enforced by the database triggers, not only by the job's own queries.
+
+**9. A restore brings shredded keys back.** Backups taken before a purge still contain the wrapped keys it destroyed. After any restore, run `customers.tasks.purge_expired` before the system is used again; it is idempotent, re-shreds every key whose hold has passed, and finishes every unheld erasure request (`docs/tech-stack.md` §10).
+
 ## Consequences
 
 **Positive**

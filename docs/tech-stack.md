@@ -135,6 +135,7 @@ Cancelled invoices are retained rather than deleted: CRA requires business recor
 | Insider deletes consent records | Append-only trigger plus audit log |
 | Backups silently stopped months ago | Healthcheck ping after each run; alert if no success in 36 hours |
 
+* **After any restore, re-run the purge.** A backup taken before an erasure or an expiry purge still holds the wrapped document keys that purge destroyed, so restoring it quietly un-shreds them. Before the restored system is used: `celery -A core.celery_app call customers.tasks.purge_expired` (or wait for the nightly 03:30 UTC run, if the gap is acceptable). It is idempotent — it re-destroys every key whose hold has passed and finishes every unheld erasure request, writing audit rows only for what it actually deletes (ADR-0001 rule 9). Object-locked backups themselves are not rewritten; their copies age out with the retention window.
 * **Trigger to revisit:** a tenant for whom a lost day is unacceptable — add continuous WAL archiving for point-in-time recovery (minutes RPO instead of 24 hours).
 
 ## 11. Observability: **structured JSON logs**
@@ -249,6 +250,7 @@ PIPEDA grants **no general right to erasure** — it requires destruction when d
 * **A deletion request never deletes records under a live retention hold.** It creates an `erasure_request`, immediately purges what is not held (marketing preferences, contact details beyond the record, non-clinical notes), and suppresses the profile from active views. The client is told what is retained and why, which is the legally correct answer rather than a fudge.
 * **Immutable does not mean forever.** Retaining data indefinitely is itself a PIPEDA violation, so a purge path must exist — but the application role has `DELETE` revoked on those tables. A **separate privileged purge role** runs the expiry job, deletes expired rows, and records the erasure in the audit log (the fact, never the data). This is the only path permitted to delete from immutable tables.
 * **Crypto-shredding:** a per-customer document key means purging can destroy the key rather than rewriting partitioned tables.
+* **As built (M2 #42):** `POST /api/customers/{id}/erasure` (`customers.erase`, Admin Mode) purges contacts and notes at once, names and DOB too when nothing holds them, and suppresses the profile from lists, search and booking; a Celery task on the purge role destroys the key. The beat service runs `customers.tasks.purge_expired` nightly at 03:30 UTC: it finishes requests whose hold has passed and destroys the key of every client whose hold has expired — without anonymising a profile nobody asked to erase.
 
 Retention periods are configuration, not constants — each client confirms them with their own college or counsel.
 
