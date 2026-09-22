@@ -14,6 +14,10 @@ Create Date: 2026-09-21
   retention hold — `retention_expires_at IS NULL OR < now()`, and `'infinity'` is never
   `< now()`. Everything else is `insufficient_privilege`. Revoked *and* trigger-guarded, like
   `audit_events`, because a grant and a trigger are undone by different mistakes.
+- The guard pins `search_path = pg_catalog, pg_temp` and qualifies every relation, as 0021
+  does: both runtime roles hold TEMP, and `pg_temp` is otherwise searched first, so a temp
+  `customers` or `pg_class` could answer the guard's questions for it. Same pin, via
+  `ALTER FUNCTION`, for the two append-only guards from 0004 and 0019.
 - The FK has no `ON DELETE CASCADE`: a cascade runs as the table owner, which the guard lets
   through, so deleting the customer would be a way round it.
 
@@ -35,6 +39,8 @@ down_revision: str | None = "0023"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+AUDIT_GUARDS = ("public.audit_events_append_only()", "public.audit_access_log_append_only()")
+
 
 def upgrade() -> None:
     op.create_table(
@@ -52,10 +58,12 @@ def upgrade() -> None:
 
     op.execute(
         """
-        CREATE OR REPLACE FUNCTION customer_document_keys_guard() RETURNS trigger AS $$
+        CREATE OR REPLACE FUNCTION public.customer_document_keys_guard() RETURNS trigger
+        SET search_path = pg_catalog, pg_temp
+        AS $$
         BEGIN
             IF current_user = (
-                SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = TG_RELID
+                SELECT pg_get_userbyid(relowner) FROM pg_catalog.pg_class WHERE oid = TG_RELID
             ) THEN
                 RETURN CASE TG_OP WHEN 'DELETE' THEN OLD ELSE NEW END;
             END IF;
@@ -64,7 +72,7 @@ def upgrade() -> None:
             -- committed in the same instant as the purge's DELETE can be missed; if Phase 8
             -- makes that window real, take the lock in a SECURITY DEFINER helper.
             IF TG_OP = 'DELETE' AND current_user = 'linsuite_purge' AND EXISTS (
-                SELECT 1 FROM customers
+                SELECT 1 FROM public.customers
                 WHERE id = OLD.customer_id
                   AND (retention_expires_at IS NULL OR retention_expires_at < now())
             ) THEN
@@ -80,15 +88,23 @@ def upgrade() -> None:
         """
         CREATE TRIGGER customer_document_keys_guard
         BEFORE UPDATE OR DELETE ON customer_document_keys
-        FOR EACH ROW EXECUTE FUNCTION customer_document_keys_guard();
+        FOR EACH ROW EXECUTE FUNCTION public.customer_document_keys_guard();
         """
     )
+    # The two append-only guards (0004, 0019) read `pg_class` unqualified for their owner
+    # check, and `pg_temp` is searched before `pg_catalog` — a temp `pg_class` naming the caller
+    # the owner walked straight through them. Their bodies name nothing else, so pinning the
+    # path is the whole fix.
+    for function in AUDIT_GUARDS:
+        op.execute(f"ALTER FUNCTION {function} SET search_path = pg_catalog, pg_temp")
 
     op.execute("GRANT INSERT ON audit_events TO linsuite_purge")
 
 
 def downgrade() -> None:
+    for function in AUDIT_GUARDS:
+        op.execute(f"ALTER FUNCTION {function} RESET search_path")
     op.execute("REVOKE INSERT ON audit_events FROM linsuite_purge")
     op.execute("DROP TRIGGER IF EXISTS customer_document_keys_guard ON customer_document_keys")
-    op.execute("DROP FUNCTION IF EXISTS customer_document_keys_guard()")
+    op.execute("DROP FUNCTION IF EXISTS public.customer_document_keys_guard()")
     op.drop_table("customer_document_keys")

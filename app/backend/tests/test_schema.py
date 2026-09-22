@@ -199,6 +199,60 @@ async def test_audit_events_no_rewrite_refuses_an_update_even_with_the_grant_res
     assert getattr(still_refused.value.orig, "sqlstate", None) == "42501"
 
 
+# Every trigger function that decides *who* may rewrite or delete. Each reads a relation by
+# name (`pg_class` for the owner check, `public.customers` for the hold), and an unpinned
+# `search_path` searches `pg_temp` first — so a role with TEMP could shadow it (0024).
+GUARD_FUNCTIONS = (
+    "audit_events_append_only",
+    "audit_access_log_append_only",
+    "customer_document_keys_guard",
+)
+
+
+@pytest.mark.parametrize("function", GUARD_FUNCTIONS)
+async def test_each_guard_function_pins_its_search_path(database, function):
+    async with session_scope() as db:
+        config = await db.scalar(
+            text("SELECT proconfig FROM pg_proc WHERE proname = :f"), {"f": function}
+        )
+    assert config == ["search_path=pg_catalog, pg_temp"]
+
+
+async def test_a_temp_pg_class_cannot_make_the_app_role_the_owner_of_audit_events(database):
+    """The owner check reads `pg_class`. Shadowed by a temp table that names `linsuite_app`
+    the owner, an unpinned function would let the app through — with the grant restored (in a
+    rolled-back owner transaction, as above) so the refusal can only be the trigger's."""
+    owner = create_async_engine(get_settings().database_url_migrate)
+    try:
+        async with owner.connect() as conn:
+            await conn.begin()
+            try:
+                await conn.execute(text("GRANT UPDATE ON audit_events TO linsuite_app"))
+                await conn.execute(
+                    text(
+                        "INSERT INTO audit_events (event_type, target_type) "
+                        "VALUES ('probe', 'probe')"
+                    )
+                )
+                await conn.execute(text("SET ROLE linsuite_app"))
+                await conn.execute(text("CREATE TEMP TABLE pg_class (oid oid, relowner oid)"))
+                await conn.execute(
+                    text(
+                        "INSERT INTO pg_class SELECT c.oid, r.oid FROM pg_catalog.pg_class c, "
+                        "pg_catalog.pg_roles r WHERE c.relname = 'audit_events' "
+                        "AND r.rolname = 'linsuite_app'"
+                    )
+                )
+                with pytest.raises(DBAPIError) as refused:
+                    await conn.execute(text("UPDATE audit_events SET event_type = 'x'"))
+                assert getattr(refused.value.orig, "sqlstate", None) == "42501", refused.value
+                assert "append-only" in str(refused.value)
+            finally:
+                await conn.rollback()
+    finally:
+        await owner.dispose()
+
+
 # --- the 403 invariant, self-discovering (fix wave, finding 20) ------------------------------
 #
 # `tests/test_rbac.py` walks the 403s the API actually emits and proves each names its kind.

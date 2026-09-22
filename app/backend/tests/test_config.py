@@ -57,6 +57,14 @@ def test_a_key_that_is_not_32_bytes_of_hex_is_refused(field):
         settings(**{field: "11" * 16})
 
 
+def test_the_document_master_key_must_differ_from_the_mfa_key():
+    with pytest.raises(ValidationError) as refused:
+        settings(document_master_key="11" * 32)
+    assert "must be different keys" in str(refused.value)
+    with pytest.raises(ValidationError):
+        settings(document_master_key="AB" * 32, mfa_encryption_key="ab" * 32)
+
+
 def test_the_document_master_key_is_required(monkeypatch):
     # The harness exports a valid one for the whole session; this test is about its absence.
     monkeypatch.delenv("DOCUMENT_MASTER_KEY", raising=False)

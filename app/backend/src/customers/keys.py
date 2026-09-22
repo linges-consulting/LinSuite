@@ -37,6 +37,8 @@ DEK_BYTES = crypto.KEY_BYTES
 
 
 def wrap(dek: bytes, customer_id: uuid.UUID, master_key: str) -> str:
+    # Deferred: binding `master_key_version` into the associated data too belongs to the
+    # rotation ticket — adding it now would make every key already wrapped unreadable.
     return crypto.encrypt(dek.hex(), master_key, customer_id.bytes)
 
 

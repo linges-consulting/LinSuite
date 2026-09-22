@@ -150,12 +150,22 @@ async def test_the_api_never_returns_a_key(client):
     await as_admin(client)
     customer_id = await make_customer(client)
     key = await data_key(customer_id)
+    async with session_scope() as db:
+        wrapped = await db.scalar(
+            text("SELECT wrapped_key FROM customer_document_keys WHERE customer_id = :id"),
+            {"id": customer_id},
+        )
+    forms = (key.hex(), key.hex().upper(), base64.b64encode(key).decode(), wrapped)
 
-    profile = await client.get(f"{CUSTOMERS}/{customer_id}")
-
-    assert profile.status_code == 200, profile.text
-    assert "key" not in profile.text.lower()
-    assert key.hex() not in profile.text
+    for resp in (
+        await client.get(f"{CUSTOMERS}/{customer_id}"),
+        await client.get(CUSTOMERS),
+        await client.get(CUSTOMERS, params={"q": "nai"}),
+    ):
+        assert resp.status_code == 200, resp.text
+        assert customer_id in resp.text  # the customer really was in the response
+        for form in forms:
+            assert form not in resp.text
 
 
 async def test_a_customer_from_before_the_table_gets_a_key_on_first_use(client):
@@ -291,3 +301,47 @@ async def test_the_purge_role_can_write_the_fact_of_a_purge_into_audit_events(cl
             )
         )
         await purge.rollback()
+
+
+# A trigger function runs with the caller's `search_path`, and `pg_temp` is searched before
+# everything else — `pg_catalog` included — for any relation name it does not qualify. A
+# role with TEMP (both have it) could shadow the table the guard reads and write its own
+# answer. The guard pins `search_path = pg_catalog, pg_temp` and qualifies `public.customers`.
+SHADOWS = {
+    # "This customer is not held."
+    "customers": (
+        "CREATE TEMP TABLE customers (id uuid, retention_expires_at timestamptz)",
+        "INSERT INTO customers VALUES (cast(:id AS uuid), NULL)",
+    ),
+    # "The purge role owns the table" — the owner branch lets everything through.
+    "pg_class": (
+        "CREATE TEMP TABLE pg_class (oid oid, relowner oid)",
+        "INSERT INTO pg_class SELECT c.oid, r.oid FROM pg_catalog.pg_class c, "
+        "pg_catalog.pg_roles r WHERE c.relname = 'customer_document_keys' "
+        "AND r.rolname = 'linsuite_purge' AND cast(:id AS uuid) IS NOT NULL",
+    ),
+}
+
+
+@pytest.mark.parametrize("shadowed", sorted(SHADOWS))
+async def test_a_temp_table_cannot_talk_the_guard_into_destroying_a_held_key(client, shadowed):
+    customer_id = await keyed_customer("infinity")
+    create, fill = SHADOWS[shadowed]
+
+    async with get_purge_engine().connect() as purge:
+        await purge.begin()
+        try:
+            await purge.execute(text(create))
+            await purge.execute(text(fill), {"id": customer_id})
+            with pytest.raises(DBAPIError) as refused:
+                await purge.execute(
+                    text("DELETE FROM customer_document_keys WHERE customer_id = :id"),
+                    {"id": customer_id},
+                )
+        finally:
+            # The temp table goes with the transaction; the pooled connection stays clean.
+            await purge.rollback()
+
+    assert sqlstate(refused.value) == "42501"
+    assert "customer_document_keys: DELETE is not permitted" in str(refused.value)
+    assert await key_rows(customer_id) == 1

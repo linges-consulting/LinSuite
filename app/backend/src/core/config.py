@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import ValidationInfo, field_validator
+from pydantic import ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # What `.env.example` ships in place of a secret, and the one command that replaces it. The
@@ -133,6 +133,17 @@ class Settings(BaseSettings):
                 f"Generate one with: {GENERATE}"
             )
         return value
+
+    @model_validator(mode="after")
+    def _separate_keys(self) -> "Settings":
+        # One value in both would tie the TOTP secrets and every client's documents to one
+        # secret: a leak of either is a leak of both, and escrow loses its second copy.
+        if self.document_master_key.lower() == self.mfa_encryption_key.lower():
+            raise ValueError(
+                "DOCUMENT_MASTER_KEY and MFA_ENCRYPTION_KEY must be different keys. "
+                f"Generate each with its own: {GENERATE}"
+            )
+        return self
 
 
 @lru_cache
