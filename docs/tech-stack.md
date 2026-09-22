@@ -44,6 +44,7 @@ Decisions are final unless a documented trigger says otherwise. Each entry recor
 * **Decision:** Heavy tables (appointments, documents, audit log) use native PostgreSQL declarative partitioning by year. Old data stays in the same database.
 * **Why:** The requirement's actual goal is keeping operational queries fast. Partitioning achieves that directly — date-filtered queries touch only the current partition — without a second storage system to back up and restore consistently. This removes the archive-tiering background worker from scope entirely.
 * **If the database does become too large:** detach an old partition and dump it to an encrypted file. A runbook step, not a service.
+* **How partitions appear:** `ensure_access_log_partitions()` (migration 0021), a `SECURITY DEFINER` function the app role may execute but not replicate, creates this year's and next year's partitions if missing; the app calls it on every boot and the Celery `beat` service triggers it nightly at 03:15 UTC. `beat` must be running — on-prem included, it is part of the compose stack — or next year's partition only appears when the app next restarts.
 
 ## 4. Background Workers & Task Processing: **Celery (Python)**
 
@@ -84,7 +85,7 @@ Cancelled invoices are retained rather than deleted: CRA requires business recor
 
 ## 8. Infrastructure: **Docker Compose + Traefik / Nginx + DigitalOcean or on-prem**
 
-* **Docker Compose:** Each deployment runs an isolated stack — `app`, `db`, `redis`, `worker`, `traefik`.
+* **Docker Compose:** Each deployment runs an isolated stack — `app`, `db`, `redis`, `worker`, `beat`, `traefik`. `beat` is the single Celery scheduler for nightly jobs (partition creation, retention purge); run exactly one.
 * **Traefik or Nginx:** Reverse proxy handling SSL/TLS 1.3 termination (Let's Encrypt), routing, and security headers.
 * **DigitalOcean:** Standard hosting target, Canadian regions (Toronto/Montreal) for data residency.
 * **On-prem:** Supported as a first-class deployment target. The same Compose stack runs on a customer's own server; only volume paths and TLS certificate issuance differ.
@@ -101,6 +102,7 @@ Cancelled invoices are retained rather than deleted: CRA requires business recor
 | Disk encryption at rest | Automatic (DO Volume LUKS AES-256) | Customer's responsibility — otherwise application-level PDF encryption is the only protection |
 | Backups | DO snapshots plus offsite restic | Customer must configure; highest-risk gap |
 | Disk capacity | Resize volume from console | Physical drive |
+| Scheduled jobs | `beat` service in the stack | Same — `beat` must be running; nothing else creates next year's access-log partition before the app restarts |
 | TLS certificates | Traefik + Let's Encrypt | No public DNS, so Let's Encrypt cannot validate — needs an internal CA or self-signed certificate |
 
 ## 9. Secrets Management: **`.env` + `pydantic-settings`**

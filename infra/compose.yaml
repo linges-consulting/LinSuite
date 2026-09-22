@@ -106,6 +106,16 @@ services:
     <<: *backend
     command: celery -A core.celery_app worker --loglevel=info
 
+  # The scheduler: enqueues the nightly jobs (`beat_schedule` in core/celery_app.py), which
+  # the worker runs. Exactly one, by design — its own service rather than `worker -B`, so
+  # scaling the worker never runs two schedulers. Part of the stack on-prem too: without it
+  # next year's access-log partition is only made when the app restarts. The schedule state
+  # goes to /tmp, which the non-root user can write; losing it on restart just means the
+  # next run is the next scheduled time.
+  beat:
+    <<: *backend
+    command: celery -A core.celery_app beat --loglevel=info --schedule /tmp/celerybeat-schedule
+
   # Vite dev server serving the React shell; a production image is a later task.
   frontend:
     image: node:24-alpine
