@@ -40,12 +40,19 @@ TABLE = "audit_access_log"
 SEQUENCE = f"{TABLE}_id_seq"
 
 
-def _create_partition(year: int) -> None:
-    op.execute(
+def partition_ddl(year: int) -> tuple[str, ...]:
+    # UTC-qualified: a zone-less bound is read in the migrating session's zone, and 0021's
+    # function creates later years in UTC — on a non-UTC server the two would overlap or gap.
+    return (
         f"CREATE TABLE {TABLE}_{year} PARTITION OF {TABLE} "
-        f"FOR VALUES FROM ('{year}-01-01') TO ('{year + 1}-01-01')"
+        f"FOR VALUES FROM ('{year}-01-01 00:00+00') TO ('{year + 1}-01-01 00:00+00')",
+        f"REVOKE UPDATE, DELETE ON {TABLE}_{year} FROM linsuite_app",
     )
-    op.execute(f"REVOKE UPDATE, DELETE ON {TABLE}_{year} FROM linsuite_app")
+
+
+def _create_partition(year: int) -> None:
+    for statement in partition_ddl(year):
+        op.execute(statement)
 
 
 def upgrade() -> None:

@@ -39,8 +39,15 @@ async def ensure_on_boot(engine: AsyncEngine) -> None:
 
     current = f"audit_access_log_{datetime.now(UTC).year}"
     async with engine.connect() as conn:
+        # Attached, not merely named — and schema-qualified, so neither a detached table nor
+        # a temp table of the same name answers for it.
         present = await conn.scalar(
-            text("SELECT to_regclass(:n) IS NOT NULL"), {"n": f"public.{current}"}
+            text(
+                "SELECT EXISTS (SELECT 1 FROM pg_inherits "
+                "WHERE inhparent = 'public.audit_access_log'::regclass "
+                "AND inhrelid = to_regclass(:n))"
+            ),
+            {"n": f"public.{current}"},
         )
     if not present:
         raise RuntimeError(f"{current} is missing: the access log cannot record, refusing to start")

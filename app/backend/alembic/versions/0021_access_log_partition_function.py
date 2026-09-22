@@ -20,7 +20,11 @@ What keeps a definer function from being a hole:
 * **Pinned `search_path`** (`pg_catalog, pg_temp`) and every name schema-qualified, so a
   caller cannot shadow a function or table the body resolves.
 * **`timezone` pinned to UTC**, so the year and the partition bounds do not depend on the
-  calling session. 0019 ran under the server default, which is UTC in the shipped image.
+  calling session; 0019's bounds are UTC-qualified to match. `default_tablespace` and
+  `default_table_access_method` are pinned too, so the caller cannot choose where or how
+  the owner's table is stored.
+* **Presence means attached** (`pg_inherits`), not a name: an unattached table of the same
+  name is an error, never silently taken for the partition.
 * **EXECUTE revoked from `PUBLIC`**, granted to `linsuite_app` only. Only the owner may
   `CREATE OR REPLACE` it.
 * **An advisory transaction lock** around check-then-create: `app` booting while beat runs
@@ -55,6 +59,8 @@ def upgrade() -> None:
         SECURITY DEFINER
         SET search_path = pg_catalog, pg_temp
         SET timezone = 'UTC'
+        SET default_tablespace = ''
+        SET default_table_access_method = heap
         AS $$
         DECLARE
             this_year int := extract(year FROM now())::int;
@@ -65,7 +71,17 @@ def upgrade() -> None:
             PERFORM pg_advisory_xact_lock(hashtext('public.ensure_access_log_partitions'));
             FOR y IN this_year .. this_year + 1 LOOP
                 child := 'audit_access_log_' || y;
-                CONTINUE WHEN to_regclass('public.' || child) IS NOT NULL;
+                -- Present means attached, not merely named: a detached partition or an
+                -- ordinary table of the same name must not be skipped as if it were one.
+                CONTINUE WHEN EXISTS (
+                    SELECT 1 FROM pg_inherits
+                    WHERE inhparent = 'public.audit_access_log'::regclass
+                      AND inhrelid = to_regclass('public.' || child)
+                );
+                IF to_regclass('public.' || child) IS NOT NULL THEN
+                    RAISE EXCEPTION 'public.% exists but is not a partition of audit_access_log',
+                        child USING ERRCODE = 'duplicate_table';
+                END IF;
                 EXECUTE format(
                     'CREATE TABLE public.%I PARTITION OF public.audit_access_log '
                     'FOR VALUES FROM (%L) TO (%L)',

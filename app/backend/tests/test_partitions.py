@@ -17,6 +17,7 @@ a missing partition.
 """
 
 import asyncio
+import importlib.util
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
@@ -27,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from core.config import get_settings
 from core.db import get_engine, session_scope
+from tests.conftest import BACKEND_DIR
 
 APP_ROLE, PURGE_ROLE = "linsuite_app", "linsuite_purge"
 FUNCTION = "public.ensure_access_log_partitions()"
@@ -60,10 +62,12 @@ async def _exists(name: str) -> bool:
             await db.scalar(
                 text(
                     "SELECT count(*) FROM pg_inherits "
-                    "WHERE inhparent = 'audit_access_log'::regclass "
+                    "WHERE inhparent = 'public.audit_access_log'::regclass "
                     "AND inhrelid = to_regclass(:n)"
                 ),
-                {"n": name},
+                # Qualified: a temp table of the same name on a pooled connection would
+                # otherwise shadow it.
+                {"n": f"public.{name}"},
             )
         )
 
@@ -183,6 +187,8 @@ async def test_the_privilege_is_the_functions_and_not_the_roles(owner):
     assert definer and nargs == 0 and owned_by_schema_owner
     # A definer function resolving names through a caller-controlled path is the classic hole.
     assert any(setting.startswith("search_path=") for setting in config), config
+    # Nor may the caller's session choose where, or in what format, the owner's table lands.
+    assert "default_tablespace=" in config and "default_table_access_method=heap" in config
     assert (app, purge, public) == (True, False, False)
 
 
@@ -210,19 +216,24 @@ async def test_boot_logs_and_starts_when_only_next_year_could_not_be_made(owner,
     assert "could not ensure audit_access_log partitions" in capsys.readouterr().out
 
 
-async def test_boot_refuses_to_start_without_this_years_partition(owner):
+async def test_a_same_named_table_that_is_not_a_partition_is_not_this_years_partition(owner):
+    """Presence means *attached*, not a name: a detached partition or an impostor in `public`
+    must neither be skipped by the function nor satisfy the boot check."""
     from main import app, lifespan
 
     async with owner.begin() as conn:
-        await conn.execute(text(f"REVOKE EXECUTE ON FUNCTION {FUNCTION} FROM {APP_ROLE}"))
         await conn.execute(text(f"ALTER TABLE audit_access_log DETACH PARTITION {CURRENT}"))
         await conn.execute(text(f"ALTER TABLE {CURRENT} RENAME TO {CURRENT}_aside"))
+        await conn.execute(text(f"CREATE TABLE public.{CURRENT} (id int)"))
     try:
+        with pytest.raises(DBAPIError, match="not a partition"):
+            await _call_as_app()
         with pytest.raises(RuntimeError, match=CURRENT):
             async with lifespan(app):
                 pass
     finally:
         async with owner.begin() as conn:
+            await conn.execute(text(f"DROP TABLE public.{CURRENT}"))
             await conn.execute(text(f"ALTER TABLE {CURRENT}_aside RENAME TO {CURRENT}"))
             await conn.execute(
                 text(
@@ -230,6 +241,54 @@ async def test_boot_refuses_to_start_without_this_years_partition(owner):
                     f"FOR VALUES FROM ('{THIS_YEAR}-01-01 UTC') TO ('{THIS_YEAR + 1}-01-01 UTC')"
                 )
             )
+
+
+# --- Bounds: UTC whatever the session's zone ---------------------------------------------
+
+
+def _migration_0019():
+    path = f"{BACKEND_DIR}/alembic/versions/0019_audit_access_log.py"
+    spec = importlib.util.spec_from_file_location("migration_0019", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _utc_bound(year: int) -> str:
+    return f"FOR VALUES FROM ('{year}-01-01 00:00:00+00') TO ('{year + 1}-01-01 00:00:00+00')"
+
+
+@pytest.mark.parametrize("zone", ["America/Vancouver", "Asia/Kolkata"])
+async def test_0019_and_the_function_agree_on_utc_bounds_in_any_session_zone(owner, zone):
+    """0019 ran in the migrating session's zone; the function pins UTC. On a non-UTC server a
+    zone-less bound makes them overlap (negative offset: next year is never created) or leave
+    a gap (positive: profile opens fail around New Year). All in one rolled-back transaction."""
+    migration = _migration_0019()
+    async with owner.connect() as conn:
+        await conn.begin()
+        try:
+            await conn.execute(text(f"DROP TABLE {CURRENT}, {NEXT}"))
+            await conn.execute(text(f"SET LOCAL TIME ZONE '{zone}'"))
+            for statement in migration.partition_ddl(THIS_YEAR):
+                await conn.execute(text(statement))
+            assert list(await conn.scalar(text(f"SELECT {FUNCTION}"))) == [NEXT]
+
+            # `pg_get_expr` renders in the session zone: read the bounds back in UTC.
+            await conn.execute(text("SET LOCAL TIME ZONE 'UTC'"))
+            bounds = dict(
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT c.relname, pg_get_expr(c.relpartbound, c.oid) "
+                            "FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid "
+                            "WHERE i.inhparent = 'public.audit_access_log'::regclass"
+                        )
+                    )
+                ).all()
+            )
+        finally:
+            await conn.rollback()
+    assert bounds == {CURRENT: _utc_bound(THIS_YEAR), NEXT: _utc_bound(THIS_YEAR + 1)}
 
 
 # --- Celery ------------------------------------------------------------------------------
