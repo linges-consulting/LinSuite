@@ -230,22 +230,25 @@ async def test_migration_0027_round_trips(database):
     assert await _form_templates() == (True, True, True, 1)
 
 
-async def _form_links() -> tuple[bool, int]:
+async def _form_links() -> tuple[bool, bool, int]:
     async with session_scope() as db:
         table = await db.scalar(text("SELECT to_regclass('form_links') IS NOT NULL"))
+        function = await db.scalar(
+            text("SELECT count(*) > 0 FROM pg_proc WHERE proname = 'form_links_guard'")
+        )
         holders = await db.scalar(
             text("SELECT count(*) FROM role_capabilities WHERE capability = 'forms.issue'")
         )
-    return bool(table), int(holders)
+    return bool(table), bool(function), int(holders)
 
 
 async def test_migration_0028_round_trips(database):
-    """0028 adds `form_links` and gives both seeded roles `forms.issue`; the downgrade takes
-    both back out, to the explicit revision."""
-    assert await _form_links() == (True, 2)
+    """0028 adds `form_links` with its guard trigger and gives both seeded roles
+    `forms.issue`; the downgrade takes all of it back out, to the explicit revision."""
+    assert await _form_links() == (True, True, 2)
 
     await _downgrade_to("0027")
-    assert await _form_links() == (False, 0)
+    assert await _form_links() == (False, False, 0)
 
     await _upgrade_to("0028")
-    assert await _form_links() == (True, 2)
+    assert await _form_links() == (True, True, 2)

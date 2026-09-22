@@ -1,6 +1,12 @@
-"""The public form page's API: `GET /api/public/forms/{token}` (Task 3, #46; pre-flight C6).
+"""The public form page's API: `POST /api/public/forms/lookup` (Task 3, #46; pre-flight C6).
 
 The product's first unauthenticated surface. Its rules:
+
+- **The token never sits in a request path.** A path is what every access log writes —
+  uvicorn's default access log would put `GET /api/public/forms/<token>` in the container
+  logs, a live link for anyone who can read them. So the lookup is a POST with the token in
+  a JSON body (fix round 1). As a POST it goes through the JSON-only guard, and `main.py`
+  adds the `Origin` check the upload paths have: only this deployment's page may ask.
 
 - **No auth dependency, no cookie.** Nothing here reads the staff session or could renew it,
   so a signed-in tablet and a client's phone get the same answer, and the response never
@@ -14,7 +20,9 @@ The product's first unauthenticated surface. Its rules:
   with `hmac.compare_digest`, belt to the index's braces.
 - **Guessing is infeasible and throttled.** 256-bit tokens; 30 lookups a minute per source
   address in Redis (`PUBLIC_LOOKUPS_PER_MINUTE`), the same figure Traefik's `public` router
-  applies at the edge. Redis down is a 503, never an unthrottled lookup.
+  applies at the edge. The address is the `X-Forwarded-For` Traefik overwrites; without
+  Traefik in front it is caller-chosen and this count is bypassable. Redis down is a 503,
+  never an unthrottled lookup.
 - **Minimal.** The pinned version's name and schema, the business's name and logo, the
   client's first name (for "Hi Priya") and the expiry. Nothing else of the profile.
 
@@ -27,7 +35,7 @@ opened, and when" is answerable without writing PHI anywhere.
 import hmac
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -45,6 +53,10 @@ router = APIRouter(prefix="/public", tags=["public"])
 
 # Longer than any token this app mints; anything longer is refused before it is hashed.
 _MAX_TOKEN = 128
+
+
+class LookupIn(BaseModel):
+    token: str
 
 
 class PublicBusiness(BaseModel):
@@ -67,7 +79,8 @@ def _invalid() -> JSONResponse:
     )
 
 
-async def _throttle(request: Request) -> None:
+async def throttle(request: Request) -> None:
+    """A dependency, so it runs before the body is validated: a malformed request counts too."""
     address = request.client.host if request.client else "unknown"
     key = f"public:forms:{address}"
     redis = get_redis()
@@ -81,9 +94,14 @@ async def _throttle(request: Request) -> None:
         )
 
 
-@router.get("/forms/{token}", response_model=PublicForm, response_model_by_alias=True)
-async def public_form(token: str, request: Request, db: SessionDep):
-    await _throttle(request)
+@router.post(
+    "/forms/lookup",
+    response_model=PublicForm,
+    response_model_by_alias=True,
+    dependencies=[Depends(throttle)],
+)
+async def public_form(payload: LookupIn, request: Request, db: SessionDep):
+    token = payload.token
     if len(token) > _MAX_TOKEN:
         return _invalid()
     wanted = digest(token)
@@ -108,7 +126,14 @@ async def public_form(token: str, request: Request, db: SessionDep):
         return _invalid()
 
     link_id, _, expires, version, first_name = row
-    record_event(db, "form.link_opened", target_type="form_link", target_id=str(link_id))
+    # Where it was opened from — the one fact that tells a forwarded link from the client's own.
+    record_event(
+        db,
+        "form.link_opened",
+        target_type="form_link",
+        target_id=str(link_id),
+        metadata={"ip": request.client.host if request.client else None},
+    )
     business = await branding_document(db)
     await db.commit()
     return PublicForm(

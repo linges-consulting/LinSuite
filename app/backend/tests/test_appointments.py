@@ -56,11 +56,11 @@ async def claimed_instance(client):
             await purge.execute(text("DELETE FROM audit_events"))
             # The app role may not delete an erasure request (0025); the purge role may.
             await purge.execute(text("DELETE FROM erasure_requests"))
+            # The app role may not delete a form link (0028); the purge role may.
+            await purge.execute(text("DELETE FROM form_links"))
         await wipe_document_keys()
         async with session_scope() as db:
             for table in (
-                # A link points at its client and its issuer (Task 3, #46).
-                "form_links",
                 "appointment_resources",
                 "appointments",
                 "customers",

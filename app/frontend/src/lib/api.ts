@@ -342,7 +342,13 @@ export async function uploadBrandingAsset(
 ): Promise<{ url: string; etag: string; width: number; height: number }> {
   const body = new FormData()
   body.append('file', file)
-  const res = await fetch(`/api/admin/business/${kind}`, { method: 'POST', body })
+  // `origin`, not the page's `no-referrer`: under `no-referrer` a browser sends `Origin: null`
+  // on a same-origin POST, and the server's upload check needs this deployment's origin.
+  const res = await fetch(`/api/admin/business/${kind}`, {
+    method: 'POST',
+    body,
+    referrerPolicy: 'origin',
+  })
   if (!res.ok) throw await failure(res, `Could not upload the ${kind}`)
   return res.json()
 }
@@ -1146,14 +1152,19 @@ export type PublicForm = {
 }
 
 /**
- * The public lookup. `credentials: 'omit'`: a staff browser opening a client's link must not
- * send its session along — the page is the client's, not the signed-in user's. The token
- * rides in the path, so no referrer and no cache either (the server says the same).
+ * The public lookup. The token goes in a JSON body, never the path: a path is what every
+ * access log writes down. `credentials: 'omit'`: a staff browser opening a client's link must
+ * not send its session along. `referrerPolicy: 'origin'` overrides the page's `no-referrer`
+ * for this one request, which would otherwise make the browser send `Origin: null` — and the
+ * server accepts this POST only from this deployment's origin. No path is sent either way.
  */
 export async function fetchPublicForm(token: string): Promise<PublicForm> {
-  const res = await fetch(`/api/public/forms/${encodeURIComponent(token)}`, {
+  const res = await fetch('/api/public/forms/lookup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
     credentials: 'omit',
-    referrerPolicy: 'no-referrer',
+    referrerPolicy: 'origin',
     cache: 'no-store',
   })
   if (!res.ok) throw await failure(res, 'Could not open the form')

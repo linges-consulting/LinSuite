@@ -44,12 +44,18 @@ from forms.models import FormLink, FormTemplate, FormTemplateVersion
 from notifications.tasks import send_email
 
 LIFETIME = timedelta(hours=48)
-# Per source address, per minute, on the public lookup (`public.py`). Traefik's `public`
-# router applies the same number at the edge; this one holds wherever the edge does not.
+# Per source address, per minute, on the public lookup (`public.py`), and Traefik's `public`
+# router applies the same number at the edge. The address here is what uvicorn trusts from
+# `X-Forwarded-For` (`FORWARDED_ALLOW_IPS="*"`), so this limit is per client only because
+# Traefik overwrites that header: without Traefik in front, a rotating header bypasses it.
 PUBLIC_LOOKUPS_PER_MINUTE = 30
 
 router = APIRouter(tags=["forms"])
 Issuer = Annotated[User, Depends(Requires("forms.issue"))]
+# The open-links list and the issue answer's `emailed_to` show form names (which can imply a
+# condition) and the client's address: a role that may send forms but not see clients gets
+# neither (fix round 1). Declared per route, beside `Issuer`.
+SEES_CLIENTS = [Depends(Requires("customers.view"))]
 
 
 # --- the token (S2) --------------------------------------------------------------------------
@@ -160,7 +166,7 @@ async def sendable_forms(_: Issuer, db: SessionDep) -> dict[str, list[SendableFo
     }
 
 
-@router.post("/customers/{customer_id}/form-links", status_code=201)
+@router.post("/customers/{customer_id}/form-links", status_code=201, dependencies=SEES_CLIENTS)
 async def issue_link(
     customer_id: uuid.UUID, payload: IssueIn, issuer: Issuer, db: SessionDep
 ) -> IssuedLink:
@@ -230,7 +236,7 @@ def _message(form_name: str, url: str) -> str:
     )
 
 
-@router.get("/customers/{customer_id}/form-links")
+@router.get("/customers/{customer_id}/form-links", dependencies=SEES_CLIENTS)
 async def open_links(customer_id: uuid.UUID, _: Issuer, db: SessionDep) -> OpenLinks:
     """Links still usable: not consumed, not revoked, not expired. Never the token."""
     rows = await db.execute(
@@ -262,7 +268,9 @@ async def open_links(customer_id: uuid.UUID, _: Issuer, db: SessionDep) -> OpenL
 async def revoke_link(
     customer_id: uuid.UUID, link_id: uuid.UUID, issuer: Issuer, db: SessionDep
 ) -> Response:
-    """One guarded `UPDATE`: an open link of *this* client, or 404."""
+    """Idempotent: a link of *this* client that is already revoked, consumed or expired is
+    simply closed, 204 either way; a link that is not this client's is 404. One guarded
+    `UPDATE` does the closing (the trigger lets `revoked_at` be set once)."""
     revoked = await db.scalar(
         update(FormLink)
         .where(
@@ -275,7 +283,12 @@ async def revoke_link(
         .returning(FormLink.id)
     )
     if revoked is None:
-        raise HTTPException(status_code=404, detail="No open link.")
+        exists = await db.scalar(
+            select(FormLink.id).where(FormLink.id == link_id, FormLink.customer_id == customer_id)
+        )
+        if exists is None:
+            raise HTTPException(status_code=404, detail="No such link.")
+        return Response(status_code=204)
     record_event(
         db,
         "form.link_revoked",

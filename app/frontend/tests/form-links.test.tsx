@@ -149,6 +149,7 @@ test('sending a form shows the link once, with Copy, a QR code and the emailed n
   expect(within(dialog).getByRole('textbox', { name: 'Form link' })).toHaveValue(URL_)
   expect(within(dialog).getByRole('img', { name: 'QR code for the form link' })).toBeInTheDocument()
   expect(within(dialog).getByRole('button', { name: 'Copy' })).toBeInTheDocument()
+  expect(within(dialog).getByText(/Revoke a link the client abandons/)).toBeInTheDocument()
   expect(calls.find((c) => c.method === 'POST')?.body).toEqual({ template_id: 't1' })
 })
 
@@ -197,7 +198,7 @@ test('revoking an open link removes it from the list', async () => {
 function publicLink(answer: () => Response, signedIn: boolean) {
   return stubApi({
     signedIn,
-    respond: (url: string) => (url.startsWith('/api/public/forms/') ? answer() : undefined),
+    respond: (url: string) => (url === '/api/public/forms/lookup' ? answer() : undefined),
   })
 }
 
@@ -218,11 +219,18 @@ for (const signedIn of [true, false]) {
     await user.click(screen.getByRole('radio', { name: 'Yes' }))
     expect(screen.getByLabelText(/How many weeks/)).toBeInTheDocument()
 
+    // The token travels in a JSON body — never a path an access log would write down — with
+    // no staff cookie, and a referrer policy that still lets the browser send `Origin`.
     const lookup = vi
       .mocked(fetch)
-      .mock.calls.find(([url]) => String(url).startsWith('/api/public/forms/'))!
-    expect(lookup[0]).toBe(`/api/public/forms/${TOKEN}`)
-    expect(lookup[1]).toMatchObject({ credentials: 'omit', referrerPolicy: 'no-referrer' })
+      .mock.calls.find(([url]) => String(url).startsWith('/api/public/'))!
+    expect(lookup[0]).toBe('/api/public/forms/lookup')
+    expect(lookup[1]).toMatchObject({ method: 'POST', credentials: 'omit', referrerPolicy: 'origin' })
+    expect(JSON.parse(String(lookup[1]!.body))).toEqual({ token: TOKEN })
+    // Once open, the token leaves the address bar and the history entry: the next person on
+    // a shared tablet cannot go back to it. It lives on only in memory.
+    expect(window.location.pathname).toBe('/f/')
+    expect(window.location.href).not.toContain(TOKEN)
   })
 }
 
@@ -236,4 +244,9 @@ test('a dead link says so and names the business to contact', async () => {
   expect(await screen.findByRole('heading', { name: 'This link is no longer valid' })).toBeInTheDocument()
   expect(await screen.findByText(`Please contact ${BUSINESS_NAME} for a new one.`)).toBeInTheDocument()
   expect(screen.queryByRole('heading', { name: 'Sign in' })).not.toBeInTheDocument()
+})
+
+test('the document asks for no referrer before any script runs', async () => {
+  const html = await import('../index.html?raw')
+  expect(html.default).toContain('<meta name="referrer" content="no-referrer" />')
 })

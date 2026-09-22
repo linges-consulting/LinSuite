@@ -51,6 +51,9 @@ MFA_EMAIL_OTP_NOT_ALLOWED = "mfa_email_otp_not_allowed"
 # there. Emitted by the middleware in `main.py` rather than raised as `Forbidden`: that handler
 # runs inside `ExceptionMiddleware`, which a middleware's own exception never reaches.
 UPLOAD_ORIGIN_REQUIRED = "upload_origin_required"
+# The same check on the public surface (`/api/public/…`, fix round 1 of #46): a POST there
+# carries no session, so the `Origin` naming this deployment is what stands in for CSRF defence.
+ORIGIN_REQUIRED = "origin_required"
 # Redis is unreachable on a path that must not guess: the `jti` denylist, the Admin Mode
 # window, this session's MFA state and the credential throttle all fail closed. 503 rather
 # than 500 so a screen can say "try again shortly" instead of "something is broken"

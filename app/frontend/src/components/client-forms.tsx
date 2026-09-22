@@ -229,7 +229,8 @@ function IssuedLink(props: { link: IssuedFormLink; when: (instant: string) => st
         </Button>
       </div>
       <p className="text-xs text-muted-foreground">
-        Shown once — it is not kept. Expires {props.when(link.expires_at)}.
+        Shown once — it is not kept. Expires {props.when(link.expires_at)}. Revoke a link the
+        client abandons, so it cannot be opened later.
       </p>
       <DialogFooter>
         <Button type="button" onClick={props.onDone}>

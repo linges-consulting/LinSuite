@@ -20,6 +20,7 @@ from auth.setup import router as setup_router
 from core.config import get_settings
 from core.db import SessionDep, get_engine, session_scope
 from core.errors import (
+    ORIGIN_REQUIRED,
     SERVICE_UNAVAILABLE,
     TRY_AGAIN,
     UPLOAD_ORIGIN_REQUIRED,
@@ -173,6 +174,13 @@ async def require_json_body(request: Request, call_next):
     content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
     if content_type != "application/json":
         return JSONResponse({"detail": "Send application/json"}, status_code=415)
+    # The public surface has no session for `SameSite` to protect, so JSON alone is not the
+    # whole defence there: only this deployment's own page may post to it.
+    if request.url.path.startswith("/api/public/") and not _from_this_deployment(request):
+        return JSONResponse(
+            {"detail": "Open this link from this application.", "code": ORIGIN_REQUIRED},
+            status_code=403,
+        )
     return await call_next(request)
 
 

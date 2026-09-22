@@ -14,12 +14,14 @@ The first unauthenticated surface. What these pin down:
 """
 
 import hashlib
+import logging
 import os
 import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from core.db import get_purge_engine, session_scope
@@ -38,7 +40,7 @@ from tests.test_appointments import (  # noqa: F401 — the autouse fixture come
 )
 from tests.test_forms import _wipe_forms, make, publish, save, schema
 
-PUBLIC = "/api/public/forms"
+LOOKUP = "/api/public/forms/lookup"
 TEMPLATES = "/api/forms/templates"
 BASE = "http://test.linsuite.example"
 INVALID = {"detail": "This link is no longer valid.", "code": "link_invalid"}
@@ -69,6 +71,12 @@ async def published_template(client, **draft) -> dict:
 
 async def issue(client, customer_id: str, template_id: str):
     return await client.post(links_path(customer_id), json={"template_id": template_id})
+
+
+async def lookup(client, token: str, **headers):
+    """The public lookup, as the page makes it: a JSON POST from this deployment's origin.
+    The token rides in the body, never the path, so no access log line can carry it."""
+    return await client.post(LOOKUP, json={"token": token}, headers={"Origin": BASE, **headers})
 
 
 async def revoke(client, customer_id: str, link_id: str):
@@ -156,16 +164,16 @@ async def test_a_link_renders_the_version_it_was_issued_against(client):
     template = await published_template(client)
     customer_id = await make_customer(client)
     first = token_of((await issue(client, customer_id, template["id"])).json()["url"])
-    v1 = (await client.get(f"{PUBLIC}/{first}")).json()
+    v1 = (await lookup(client, first)).json()
 
     await save(client, template, schema=schema("Could you be pregnant?"))
     assert (await publish(client, template["id"])).status_code == 201
     second = token_of((await issue(client, customer_id, template["id"])).json()["url"])
 
-    again = await client.get(f"{PUBLIC}/{first}")
+    again = await lookup(client, first)
     assert again.json()["version_id"] == v1["version_id"]
     assert again.json()["schema"]["fields"][0]["label"] == "Are you pregnant?"
-    newer = (await client.get(f"{PUBLIC}/{second}")).json()
+    newer = (await lookup(client, second)).json()
     assert newer["version_id"] != v1["version_id"]
     assert newer["schema"]["fields"][0]["label"] == "Could you be pregnant?"
 
@@ -206,7 +214,7 @@ async def test_every_dead_link_answers_the_same_404(client):
     client.cookies.clear()
     unknown, _ = links.new_token()
     for token in (unknown, expired, consumed, revoked, erased, suppressed, retired, "x", "a" * 500):
-        resp = await client.get(f"{PUBLIC}/{token}")
+        resp = await lookup(client, token)
         assert resp.status_code == 404, token
         assert resp.json() == INVALID, token
         assert resp.headers["cache-control"] == "no-store"
@@ -255,6 +263,9 @@ async def test_sending_forms_needs_forms_issue_and_works_in_staff_mode(client):
     await make(client, name="Never published")
     customer_id = await make_customer(client)
     await add_role(client, "Viewer", ["customers.view"], "viewer@cedar.example")
+    # Sends forms but may not see clients: the open list and `emailed_to` name forms (which
+    # can imply a condition) and the client's address, so both need `customers.view` too.
+    await add_role(client, "Courier", ["forms.issue"], "courier@cedar.example")
     await add_colleague(client, "desk@cedar.example", OTHER_PASSWORD)  # the seeded Staff role
 
     client.cookies.clear()
@@ -263,6 +274,15 @@ async def test_sending_forms_needs_forms_issue_and_works_in_staff_mode(client):
         await issue(client, customer_id, template["id"]),
         await client.get(links_path(customer_id)),
         await client.get(TEMPLATES),
+    ):
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["code"] == "capability_required"
+
+    client.cookies.clear()
+    await as_staff(client, "courier@cedar.example", OTHER_PASSWORD)
+    for resp in (
+        await issue(client, customer_id, template["id"]),
+        await client.get(links_path(customer_id)),
     ):
         assert resp.status_code == 403, resp.text
         assert resp.json()["code"] == "capability_required"
@@ -292,7 +312,7 @@ async def test_the_public_form_carries_the_form_the_business_and_a_first_name_on
     for signed_in in (True, False):
         if not signed_in:
             client.cookies.clear()
-        resp = await client.get(f"{PUBLIC}/{token}")
+        resp = await lookup(client, token)
         assert resp.status_code == 200, resp.text
         assert "set-cookie" not in resp.headers
         assert resp.headers["cache-control"] == "no-store"
@@ -317,19 +337,20 @@ async def test_the_public_form_carries_the_form_the_business_and_a_first_name_on
         opened = (
             await purge.execute(
                 text(
-                    "SELECT target_id, actor_user_id FROM audit_events "
+                    "SELECT target_id, actor_user_id, metadata FROM audit_events "
                     "WHERE event_type = 'form.link_opened'"
                 )
             )
         ).all()
     assert len(opened) == 2 and all(o.actor_user_id is None for o in opened)
+    assert all(o.metadata == {"ip": "127.0.0.1"} for o in opened)
 
 
 async def test_public_lookups_are_rate_limited_per_address(client):
     unknown, _ = links.new_token()
     for _ in range(links.PUBLIC_LOOKUPS_PER_MINUTE):
-        assert (await client.get(f"{PUBLIC}/{unknown}")).status_code == 404
-    resp = await client.get(f"{PUBLIC}/{unknown}")
+        assert (await lookup(client, unknown)).status_code == 404
+    resp = await lookup(client, unknown)
     assert resp.status_code == 429
     assert int(resp.headers["retry-after"]) > 0
 
@@ -371,9 +392,85 @@ async def test_revoking_closes_a_link_and_drops_it_from_the_open_list(client):
 
     assert (await revoke(client, customer_id, link_id)).status_code == 204
     assert (await client.get(links_path(customer_id))).json()["links"] == []
-    assert (await client.get(f"{PUBLIC}/{token}")).status_code == 404
-    assert (await revoke(client, customer_id, link_id)).status_code == 404
+    assert (await lookup(client, token)).status_code == 404
+    # Already closed: nothing left to do, and nothing to report as an error.
+    assert (await revoke(client, customer_id, link_id)).status_code == 204
     other = await make_customer(client)
     other_link, _ = await fresh_for(client, other, template["id"])
     # Another client's link through this client's path is nobody's link.
     assert (await revoke(client, customer_id, other_link)).status_code == 404
+
+
+# --- fix round 1: the token stays out of logs; the database guards the link ------------------
+
+
+async def test_the_token_reaches_no_log_line_and_the_lookup_needs_json_from_this_origin(
+    client, caplog
+):
+    await as_admin(client)
+    template = await published_template(client)
+    customer_id = await make_customer(client)
+    token = token_of((await issue(client, customer_id, template["id"])).json()["url"])
+
+    caplog.set_level(logging.DEBUG)
+    resp = await lookup(client, token)
+    assert resp.status_code == 200, resp.text
+    assert token not in resp.request.url.path
+    assert token not in caplog.text
+    for record in caplog.records:
+        assert token not in record.getMessage() and token not in str(record.args)
+
+    # The JSON-only guard, with the Origin check the upload paths have.
+    no_origin = await client.post(LOOKUP, json={"token": token})
+    assert no_origin.status_code == 403 and no_origin.json()["code"] == "origin_required"
+    elsewhere = await lookup(client, token, Origin="https://evil.example")
+    assert elsewhere.status_code == 403
+    form = await client.post(
+        LOOKUP, content=f"token={token}", headers={"Origin": BASE, "Content-Type": "text/plain"}
+    )
+    assert form.status_code == 415
+    # The old GET path is gone: the token is never a path segment.
+    assert (await client.get(f"/api/public/forms/{token}")).status_code in (404, 405)
+
+
+async def _as_app(sql: str, **params) -> str | None:
+    """Run as `linsuite_app`; the SQLSTATE it was refused with, or None."""
+    async with session_scope() as db:
+        try:
+            await db.execute(text(sql), params)
+            await db.commit()
+        except DBAPIError as error:
+            await db.rollback()
+            return getattr(error.orig, "sqlstate", None)
+    return None
+
+
+async def test_the_database_refuses_to_reopen_rewrite_or_delete_a_link(client):
+    await as_admin(client)
+    template = await published_template(client)
+    customer_id = await make_customer(client)
+    link_id, _ = await fresh_for(client, customer_id, template["id"])
+    assert (await revoke(client, customer_id, link_id)).status_code == 204
+
+    reopen = (
+        "UPDATE form_links SET revoked_at = NULL, expires_at = now() + interval '10 years' "
+        "WHERE id = :id"
+    )
+    assert await _as_app(reopen, id=link_id) == "42501"
+    assert await _as_app("UPDATE form_links SET revoked_at = NULL WHERE id = :id", id=link_id) == (
+        "42501"
+    )
+    rewrite = "UPDATE form_links SET token_sha256 = sha256('guess'::bytea) WHERE id = :id"
+    assert await _as_app(rewrite, id=link_id) == "42501"
+    assert await _as_app("DELETE FROM form_links WHERE id = :id", id=link_id) == "42501"
+
+    open_id, _ = await fresh_for(client, customer_id, template["id"])
+    extend = "UPDATE form_links SET expires_at = now() + interval '10 years' WHERE id = :id"
+    assert await _as_app(extend, id=open_id) == "42501"
+    # What the app does need: NULL → a value, once.
+    assert (
+        await _as_app("UPDATE form_links SET consumed_at = now() WHERE id = :id", id=open_id)
+        is None
+    )
+    again = "UPDATE form_links SET consumed_at = now() + interval '1 hour' WHERE id = :id"
+    assert await _as_app(again, id=open_id) == "42501"

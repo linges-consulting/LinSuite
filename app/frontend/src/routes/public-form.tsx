@@ -14,8 +14,9 @@ import { visibleKeys, type Answers } from '@/lib/forms'
  * Outside every gate in `App.tsx` and without the app shell: a signed-in browser (the front
  * desk checking a link, or a tablet somebody forgot to sign out) sees exactly what the client
  * sees, and nothing here reads or sends the staff session (`fetchPublicForm` omits
- * credentials). The token is in the URL, so the page asks the browser to send no referrer
- * for anything it loads, and the query is never cached, retried or refetched.
+ * credentials). The token is in the URL, so `index.html` asks for no referrer on anything
+ * the page loads; the lookup is a POST, never cached, retried or refetched; and once it
+ * succeeds the token is replaced out of the address bar and history.
  *
  * Submitting arrives with Task 4; until then the form renders with no submit button.
  */
@@ -25,6 +26,7 @@ export function PublicFormPage() {
   const form = useQuery({
     queryKey: ['public-form', token],
     queryFn: () => fetchPublicForm(token),
+    enabled: token !== '',
     retry: false,
     staleTime: Infinity,
     gcTime: 0,
@@ -32,15 +34,18 @@ export function PublicFormPage() {
   })
   const [answers, setAnswers] = useState<Answers>({})
 
+  // Once the form is open, take the token out of the address bar and this history entry, so
+  // the next person handed a shared tablet cannot go back to it. It lives on in memory only
+  // (this component and the query). Straight to `window.history`, not the router: the router
+  // would re-match `/f/` and unmount the form.
+  const opened = form.isSuccess
   useEffect(() => {
-    const meta = document.createElement('meta')
-    meta.name = 'referrer'
-    meta.content = 'no-referrer'
-    document.head.append(meta)
-    return () => meta.remove()
-  }, [])
+    if (opened) window.history.replaceState(null, '', '/f/')
+  }, [opened])
 
-  if (form.isPending) {
+  // `/f/` itself — a reload after the token was taken out of the address bar — is a link
+  // that is no longer here to open.
+  if (form.isPending && token !== '') {
     return (
       <Page>
         <Skeleton className="h-8 w-2/3" />
@@ -48,9 +53,9 @@ export function PublicFormPage() {
       </Page>
     )
   }
-  if (form.isError) {
+  if (form.isError || !form.data) {
     const business = branding.data?.name ?? 'the business'
-    const dead = form.error instanceof ApiError && form.error.status === 404
+    const dead = !form.isError || (form.error instanceof ApiError && form.error.status === 404)
     return (
       <Page>
         <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-6 py-12 text-center">

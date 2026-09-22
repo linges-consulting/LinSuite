@@ -89,6 +89,7 @@ Cancelled invoices are retained rather than deleted: CRA requires business recor
 * **Traefik or Nginx:** Reverse proxy handling SSL/TLS 1.3 termination (Let's Encrypt), routing, and security headers.
 * **DigitalOcean:** Standard hosting target, Canadian regions (Toronto/Montreal) for data residency.
 * **On-prem:** Supported as a first-class deployment target. The same Compose stack runs on a customer's own server; only volume paths and TLS certificate issuance differ.
+* **TODO (production frontend):** the static server that replaces the Vite dev server must send `Referrer-Policy: no-referrer` and `Cache-Control: no-store` on `/f/*` — the form-link page carries its token in the URL. `index.html` already sets `<meta name="referrer" content="no-referrer">`.
 
 ### Provisioning: manual runbook, not infrastructure-as-code
 
@@ -141,6 +142,7 @@ Cancelled invoices are retained rather than deleted: CRA requires business recor
 ## 11. Observability: **structured JSON logs**
 
 * **Decision:** Structured JSON logs to stdout, captured by Docker. No Sentry, no GlitchTip, for now.
+* **Worker logs are sensitive.** The `console` notification provider — the default until Phase 12 — logs every email body in full, which includes live password-reset and form links. Anyone who can read `docker compose logs worker` can use them; treat those logs like credentials.
 * **When error tracking is added:** it must run with PII scrubbing enabled. An unhandled exception during form submission can otherwise carry the request body into the error report, shipping a client's health data to a third-party service and breaking both the data-residency commitment and PHIPA.
 
 ## 12. CI: **GitHub Actions on pull request**
@@ -205,7 +207,7 @@ Cancelled invoices are retained rather than deleted: CRA requires business recor
 * **Public booking endpoint — no CAPTCHA initially.** A honeypot field, per-IP and per-email daily booking caps, and automatic expiry of unconfirmed bookings. reCAPTCHA and Turnstile both ship visitor data to a third party, which cuts against the data-residency commitment being sold; spam bookings are visible to staff and cancellable, rather than silently damaging. Turnstile is added only if real abuse appears.
 * **Request bodies are capped at the edge, not in a handler.** FastAPI parses the body before it resolves dependencies, so authentication protects nothing about body size: a chunked `POST` carries no `Content-Length` for an in-app check to read, and Starlette spools the whole thing before the 401. A Traefik `buffering.maxRequestBodyBytes` of 2 MiB on both routers is the ceiling — the largest legitimate body is the 1 MB logo — and `memRequestBodyBytes` matches it so nothing spools to the proxy's disk either. On a single-VM tenant the application shares a disk with PostgreSQL, so an unbounded body is a way to take the database down.
 * **`/auth/me` is deliberately outside the tight bucket** (`!Path(/api/auth/me)`): it is a read, not a door onto a credential, and leaving it in would mean ten staff tabs plus three Admin Mode tabs self-throttling a clinic's logins from one NAT address — the exact failure that ruled out per-IP limiting of credentials above.
-* **Form links** already carry high entropy; they need a rate limit and constant-time token comparison, nothing more. They are served under `/api/public` by a third Traefik router, `public` (priority 1000, `public-ratelimit` 30/minute with a burst of 10, the same 2 MiB body limit), and the handler counts the same 30/minute per address in Redis so the limit holds where this edge is not in front.
+* **Form links** already carry high entropy; they need a rate limit and constant-time token comparison, nothing more. They are served under `/api/public` by a third Traefik router, `public` (priority 1000, `public-ratelimit` 30/minute with a burst of 10, the same 2 MiB body limit). The lookup is a `POST` with the token in a JSON body, never in the path, so no access log records a live link; it is JSON-only and must carry this deployment's `Origin`. The handler also counts 30/minute per address in Redis, but that address is whatever uvicorn trusts from `X-Forwarded-For` (`FORWARDED_ALLOW_IPS="*"`): it is a real per-client limit only because Traefik overwrites that header. With the app reachable except through Traefik, a client rotating `X-Forwarded-For` walks straight past it.
 * Failed login attempts are written to the audit log.
 
 ### When Redis is unavailable

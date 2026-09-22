@@ -52,6 +52,8 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "documents": ("SELECT", "INSERT"),
     # A published form version is frozen; nobody but the owner removes one (0027).
     "form_template_versions": ("SELECT", "INSERT"),
+    # The app stamps `revoked_at`/`consumed_at` (trigger-guarded); it never deletes a link.
+    "form_links": ("SELECT", "INSERT", "UPDATE"),
 }
 # The purge role reads and deletes everywhere and writes nowhere — except the fact of its own
 # purge, which ADR-0001 §6 puts in the purge transaction (0024, pre-flight D11).
@@ -67,6 +69,7 @@ TRIGGERS = (
     ("customer_document_keys", "customer_document_keys_guard"),
     ("documents", "documents_guard"),
     ("form_template_versions", "form_template_versions_append_only"),
+    ("form_links", "form_links_guard"),
 )
 
 
@@ -244,6 +247,7 @@ async def test_every_trigger_and_security_definer_function_pins_its_search_path(
         "customer_document_keys_guard",
         "customer_record_guard",
         "form_template_versions_append_only",
+        "form_links_guard",
         "appointments_enforce_staff_concurrency",
         "ensure_access_log_partitions",
     } <= set(found)
