@@ -148,3 +148,56 @@ test('the booking grid and horizon are saved as numbers, and a cleared field blo
   await waitFor(() => expect(saved()).toBeDefined())
   expect(saved()!.body).toMatchObject({ slot_granularity_minutes: 30, booking_horizon_days: 14 })
 })
+
+test('the VIP threshold is saved as a number, and a 422 lands under its own field', async () => {
+  const { calls } = stubApi({
+    ...ADMIN,
+    // A value inside the input's own `min`/`max` (2–1000) — the browser's own constraint
+    // validation would otherwise refuse to submit an out-of-range one before any request is
+    // sent, which is real but not what this test is about. The message is shaped the way a
+    // Pydantic `field_validator`'s `ValueError` actually comes back (`fieldErrors` strips
+    // the "Value error, " Pydantic adds; see `tests/field-errors.test.ts`).
+    respond: (url: string, body: any) =>
+      url === '/api/admin/business' && body?.vip_visit_threshold === 500
+        ? Response.json(
+            {
+              detail: [
+                {
+                  loc: ['body', 'vip_visit_threshold'],
+                  msg: 'Value error, could not save that threshold right now',
+                  type: 'value_error',
+                },
+              ],
+            },
+            { status: 422 },
+          )
+        : undefined,
+  })
+  renderApp('/settings')
+  const user = await openBusiness()
+
+  const threshold = await screen.findByLabelText('VIP threshold (visits)')
+  expect(threshold).toHaveValue(10)
+
+  await user.clear(threshold)
+  await user.type(threshold, '500')
+  await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+  // The stripped message, not "Value error, could not save that threshold right now".
+  expect(
+    await screen.findByText('could not save that threshold right now'),
+  ).toBeInTheDocument()
+
+  await user.clear(threshold)
+  await user.type(threshold, '5')
+  await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+  const saved = () =>
+    calls.find(
+      (call) =>
+        call.url === '/api/admin/business' &&
+        call.method === 'PUT' &&
+        (call.body as { vip_visit_threshold?: number })?.vip_visit_threshold === 5,
+    )
+  await waitFor(() => expect(saved()).toBeDefined())
+})

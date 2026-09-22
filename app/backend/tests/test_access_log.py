@@ -10,10 +10,15 @@ partitioned, and a row dated next July lands in next year's partition.
 
 **Route enumeration.** ADR-0002 §2 chose an explicit per-route dependency over middleware and
 accepted that it can be forgotten. These two rules are what close that gap: (a) every
-customer-scoped GET (or route tagged `phi`) carries `LogAccess` unless it is named in
-`NOT_PHI`; (b) the set of routes carrying it equals `LOGGED`, so adding a PHI endpoint is a
-visible edit to this file. Both are proven against probe routes mounted for the test, so a
-green build is not a rule that never fires.
+customer-scoped route — any method, not only GET — whose `response_model` actually carries a
+PHI field (`core.access_log.PHI_FIELDS`, walked recursively through nested models, lists and
+`Optional`) carries `LogAccess` unless it is named in `NOT_PHI`; (b) the set of routes
+carrying it equals `LOGGED`, so adding a PHI endpoint is a visible edit to this file. Both are
+proven against probe routes mounted for the test, so a green build is not a rule that never
+fires. Rule (a) started GET-only and missed exactly the bug a fix round found: `PATCH
+/customers/{id}` returned the full profile — DOB, both contacts, notes — with no
+`LogAccess` and, on a no-change request, no `audit_events` row either. It is checked by
+response shape now, not by HTTP verb.
 """
 
 import uuid
@@ -24,9 +29,11 @@ import pytest
 from fastapi import Depends
 from fastapi.dependencies.models import Dependant
 from fastapi.routing import APIRoute, _iter_routes_with_context
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
+from core.access_log import response_phi_fields
 from core.db import get_purge_engine, session_scope
 from tests.test_appointments import (  # noqa: F401 — the autouse fixture comes along
     CUSTOMERS,
@@ -223,13 +230,14 @@ async def test_anonymous_is_a_401_and_nothing_is_logged(client):
 
 @dataclass(frozen=True)
 class Mounted:
-    """One API route as the app serves it: its full path, methods, tags and the dependant
-    with every router-level dependency folded in."""
+    """One API route as the app serves it: its full path, methods, tags, response model and
+    the dependant with every router-level dependency folded in."""
 
     path: str
     methods: frozenset[str]
     tags: frozenset[str]
     dependant: Dependant
+    response_model: type | None
 
     @property
     def phi_resource(self) -> str | None:
@@ -247,6 +255,10 @@ class Mounted:
     def customer_scoped(self) -> bool:
         return self.path.startswith("/api/customers/{customer_id}") or "phi" in self.tags
 
+    @property
+    def phi_fields(self) -> frozenset[str]:
+        return response_phi_fields(self.response_model)
+
 
 def mounted_routes(app) -> list[Mounted]:
     """Every API route, discovered from the app rather than kept by hand.
@@ -256,9 +268,14 @@ def mounted_routes(app) -> list[Mounted]:
     dependencies applied, through `_iter_routes_with_context` — the same walk the OpenAPI
     generator uses. Leaning on it is what makes this list the served one. If a FastAPI
     upgrade changes the walk, rule (b) fails loudly: `LOGGED` is never empty.
+
+    `route` is the real `APIRoute` in both branches (`context.original_route`, or `route`
+    itself when there is no sub-router context), which is where `response_model` lives —
+    rule (a) needs it to see what a route actually discloses, not just where it is mounted.
     """
     found = []
     for route, context in _iter_routes_with_context(app.routes):
+        response_model = getattr(route, "response_model", None)
         if context is not None and context.dependant is not None:
             found.append(
                 Mounted(
@@ -266,6 +283,7 @@ def mounted_routes(app) -> list[Mounted]:
                     frozenset(context.methods),
                     frozenset(str(t) for t in context.tags),
                     context.dependant,
+                    response_model,
                 )
             )
         elif isinstance(route, APIRoute):
@@ -275,20 +293,24 @@ def mounted_routes(app) -> list[Mounted]:
                     frozenset(route.methods),
                     frozenset(str(t) for t in route.tags),
                     route.dependant,
+                    response_model,
                 )
             )
     return found
 
 
 def unlogged_phi_routes(app) -> set[tuple[str, str]]:
-    """Rule (a): customer-scoped GETs with neither `LogAccess` nor a `NOT_PHI` entry."""
+    """Rule (a): customer-scoped routes — any method — whose response actually carries a PHI
+    field, with neither `LogAccess` nor a `NOT_PHI` entry. Not GET-only: a mutation that
+    echoes PHI back (a `PATCH` returning the profile it just edited, say) is exactly as
+    undetected an access as a `GET` would be, and the fix round that added this rule found
+    real one (`PATCH /customers/{id}` used to do exactly that)."""
     return {
-        ("GET", r.path)
+        (method, r.path)
         for r in mounted_routes(app)
-        if "GET" in r.methods
-        and r.customer_scoped
-        and r.phi_resource is None
-        and ("GET", r.path) not in NOT_PHI
+        if r.customer_scoped and r.phi_fields and r.phi_resource is None
+        for method in r.methods
+        if (method, r.path) not in NOT_PHI
     }
 
 
@@ -302,14 +324,33 @@ def logged_routes(app) -> set[tuple[str, str]]:
     }
 
 
+class _ProbeOut(BaseModel):
+    """A response model with one PHI field, for rule (a)'s probes — the smallest shape a
+    route could accidentally disclose a customer's chart through."""
+
+    ok: bool
+    notes: str | None = None
+
+
 @pytest.fixture
 def probe():
     """Mount one probe at `PROBE` for the test, and take it down again afterwards so the
     real-app assertions in this file never see it."""
     from main import app
 
-    def mount(dependencies: list) -> None:
-        app.add_api_route(PROBE, lambda customer_id: {"ok": True}, dependencies=dependencies)
+    def mount(
+        dependencies: list,
+        *,
+        methods: list[str] | None = None,
+        response_model: type | None = None,
+    ) -> None:
+        app.add_api_route(
+            PROBE,
+            lambda customer_id: {"ok": True},
+            dependencies=dependencies,
+            methods=methods or ["GET"],
+            response_model=response_model,
+        )
 
     yield mount
     app.router.routes[:] = [r for r in app.router.routes if getattr(r, "path", None) != PROBE]
@@ -324,16 +365,39 @@ def test_every_phi_route_in_the_real_app_is_logged_and_named():
     assert unlogged_phi_routes(app) == set()
     assert logged_routes(app) == LOGGED
     # The allowlist may only name routes that exist, or it is a stale exemption.
-    assert NOT_PHI <= {("GET", r.path) for r in routes if "GET" in r.methods}
+    assert NOT_PHI <= {(method, r.path) for r in routes for method in r.methods}
 
 
-def test_a_customer_scoped_get_without_log_access_fails_rule_a(probe):
+def test_a_customer_scoped_get_returning_phi_without_log_access_fails_rule_a(probe):
     from auth.capabilities import Requires
     from main import app
 
-    probe([Depends(Requires("customers.view"))])
+    probe([Depends(Requires("customers.view"))], response_model=_ProbeOut)
 
     assert ("GET", PROBE) in unlogged_phi_routes(app)
+
+
+def test_a_customer_scoped_get_returning_no_phi_field_never_needed_log_access(probe):
+    """Rule (a) checks what the response actually carries, not just the path — a
+    customer-scoped route that discloses nothing PHI-shaped (like `CustomerOut`) is not a
+    gap, and must not have to declare `LogAccess` it does not need."""
+    from auth.capabilities import Requires
+    from main import app
+
+    probe([Depends(Requires("customers.view"))])  # default response_model=None
+
+    assert ("GET", PROBE) not in unlogged_phi_routes(app)
+
+
+def test_a_customer_scoped_patch_returning_phi_without_log_access_fails_rule_a(probe):
+    """The bug this rule closed: a mutation whose response echoes PHI back is exactly as
+    untraced an access as a `GET` would be — rule (a) used to only ever look at GET."""
+    from auth.capabilities import Requires
+    from main import app
+
+    probe([Depends(Requires("customers.manage"))], methods=["PATCH"], response_model=_ProbeOut)
+
+    assert ("PATCH", PROBE) in unlogged_phi_routes(app)
 
 
 def test_a_logged_route_missing_from_the_expected_set_fails_rule_b(probe):
@@ -341,7 +405,10 @@ def test_a_logged_route_missing_from_the_expected_set_fails_rule_b(probe):
     from core.access_log import LogAccess
     from main import app
 
-    probe([Depends(Requires("customers.view")), Depends(LogAccess("probe"))])
+    probe(
+        [Depends(Requires("customers.view")), Depends(LogAccess("probe"))],
+        response_model=_ProbeOut,
+    )
 
     assert ("GET", PROBE) not in unlogged_phi_routes(app)
     assert logged_routes(app) != LOGGED

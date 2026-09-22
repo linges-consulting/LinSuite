@@ -1,12 +1,20 @@
 /** FastAPI's 422 says which field it is unhappy about in `loc`; put the message under it.
- *  Shared by every edit form that shows a server error inline rather than as a toast. */
+ *  Shared by every edit form that shows a server error inline rather than as a toast.
+ *
+ *  A custom `field_validator` that raises `ValueError` (every hand-written message in this
+ *  app — "date of birth cannot be in the future", and the rest) comes back from Pydantic v2
+ *  prefixed `"Value error, "`; that prefix is the exception's type, not part of the sentence
+ *  anybody wrote, and reads as a bug report rather than a validation message under a field. */
 export function fieldErrors(error: unknown): Record<string, string> {
   const detail = (error as { body?: { detail?: unknown } })?.body?.detail
   if (!Array.isArray(detail)) return {}
   return Object.fromEntries(
     detail
       .filter((entry) => Array.isArray(entry.loc) && entry.loc[0] === 'body')
-      .map((entry) => [String(entry.loc[1]), entry.msg as string]),
+      .map((entry) => [
+        String(entry.loc[1]),
+        String(entry.msg).replace(/^Value error, /, ''),
+      ]),
   )
 }
 
@@ -1172,10 +1180,11 @@ export type CustomerPatch = Partial<{
   notes: string | null
 }>
 
-/** Not a PHI access in its own right (server side: audited in `audit_events` by field name,
- *  not `LogAccess`) — it returns the fields that changed, not a profile-plus-history open.
- *  Invalidate the profile query afterwards; that refetch is the one that logs. */
-export async function updateCustomer(id: string, patch: CustomerPatch): Promise<CustomerDetail> {
+/** Not a PHI access in its own right, and its response carries none: the server sends back
+ *  `CustomerRecord` — the same non-PHI shape the list uses — never the DOB, the contacts or
+ *  the notes, so there is nothing here for `LogAccess` to have missed. Invalidate the
+ *  profile query afterwards; that refetch is the one PHI read, and it does log. */
+export async function updateCustomer(id: string, patch: CustomerPatch): Promise<CustomerRecord> {
   const res = await send('PATCH', `/api/customers/${encodeURIComponent(id)}`, patch)
   if (!res.ok) throw await failure(res, 'Could not save this client')
   return res.json()

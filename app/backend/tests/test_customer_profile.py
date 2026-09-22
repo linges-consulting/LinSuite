@@ -1,18 +1,25 @@
 """S1: the grown profile (Task 3, #38) — editing it, and the classification derived from it.
 
-`PATCH` is the one route under test that is not a `GET`; it never carries `LogAccess`
-(`tests/test_access_log.py`'s route enumeration already proves that set is exactly
-`{("GET", "/api/customers/{customer_id}")}`, and a PATCH route is not a GET, so this file
-does not touch that test). What it must prove instead: it is audited by field name only, a
-no-change request audits nothing, the same normalisation `CustomerIn` applies reaches the two
-new contacts, and `customers.manage` gates it the same way it gates `POST`.
+`PATCH` is the one route under test that is not a `GET`. It never returns PHI — its response
+is `CustomerOut`, the same shape the list and the search send, never `CustomerDetailOut` — so
+it needs neither `LogAccess` nor an `audit_access_log` row of its own; a no-change (or a
+`PATCH {}`) request is a 200 with nothing to show for it in either audit trail. What this file
+proves: it is audited in `audit_events` by field name only, a no-change request audits
+nothing, the response itself never carries a PHI field, opening it never writes an access-log
+row, the same normalisation `CustomerIn` applies reaches the two new contacts, an explicit
+`null` for a required name is a 422 rather than a 500, and `customers.manage` gates it the
+same way it gates `POST`. `tests/test_access_log.py`'s route enumeration is the general
+version of the PHI-response claim, proven against every route in the app; this file is the
+one for this specific route's behaviour.
 """
 
 from datetime import date, timedelta
 
+import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
-from core.db import session_scope
+from core.db import get_purge_engine, session_scope
 from tests.test_appointments import (  # noqa: F401 — the autouse fixture comes along
     APPOINTMENTS,
     CUSTOMERS,
@@ -33,6 +40,29 @@ from tests.test_appointments import (  # noqa: F401 — the autouse fixture come
 from tests.test_lifecycle import push_to_past
 
 BUSINESS = "/api/admin/business"
+
+# The fields `CustomerOut` must never carry — see `CustomerDetailOut` in customers/routes.py.
+_PHI_KEYS = (
+    "date_of_birth",
+    "emergency_contact_name",
+    "emergency_contact_phone",
+    "emergency_contact_relationship",
+    "secondary_contact_name",
+    "secondary_contact_phone",
+    "secondary_contact_email",
+    "notes",
+)
+
+
+async def access_rows_for(customer_id: str) -> list[dict]:
+    async with get_purge_engine().connect() as purge:
+        rows = (
+            await purge.execute(
+                text("SELECT action FROM audit_access_log WHERE customer_id = :id"),
+                {"id": customer_id},
+            )
+        ).all()
+    return [dict(r._mapping) for r in rows]
 
 
 async def add_role(client, name: str, capabilities: list[str], email: str) -> None:
@@ -84,6 +114,9 @@ async def set_vip_threshold(client, threshold: int):
 
 
 async def test_patch_updates_dob_both_contacts_and_notes_and_a_subsequent_get_reflects_it(client):
+    """The PATCH response itself carries none of this
+    (`test_the_patch_response_never_carries_a_phi_field`) — the edit is only visible through
+    the profile `GET` that follows, which is the point."""
     customer_id, _, _ = await ready_customer(client)
 
     resp = await client.patch(
@@ -101,22 +134,17 @@ async def test_patch_updates_dob_both_contacts_and_notes_and_a_subsequent_get_re
     )
 
     assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["date_of_birth"] == "1990-05-14"
-    assert body["emergency_contact_name"] == "Amira Haddad"
-    assert body["emergency_contact_phone"] == "4165550111"
-    assert body["emergency_contact_relationship"] == "Sister"
-    assert body["secondary_contact_name"] == "Leo Haddad"
-    assert body["secondary_contact_phone"] == "6475550122"
-    assert body["secondary_contact_email"] == "leo.haddad@example.com"
-    assert body["notes"] == "Prefers the corner chair."
-    assert body["classification"] == "new"
+    assert resp.json()["classification"] == "new"
 
     profile = await client.get(f"{CUSTOMERS}/{customer_id}")
     assert profile.status_code == 200, profile.text
     fetched = profile.json()["customer"]
     assert fetched["date_of_birth"] == "1990-05-14"
+    assert fetched["emergency_contact_name"] == "Amira Haddad"
     assert fetched["emergency_contact_phone"] == "4165550111"
+    assert fetched["emergency_contact_relationship"] == "Sister"
+    assert fetched["secondary_contact_name"] == "Leo Haddad"
+    assert fetched["secondary_contact_phone"] == "6475550122"
     assert fetched["secondary_contact_email"] == "leo.haddad@example.com"
     assert fetched["notes"] == "Prefers the corner chair."
 
@@ -192,10 +220,12 @@ async def test_an_omitted_field_is_left_alone_not_cleared(client):
     assert first.status_code == 200, first.text
 
     resp = await client.patch(f"{CUSTOMERS}/{customer_id}", json={"date_of_birth": "1991-01-01"})
-
     assert resp.status_code == 200, resp.text
-    assert resp.json()["notes"] == "Keep me."
-    assert resp.json()["date_of_birth"] == "1991-01-01"
+
+    profile = await client.get(f"{CUSTOMERS}/{customer_id}")
+    fetched = profile.json()["customer"]
+    assert fetched["notes"] == "Keep me."
+    assert fetched["date_of_birth"] == "1991-01-01"
 
 
 async def test_a_customers_view_only_role_gets_403_on_patch(client):
@@ -208,6 +238,67 @@ async def test_a_customers_view_only_role_gets_403_on_patch(client):
 
     assert resp.status_code == 403, resp.text
     assert resp.json()["code"] == "capability_required"
+
+
+# --- PATCH never discloses PHI, logged or not (fix round 1) -------------------------------
+
+
+async def test_the_patch_response_never_carries_a_phi_field(client):
+    """A `customers.manage` session editing a client's notes still must not get the DOB, the
+    contacts or the notes back — the response is the same `CustomerOut` shape the list uses,
+    never `CustomerDetailOut`. Regression: it used to return the full profile."""
+    customer_id, _, _ = await ready_customer(client)
+
+    resp = await client.patch(
+        f"{CUSTOMERS}/{customer_id}",
+        json={"notes": "Prefers the corner chair.", "date_of_birth": "1990-01-01"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    for key in _PHI_KEYS:
+        assert key not in body, f"{key} leaked onto the PATCH response"
+    assert set(body) == {
+        "id",
+        "first_name",
+        "last_name",
+        "email",
+        "phone",
+        "created_at",
+        "classification",
+    }
+
+
+async def test_an_empty_patch_is_a_200_with_no_phi_and_writes_no_access_row(client):
+    """`PATCH {}` — nothing to change — used to be a free, unlogged read of the whole
+    profile: 200, full PHI body, no `audit_events` row (nothing changed) and no
+    `audit_access_log` row (no `LogAccess`). It must now disclose nothing at all."""
+    customer_id, _, _ = await ready_customer(client)
+
+    resp = await client.patch(f"{CUSTOMERS}/{customer_id}", json={})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    for key in _PHI_KEYS:
+        assert key not in body, f"{key} leaked onto an empty PATCH response"
+    assert await access_rows_for(customer_id) == []
+    assert [e for e in await audit_events() if e[0] == "customer.updated"] == []
+
+
+async def test_an_explicit_null_first_name_is_a_422_not_a_500(client):
+    customer_id, _, _ = await ready_customer(client)
+
+    resp = await client.patch(f"{CUSTOMERS}/{customer_id}", json={"first_name": None})
+
+    assert resp.status_code == 422, resp.text
+
+
+async def test_an_explicit_null_last_name_is_a_422_not_a_500(client):
+    customer_id, _, _ = await ready_customer(client)
+
+    resp = await client.patch(f"{CUSTOMERS}/{customer_id}", json={"last_name": None})
+
+    assert resp.status_code == 422, resp.text
 
 
 # --- classification --------------------------------------------------------------------------
@@ -321,3 +412,15 @@ async def test_vip_visit_threshold_of_one_is_a_422(client):
     resp = await client.put(BUSINESS, json=profile)
 
     assert resp.status_code == 422, resp.text
+
+
+async def test_the_database_refuses_a_vip_visit_threshold_of_one_directly(database):
+    """S5: the API's `Field(ge=2, le=1000)` is the 422 a person sees first; the CHECK
+    declared on the model (migration 0020) is what still holds if a write reaches Postgres
+    some other way — a data fix in `psql`, a future import."""
+    async with session_scope() as db:
+        with pytest.raises(DBAPIError) as refused:
+            await db.execute(text("UPDATE businesses SET vip_visit_threshold = 1"))
+        await db.rollback()
+    # 23514 check_violation.
+    assert getattr(refused.value.orig, "sqlstate", None) == "23514", refused.value

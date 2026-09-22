@@ -25,14 +25,62 @@ access to log without one.
 
 import uuid
 from collections.abc import Callable
+from typing import get_args
 
 from fastapi import Request
+from pydantic import BaseModel
 
 from auth.session import CurrentUser
 from core.db import SessionDep
 from core.models import AccessLogEntry
 
 VIEW = "view"
+
+# Field names that make a response PHI, declared once so every route's response model can be
+# checked against the same list (`tests/test_access_log.py`, rule a). Not every field named
+# "notes" is PHI — `Appointment.notes` is a front-desk booking note, not a customer's chart —
+# so this check is only ever applied to customer-scoped routes; see `Mounted.customer_scoped`
+# in the test. Extend this set, never bypass the routes it gates.
+PHI_FIELDS: frozenset[str] = frozenset(
+    {
+        "date_of_birth",
+        "emergency_contact_name",
+        "emergency_contact_phone",
+        "emergency_contact_relationship",
+        "secondary_contact_name",
+        "secondary_contact_phone",
+        "secondary_contact_email",
+        "notes",
+    }
+)
+
+
+def response_phi_fields(model: type | None, _seen: frozenset[type] | None = None) -> frozenset[str]:
+    """Every name in `PHI_FIELDS` that `model` actually puts on the wire — its own fields,
+    and recursively through nested models, lists, dicts and `Optional`/`Union` wrappers. A
+    route's `response_model` is what FastAPI actually serialises; a field the handler happens
+    to read but never returns is not a disclosure, so this walks the model, not the code.
+    """
+    if model is None or not (isinstance(model, type) and issubclass(model, BaseModel)):
+        return frozenset()
+    seen = (_seen or frozenset()) | {model}
+    found: set[str] = set()
+    for name, field in model.model_fields.items():
+        if name in PHI_FIELDS:
+            found.add(name)
+        found |= _phi_fields_of_annotation(field.annotation, seen)
+    return frozenset(found)
+
+
+def _phi_fields_of_annotation(annotation: object, seen: frozenset[type]) -> frozenset[str]:
+    """Drills into `list[X]`, `dict[K, V]`, `X | None` and nested models; a plain type with
+    no type arguments (`str`, `UUID`, `Literal["a", "b"]`) contributes nothing further."""
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return frozenset() if annotation in seen else response_phi_fields(annotation, seen)
+    found: set[str] = set()
+    for arg in get_args(annotation):
+        found |= _phi_fields_of_annotation(arg, seen)
+    return frozenset(found)
 
 
 def LogAccess(resource_type: str) -> Callable:  # noqa: N802 — a dependency factory, like `Requires`

@@ -15,10 +15,13 @@ row, not one per panel. The history is read straight off `scheduling.models.Appo
 rather than through `scheduling.appointments`, which imports this module for
 `create_customer`.
 
-**`PATCH /customers/{customer_id}` is a write, not a read.** It is audited in `audit_events`
-by changed field name, never `LogAccess` — the response is the fields that changed, not a
-profile-plus-history open, and the edit dialog's own invalidation makes the next `GET` (which
-does log) the read of record. See `update_customer` below.
+**`PATCH /customers/{customer_id}` is a write, not a read — and its response carries no PHI,
+on purpose.** It is audited in `audit_events` by changed field name, never `LogAccess`. The
+response is `CustomerOut` — the same non-PHI shape the list and the search return — never
+`CustomerDetailOut`; an untraced `PATCH {}` returning the DOB, both contacts and the notes
+with nobody logged would be exactly the access-log gap ADR-0002 exists to close. The edit
+dialog's own invalidation makes the next `GET` (which does log) the read of record. See
+`update_customer` below.
 """
 
 import re
@@ -146,10 +149,21 @@ class CustomerPatch(BaseModel):
     secondary_contact_email: EmailStr | None = None
     notes: Annotated[str | None, Field(max_length=2000)] = None
 
+    @field_validator("first_name", "last_name", mode="before")
+    @classmethod
+    def _no_explicit_null(cls, value: object) -> object:
+        # `Name | None` exists so the field can be *absent* from a partial body — Pydantic
+        # reads that through `exclude_unset`, never through `None`. An explicit `null` is a
+        # request to blank a required name, same as an empty string, and gets the same 422
+        # rather than reaching `setattr` and failing the NOT NULL column as a 500.
+        if value is None:
+            raise ValueError("this cannot be blank")
+        return value
+
     @field_validator("first_name", "last_name", mode="after")
     @classmethod
-    def _names(cls, value: str | None) -> str | None:
-        return _real_name(value) if value is not None else value
+    def _names(cls, value: str) -> str:
+        return _real_name(value)
 
     @field_validator(
         "email",
@@ -410,12 +424,20 @@ async def read_customer(customer_id: uuid.UUID, db: SessionDep) -> CustomerProfi
 @router.patch("/{customer_id}")
 async def update_customer(
     customer_id: uuid.UUID, payload: CustomerPatch, actor: Manager, db: SessionDep
-) -> CustomerDetailOut:
+) -> CustomerOut:
     """Edits whatever profile fields were actually sent (`exclude_unset`), never PHI-logged
     in its own right — ADR-0002 logs record *opens*; this is a write, audited in
-    `audit_events` by field name only, never values. Not `LogAccess`: the response is the
-    fields that changed, not the profile-plus-history a `GET` returns, and the frontend's
-    invalidation makes the next open — which does log — the read of record.
+    `audit_events` by field name only, never values.
+
+    **The response is `CustomerOut`, never `CustomerDetailOut` — no DOB, no contacts, no
+    notes.** A `PATCH {}` (nothing to change) would otherwise be a 200 that hands back the
+    whole profile with no `LogAccess` row to show for it: exactly the untraced read ADR-0002
+    exists to prevent. The edit dialog's own invalidation makes the next `GET` (which does
+    log) the read of record.
+
+    Concurrent edits are last-write-wins, per field: two overlapping `PATCH`es each apply
+    whatever they were sent over whatever the row held when they ran, with no version check
+    between them. Front-desk profile edits are not a contended enough path to be worth one.
     """
     customer = await db.get(Customer, customer_id)
     if customer is None:
@@ -455,4 +477,4 @@ async def update_customer(
         )
     )
     threshold = await db.scalar(select(Business.vip_visit_threshold).where(Business.id == 1))
-    return customer_detail_out(customer, classify(completed or 0, threshold or 10))
+    return customer_out(customer, classify(completed or 0, threshold or 10))

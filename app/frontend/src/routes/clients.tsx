@@ -485,8 +485,14 @@ function ageFrom(iso: string): number {
   return today.getFullYear() - y - (hadBirthdayThisYear ? 0 : 1)
 }
 
+/** The browser's local date, as `YYYY-MM-DD` — not `toISOString()`, which is UTC and prints
+ *  tomorrow's date for anyone west of Greenwich after roughly 8pm local: exactly the window
+ *  in which today's own real DOB would fail the "not in the future" check it feeds. */
 function todayISO(): string {
-  return new Date().toISOString().slice(0, 10)
+  const today = new Date()
+  const month = String(today.getMonth() + 1).padStart(2, '0')
+  const day = String(today.getDate()).padStart(2, '0')
+  return `${today.getFullYear()}-${month}-${day}`
 }
 
 /** The dialog's own shape: every field as a plain string, so a text input never has to
