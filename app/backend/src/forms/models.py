@@ -18,6 +18,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -90,3 +91,29 @@ class FormTemplateVersion(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     published_by_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+
+
+class FormLink(Base):
+    """A secure link: one client, one frozen version, 48 hours, used once (Task 3, #46).
+
+    Only the SHA-256 of the token is stored — the token itself exists in the URL handed back
+    once and in the email, so a database dump yields no usable link. Mutable on purpose: the
+    app role stamps `consumed_at` (Task 4) and `revoked_at`. No ciphertext, so no key FK."""
+
+    __tablename__ = "form_links"
+    __table_args__ = (
+        CheckConstraint("expires_at > issued_at", name="ck_form_links_expiry"),
+        CheckConstraint("octet_length(token_sha256) = 32", name="ck_form_links_sha256"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    token_sha256: Mapped[bytes] = mapped_column(LargeBinary, unique=True)
+    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id"), index=True)
+    version_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("form_template_versions.id"))
+    issued_by_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

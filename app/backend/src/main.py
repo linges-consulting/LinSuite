@@ -32,6 +32,8 @@ from core.redis import get_redis
 from customers.access_report import router as access_report_router
 from customers.erasure import router as erasure_router
 from customers.routes import router as customers_router
+from forms.links import router as form_links_router
+from forms.public import router as public_forms_router
 from forms.routes import router as forms_router
 from scheduling.appointments import router as appointments_router
 from scheduling.closures import router as closures_router
@@ -174,6 +176,17 @@ async def require_json_body(request: Request, call_next):
     return await call_next(request)
 
 
+# The public surface (`/api/public/…`) carries a secret in its URL: the form link's token.
+# Neither a cache nor a third party may keep it — whatever the answer, 200, 404 or 429.
+@app.middleware("http")
+async def public_headers(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/public/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
 def _from_this_deployment(request: Request) -> bool:
     """`Origin`, or the `Referer` it is derived from when a browser withholds it."""
     origin = request.headers.get("origin")
@@ -230,6 +243,10 @@ api.include_router(roster_router)
 api.include_router(schedule_router)
 # Settings → Forms: templates and their frozen versions (`forms.manage`, Admin Mode).
 api.include_router(forms_router)
+# Sending a form to a client (`forms.issue`, Staff Mode), and the page the client opens —
+# the one router with no auth dependency at all (`forms/public.py`).
+api.include_router(form_links_router)
+api.include_router(public_forms_router)
 api.include_router(business_router)
 api.include_router(branding_router)
 app.include_router(api)

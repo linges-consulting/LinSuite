@@ -228,3 +228,24 @@ async def test_migration_0027_round_trips(database):
 
     await _upgrade_to("head")
     assert await _form_templates() == (True, True, True, 1)
+
+
+async def _form_links() -> tuple[bool, int]:
+    async with session_scope() as db:
+        table = await db.scalar(text("SELECT to_regclass('form_links') IS NOT NULL"))
+        holders = await db.scalar(
+            text("SELECT count(*) FROM role_capabilities WHERE capability = 'forms.issue'")
+        )
+    return bool(table), int(holders)
+
+
+async def test_migration_0028_round_trips(database):
+    """0028 adds `form_links` and gives both seeded roles `forms.issue`; the downgrade takes
+    both back out, to the explicit revision."""
+    assert await _form_links() == (True, 2)
+
+    await _downgrade_to("0027")
+    assert await _form_links() == (False, 0)
+
+    await _upgrade_to("0028")
+    assert await _form_links() == (True, 2)

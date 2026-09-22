@@ -59,6 +59,8 @@ async def claimed_instance(client):
         await wipe_document_keys()
         async with session_scope() as db:
             for table in (
+                # A link points at its client and its issuer (Task 3, #46).
+                "form_links",
                 "appointment_resources",
                 "appointments",
                 "customers",

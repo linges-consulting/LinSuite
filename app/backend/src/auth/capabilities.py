@@ -106,6 +106,9 @@ CAPABILITIES: tuple[Capability, ...] = (
         # Irreversible, so it sits behind the short window like the other compliance action.
         requires_admin_mode=True,
     ),
+    # Front-desk work, so Staff Mode: the clinic tablet is never signed in, and staff hand
+    # it over by showing the link's QR code (owner ruling, #46).
+    Capability("forms.issue", "Send forms to clients and take scans.", "Customers"),
 )
 
 BY_KEY: dict[str, Capability] = {c.key: c for c in CAPABILITIES}
