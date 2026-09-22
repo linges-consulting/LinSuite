@@ -46,6 +46,8 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "audit_access_log": ("SELECT", "INSERT"),
     # A key is written once and never rewritten; only the purge role destroys one (0024).
     "customer_document_keys": ("SELECT", "INSERT"),
+    # The record that an erasure was honoured: the app stamps `purged_at`, never deletes it.
+    "erasure_requests": ("SELECT", "INSERT", "UPDATE"),
 }
 # The purge role reads and deletes everywhere and writes nowhere — except the fact of its own
 # purge, which ADR-0001 §6 puts in the purge transaction (0024, pre-flight D11).
@@ -204,6 +206,11 @@ async def test_audit_events_no_rewrite_refuses_an_update_even_with_the_grant_res
 # Both runtime roles hold TEMP, so an unpinned guard answers whatever a temp table tells it
 # (0024, fix rounds 1 and 2). Self-discovering: a future migration's unpinned trigger fails
 # here without anybody having to remember to list it.
+#
+# It does not follow the call graph. A plain (non-trigger, non-definer) helper that a trigger
+# function calls is not in this sweep, and it runs with its *own* `search_path` setting — so a
+# helper that names relations bare must pin its path itself (or qualify every name). Nothing
+# here would notice if it did not.
 _PINNABLE = """
 SELECT DISTINCT p.proname, p.proconfig
   FROM pg_proc p
@@ -238,6 +245,14 @@ async def test_every_trigger_and_security_definer_function_pins_its_search_path(
         if path is None or path[0] != "pg_catalog" or path[-1] != "pg_temp"
     }
     assert unpinned == {}, "pin `SET search_path = pg_catalog, ..., pg_temp` on these"
+
+
+async def test_nobody_but_the_owner_may_create_in_public(database):
+    """0025 revokes it from PUBLIC explicitly rather than relying on the PostgreSQL 15+
+    default, which a database initialised another way would not have."""
+    async with session_scope() as db:
+        granted = await db.scalar(text("SELECT has_schema_privilege('public', 'public', 'CREATE')"))
+    assert granted is False
 
 
 async def test_neither_runtime_role_may_create_in_public(database):
@@ -284,6 +299,66 @@ async def test_a_temp_pg_class_cannot_make_the_app_role_the_owner_of_audit_event
                 await conn.rollback()
     finally:
         await owner.dispose()
+
+
+async def test_a_temp_pg_class_cannot_let_the_app_role_rewrite_the_access_log(database):
+    """The same attack on `audit_access_log_append_only()`: a partitioned table, so the row is
+    inserted through the parent and the UPDATE is tried through it too."""
+    owner = create_async_engine(get_settings().database_url_migrate)
+    try:
+        async with owner.connect() as conn:
+            await conn.begin()
+            try:
+                await conn.execute(text("GRANT UPDATE ON audit_access_log TO linsuite_app"))
+                await conn.execute(
+                    text(
+                        "INSERT INTO audit_access_log (actor_user_id, actor_role, customer_id, "
+                        "resource_type, resource_id, action) VALUES (gen_random_uuid(), "
+                        "'Staff', gen_random_uuid(), 'probe', 'probe', 'view')"
+                    )
+                )
+                await conn.execute(text("SET ROLE linsuite_app"))
+                await conn.execute(text("CREATE TEMP TABLE pg_class (oid oid, relowner oid)"))
+                await conn.execute(
+                    text(
+                        "INSERT INTO pg_class SELECT c.oid, r.oid FROM pg_catalog.pg_class c, "
+                        "pg_catalog.pg_roles r WHERE c.relname LIKE 'audit_access_log%' "
+                        "AND r.rolname = 'linsuite_app'"
+                    )
+                )
+                with pytest.raises(DBAPIError) as refused:
+                    await conn.execute(text("UPDATE audit_access_log SET action = 'x'"))
+                assert getattr(refused.value.orig, "sqlstate", None) == "42501", refused.value
+                assert "append-only" in str(refused.value)
+            finally:
+                await conn.rollback()
+    finally:
+        await owner.dispose()
+
+
+# --- the purge role is reachable only from the purge tasks (Task 7, pre-flight D5a) ---------
+#
+# The request path must never gain the purge role's powers. The strongest form of that is that
+# the web process never even builds a purge engine: only the Celery tasks do. So every source
+# file that names the purge DSN or an engine built on it is listed here, with its reason.
+PURGE_REACHERS = {
+    "core/config.py": "declares the `DATABASE_URL_PURGE` setting",
+    "core/db.py": "builds the purge engines",
+    "customers/tasks.py": "the purge tasks — the one production caller",
+}
+PURGE_TOKENS = ("database_url_purge", "get_purge_engine", "get_task_engines")
+
+
+def test_only_the_purge_tasks_reach_the_purge_role():
+    found = {
+        str(path.relative_to(SRC))
+        for path in SRC.rglob("*.py")
+        if any(token in path.read_text() for token in PURGE_TOKENS)
+    }
+    assert found == set(PURGE_REACHERS), f"purge role reached from {sorted(found)}"
+    # And no module that mounts routes is among them.
+    for relative in found:
+        assert "APIRouter(" not in (SRC / relative).read_text(), relative
 
 
 # --- the 403 invariant, self-discovering (fix wave, finding 20) ------------------------------

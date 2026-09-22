@@ -54,6 +54,8 @@ async def claimed_instance(client):
     async def wipe():
         async with get_purge_engine().begin() as purge:
             await purge.execute(text("DELETE FROM audit_events"))
+            # The app role may not delete an erasure request (0025); the purge role may.
+            await purge.execute(text("DELETE FROM erasure_requests"))
         await wipe_document_keys()
         async with session_scope() as db:
             for table in (

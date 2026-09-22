@@ -18,7 +18,7 @@ from auth.roles import router as roles_router
 from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
 from core.config import get_settings
-from core.db import SessionDep, get_engine, get_purge_engine, session_scope
+from core.db import SessionDep, get_engine, session_scope
 from core.errors import (
     SERVICE_UNAVAILABLE,
     TRY_AGAIN,
@@ -30,6 +30,7 @@ from core.logging import configure_logging
 from core.partitions import ensure_on_boot
 from core.redis import get_redis
 from customers.access_report import router as access_report_router
+from customers.erasure import router as erasure_router
 from customers.routes import router as customers_router
 from scheduling.appointments import router as appointments_router
 from scheduling.closures import router as closures_router
@@ -59,7 +60,6 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await bootstrap_setup_token(session)
     yield
     await get_engine().dispose()
-    await get_purge_engine().dispose()
     await get_redis().aclose()
 
 
@@ -221,6 +221,7 @@ api.include_router(availability_router)
 # is for. `/staff` is the roster every scheduler reads; `/admin/staff` above is the accounts.
 api.include_router(appointments_router)
 api.include_router(customers_router)
+api.include_router(erasure_router)
 # Who opened a client's record: administration, not the chart, so under `/admin` and unlogged.
 api.include_router(access_report_router)
 api.include_router(roster_router)

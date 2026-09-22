@@ -35,6 +35,23 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
 
+# What an erasure request removes whether or not the chart is held (pre-flight D5b): how to
+# reach the client, both contacts, and the front-desk notes. Names and DOB go too only when
+# nothing holds them — replaced by `ERASED_NAMES` and NULL, so the row survives as the
+# anonymous tombstone the business's own appointment history points at.
+ALWAYS_ERASED = (
+    "email",
+    "phone",
+    "emergency_contact_name",
+    "emergency_contact_phone",
+    "emergency_contact_relationship",
+    "secondary_contact_name",
+    "secondary_contact_phone",
+    "secondary_contact_email",
+    "notes",
+)
+ERASED_NAMES = ("Erased", "Client")
+
 
 class Customer(Base):
     __tablename__ = "customers"
@@ -81,6 +98,9 @@ class Customer(Base):
     # NULL = not held; an instant = held until then; 'infinity' = held, DOB unknown. Derived
     # from the DOB, so it is PHI: only ever on the logged profile response.
     retention_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # --- Task 7 (#42): set by an erasure request. Hidden from lists, search and booking;
+    # the profile still opens by id (and still logs), for the record that it was honoured.
+    suppressed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -104,3 +124,27 @@ class CustomerDocumentKey(Base):
     # is here so a rotation can re-wrap row by row and know which rows it has done.
     master_key_version: Mapped[int] = mapped_column(SmallInteger, server_default=text("1"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ErasureRequest(Base):
+    """A client asked to be forgotten (ADR-0001 §3, pre-flight D5a/D5b) — and the record that
+    the business honoured it. `linsuite_app` may not DELETE it (0025): it is the evidence.
+
+    `held_until`/`held_reason` are what was held at the moment of asking (`'infinity'` when
+    the chart has no DOB); the profile explains the *current* hold, which a DOB correction can
+    move. `purged_at` is stamped once the key is shredded and the profile anonymised."""
+
+    __tablename__ = "erasure_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id"), index=True)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    requested_by_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    note: Mapped[str | None] = mapped_column(Text)
+    held_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    held_reason: Mapped[str | None] = mapped_column(Text)
+    purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

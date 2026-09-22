@@ -92,6 +92,14 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability("customers.view", "Open customer profiles and their history.", "Customers"),
     Capability("customers.manage", "Add customers and edit their details.", "Customers"),
+    Capability(
+        "customers.erase",
+        "Erase a client's personal information on request; what the law holds is kept and "
+        "explained.",
+        "Customers",
+        # Irreversible, so it sits behind the short window like the other compliance action.
+        requires_admin_mode=True,
+    ),
 )
 
 BY_KEY: dict[str, Capability] = {c.key: c for c in CAPABILITIES}

@@ -16,7 +16,7 @@ from celery.signals import setup_logging
 from core.config import get_settings
 from core.logging import configure_logging
 
-celery_app = Celery("linsuite", include=["core.tasks", "notifications.tasks"])
+celery_app = Celery("linsuite", include=["core.tasks", "customers.tasks", "notifications.tasks"])
 
 
 @celery_app.on_configure.connect
@@ -34,6 +34,13 @@ def _configure(sender: Celery, **_: object) -> None:
         "maintain-partitions": {
             "task": "core.tasks.maintain_partitions",
             "schedule": crontab(hour=3, minute=15),
+        },
+        # Nightly at 03:30 UTC (late evening across North America): finish erasure requests
+        # whose hold has passed, and shred the keys of every client whose hold has expired.
+        # Idempotent — a missed night is caught up by the next.
+        "purge-expired": {
+            "task": "customers.tasks.purge_expired",
+            "schedule": crontab(hour=3, minute=30),
         },
     }
 

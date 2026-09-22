@@ -53,6 +53,9 @@ PHI_FIELDS: frozenset[str] = frozenset(
         "notes",
         # The retention hold: derived from the date of birth, so it discloses it (Task 4).
         "retention",
+        # An erasure's hold: its end date and the sentence stating it disclose the DOB too.
+        "held_until",
+        "held_reason",
     }
 )
 

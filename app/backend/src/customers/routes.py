@@ -31,6 +31,7 @@ from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -44,7 +45,8 @@ from core.db import SessionDep
 from core.models import Business
 from customers import keys, retention
 from customers.classification import Classification, classify
-from customers.models import Customer
+from customers.erasure import ErasureOut, erasure_out, is_held
+from customers.models import Customer, ErasureRequest
 from scheduling.models import Appointment
 
 router = APIRouter(prefix="/customers", tags=["customers"])
@@ -296,7 +298,8 @@ async def find_customers(
     name never land on both sides of a page boundary and never on neither. A page at a time,
     with the total. `q` narrows it by prefix on either name, the email, or the digits of the
     phone — the booking dialog sends only `q` and reads the first page."""
-    query = select(Customer)
+    # An erased client is gone from every list and search, the booking dialog's included.
+    query = select(Customer).where(Customer.suppressed_at.is_(None))
     term = (q or "").strip().lower()
     if term:
         digits = re.sub(r"\D", "", term)
@@ -374,10 +377,17 @@ class CustomerDetailOut(CustomerOut):
     notes: str | None
     updated_at: datetime
     retention: RetentionOut
+    # Erasure was requested (Task 7): hidden from lists and booking, and `erasure` says what
+    # was kept and why. The request row itself is never shown — only this summary.
+    suppressed: bool
+    erasure: ErasureOut | None
 
 
 def customer_detail_out(
-    customer: Customer, classification: Classification, timezone: str
+    customer: Customer,
+    classification: Classification,
+    timezone: str,
+    request: ErasureRequest | None = None,
 ) -> CustomerDetailOut:
     return CustomerDetailOut(
         **customer_out(customer, classification).model_dump(),
@@ -391,6 +401,17 @@ def customer_detail_out(
         notes=customer.notes,
         updated_at=customer.updated_at,
         retention=retention_out(customer.retention_expires_at, timezone),
+        suppressed=customer.suppressed_at is not None,
+        # Held until the nightly job finishes it: a hold that passed last night still reads
+        # as held until its key is actually gone and `purged_at` is stamped.
+        erasure=erasure_out(
+            request,
+            request.purged_at is None and customer.retention_expires_at is not None,
+            customer.retention_expires_at,
+            timezone,
+        )
+        if request is not None
+        else None,
     )
 
 
@@ -424,8 +445,14 @@ async def read_customer(customer_id: uuid.UUID, db: SessionDep) -> CustomerProfi
     completed = sum(1 for a in visits if a.status == "completed")
     classification = classify(completed, (business.vip_visit_threshold if business else None) or 10)
     timezone = (business.timezone if business else None) or "UTC"
+    request = await db.scalar(
+        select(ErasureRequest)
+        .where(ErasureRequest.customer_id == customer_id)
+        .order_by(ErasureRequest.requested_at.desc())
+        .limit(1)
+    )
     return CustomerProfileOut(
-        customer=customer_detail_out(customer, classification, timezone),
+        customer=customer_detail_out(customer, classification, timezone, request),
         timezone=timezone,
         appointments=[
             VisitOut(
@@ -469,6 +496,19 @@ async def update_customer(
         raise HTTPException(status_code=404, detail="No such customer.")
 
     sent = payload.model_dump(exclude_unset=True)
+    # An erased profile is not refilled. The one edit it takes is a DOB correction on a chart
+    # that is still held — the only way an indefinite hold ('infinity', no DOB) ever ends.
+    if customer.suppressed_at is not None and (
+        set(sent) != {"date_of_birth"}
+        or not is_held(customer.retention_expires_at, datetime.now(UTC))
+    ):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": "This client's erasure was requested; their details cannot be edited.",
+                "code": "customer_suppressed",
+            },
+        )
     changed = [field for field, value in sent.items() if getattr(customer, field) != value]
     for field in changed:
         setattr(customer, field, sent[field])

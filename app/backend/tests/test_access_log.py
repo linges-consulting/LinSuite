@@ -57,7 +57,11 @@ TABLE = "audit_access_log"
 TRIGGER = "audit_access_log_no_rewrite"
 
 # The routes that return PHI today. A new one is a conscious edit here (rule b).
-LOGGED = {("GET", "/api/customers/{customer_id}")}
+LOGGED = {
+    ("GET", "/api/customers/{customer_id}"),
+    # Its answer names the day the hold ends, which discloses the DOB (Task 7).
+    ("POST", "/api/customers/{customer_id}/erasure"),
+}
 # Customer-scoped GETs that deliberately do not log. Empty: nothing under a customer's path
 # is metadata yet (the access report itself will live under `/api/admin/...`).
 NOT_PHI: set[tuple[str, str]] = set()

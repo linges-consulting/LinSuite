@@ -582,6 +582,27 @@ def invalid_transition(status: str) -> JSONResponse:
     )
 
 
+def customer_suppressed() -> JSONResponse:
+    """The client asked to be erased (Task 7): they are not bookable. The profile's history
+    stays; nothing new is added to it. The same 422 shape as `refuse`, with a code."""
+    # ponytail: read without a lock — an erasure committed between this read and the insert
+    # lets one last booking through; the appointment FK only takes KEY SHARE. Lock the row
+    # FOR SHARE here if that window ever matters.
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {
+                    "type": "value_error",
+                    "loc": ["body", "customer_id"],
+                    "msg": "This client asked to be erased and cannot be booked.",
+                }
+            ],
+            "code": "customer_suppressed",
+        },
+    )
+
+
 def not_yet_started() -> JSONResponse:
     """A no-show marked before `starts_at`: there is nothing to have missed yet."""
     return JSONResponse(
@@ -717,6 +738,8 @@ async def book_appointment(payload: BookingIn, actor: Scheduler, claims: ClaimsD
         customer = await db.get(Customer, payload.customer_id)
         if customer is None:
             raise refuse("customer_id", "No such customer.")
+        if customer.suppressed_at is not None:
+            return customer_suppressed()
 
     appointment = Appointment(
         customer_id=customer.id,
@@ -1210,6 +1233,8 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
         customer = await db.get(Customer, payload.customer_id)
         if customer is None:
             raise refuse("customer_id", "No such customer.")
+        if customer.suppressed_at is not None:
+            return customer_suppressed()
 
     group_id = uuid.uuid4()
     created: list[Appointment] = []

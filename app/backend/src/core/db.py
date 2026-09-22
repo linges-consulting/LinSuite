@@ -2,7 +2,9 @@
 
 `get_engine()` is the application engine: request handlers and Celery tasks use it via
 `get_session`. `get_purge_engine()` connects as `linsuite_purge` and is reserved for the
-retention-expiry job. Nothing else may import it.
+retention-expiry job. Nothing else may import it: `customers/tasks.py` is its one production
+caller, and `test_only_the_purge_tasks_reach_the_purge_role` holds that line — the web
+process never builds it, so no request handler can reach the purge role at all.
 """
 
 from collections.abc import AsyncIterator
@@ -17,6 +19,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import NullPool
 
 from core.config import get_settings
 
@@ -37,6 +40,19 @@ def get_purge_engine() -> AsyncEngine:
     # pool quietly handing out a second one.
     return create_async_engine(
         get_settings().database_url_purge, pool_pre_ping=True, pool_size=1, max_overflow=0
+    )
+
+
+def get_task_engines() -> tuple[AsyncEngine, AsyncEngine]:
+    """(app, purge) engines for one Celery task run, unpooled — dispose both after.
+
+    Not the cached engines above: a task runs under its own `asyncio.run`, a fresh event loop
+    each time, and a pooled asyncpg connection from last run's loop is unusable in this one.
+    `NullPool` keeps the purge role to the one connection a run actually opens."""
+    settings = get_settings()
+    return (
+        create_async_engine(settings.database_url, poolclass=NullPool),
+        create_async_engine(settings.database_url_purge, poolclass=NullPool),
     )
 
 

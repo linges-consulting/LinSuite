@@ -147,3 +147,33 @@ async def test_migration_0024_round_trips(database):
 
     await _upgrade_to("head")
     assert await _document_keys() == (True, True, True, 3)
+
+
+async def _erasure() -> tuple[bool, bool, int]:
+    """(erasure_requests exists, customers.suppressed_at exists, roles holding
+    `customers.erase`)."""
+    async with session_scope() as db:
+        table = await db.scalar(text("SELECT to_regclass('erasure_requests') IS NOT NULL"))
+        column = await db.scalar(
+            text(
+                "SELECT count(*) > 0 FROM information_schema.columns "
+                "WHERE table_name = 'customers' AND column_name = 'suppressed_at'"
+            )
+        )
+        holders = await db.scalar(
+            text("SELECT count(*) FROM role_capabilities WHERE capability = 'customers.erase'")
+        )
+    return bool(table), bool(column), int(holders)
+
+
+async def test_migration_0025_round_trips(database):
+    """0025 adds the request table, the suppression column and the Administrator's grant of
+    `customers.erase`; the downgrade takes all three back out. The explicit `REVOKE CREATE ON
+    SCHEMA public FROM PUBLIC` is deliberately left in place by the downgrade."""
+    assert await _erasure() == (True, True, 1)
+
+    await _downgrade_to("0024")
+    assert await _erasure() == (False, False, 0)
+
+    await _upgrade_to("head")
+    assert await _erasure() == (True, True, 1)
