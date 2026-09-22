@@ -1,3 +1,4 @@
+import { SignaturePad } from '@/components/signature-pad'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -8,14 +9,24 @@ import { YES_NO, type FormField } from '@/lib/forms'
  * One field of a form, as a client sees it. Shared by the builder's preview (Settings →
  * Forms) and the public form page (`/f/#<token>`), so what staff preview is what the client
  * gets. Visibility (`show_if`) is the caller's, through `lib/forms.ts`'s `visibleKeys`.
+ *
+ * `error` is a sentence shown under the field and tied to its control with
+ * `aria-describedby`, so a screen reader hears it with the field.
  */
 export function FormFieldInput(props: {
   field: FormField
   value: unknown
   onChange: (value: unknown) => void
+  error?: string
 }) {
-  const { field, value, onChange } = props
+  const { field, value, onChange, error } = props
   const id = `field-${field.key}`
+  const errorId = error ? `${id}-error` : undefined
+  const problem = error && (
+    <p id={errorId} className="text-sm text-destructive">
+      {error}
+    </p>
+  )
   const label = (
     <>
       {field.label ? <span>{field.label}</span> : <span className="text-muted-foreground">(no label yet)</span>}
@@ -28,7 +39,7 @@ export function FormFieldInput(props: {
   )
   const help = field.help && <p className="text-xs text-muted-foreground">{field.help}</p>
   const choices = (type: 'radio' | 'checkbox', options: readonly string[], text = (o: string) => o) => (
-    <fieldset className="flex flex-col gap-2">
+    <fieldset className="flex flex-col gap-2" aria-describedby={errorId}>
       <legend className="mb-1 text-sm font-medium">{label}</legend>
       {help}
       {options.map((o) => {
@@ -54,6 +65,7 @@ export function FormFieldInput(props: {
           </label>
         )
       })}
+      {problem}
     </fieldset>
   )
 
@@ -70,21 +82,29 @@ export function FormFieldInput(props: {
       return choices('checkbox', field.options ?? [])
     case 'acknowledgement':
       return (
-        <div className="flex items-start gap-2">
-          <Checkbox id={id} className="mt-0.5" checked={value === true} onCheckedChange={(on) => onChange(on === true)} />
-          <Label htmlFor={id} className="font-normal whitespace-pre-wrap">
-            {label}
-          </Label>
+        <div className="flex flex-col gap-2">
+          <div className="flex items-start gap-2">
+            <Checkbox
+              id={id}
+              className="mt-0.5"
+              checked={value === true}
+              aria-describedby={errorId}
+              onCheckedChange={(on) => onChange(on === true)}
+            />
+            <Label htmlFor={id} className="font-normal whitespace-pre-wrap">
+              {label}
+            </Label>
+          </div>
+          {problem}
         </div>
       )
     case 'signature':
       return (
         <div className="flex flex-col gap-2">
-          <Label>{label}</Label>
-          <div className="flex h-24 items-center justify-center rounded-lg border border-dashed text-xs text-muted-foreground">
-            The client draws their signature here
-          </div>
-          <Input aria-label="Full name" placeholder="Full name" />
+          <span className="text-sm font-medium">{label}</span>
+          {help}
+          <SignaturePad id={id} value={value} onChange={onChange} describedBy={errorId} />
+          {problem}
         </div>
       )
     default:
@@ -93,15 +113,24 @@ export function FormFieldInput(props: {
           <Label htmlFor={id}>{label}</Label>
           {help}
           {field.type === 'long_text' ? (
-            <Textarea id={id} value={(value as string) ?? ''} onChange={(e) => onChange(e.target.value)} />
+            <Textarea
+              id={id}
+              value={(value as string) ?? ''}
+              aria-describedby={errorId}
+              aria-invalid={error ? true : undefined}
+              onChange={(e) => onChange(e.target.value)}
+            />
           ) : (
             <Input
               id={id}
               type={field.type === 'date' ? 'date' : 'text'}
               value={(value as string) ?? ''}
+              aria-describedby={errorId}
+              aria-invalid={error ? true : undefined}
               onChange={(e) => onChange(e.target.value)}
             />
           )}
+          {problem}
         </div>
       )
   }

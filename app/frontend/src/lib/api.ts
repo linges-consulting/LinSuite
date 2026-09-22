@@ -1,4 +1,4 @@
-import type { FormSchema } from '@/lib/forms'
+import type { Answers, FieldType, FormSchema } from '@/lib/forms'
 
 /** FastAPI's 422 says which field it is unhappy about in `loc`; put the message under it.
  *  Shared by every edit form that shows a server error inline rather than as a toast.
@@ -1167,6 +1167,60 @@ export async function fetchPublicForm(token: string): Promise<PublicForm> {
     referrerPolicy: 'origin',
     cache: 'no-store',
   })
+  if (!res.ok) throw await failure(res, 'Could not open the form')
+  return res.json()
+}
+
+/** What the page sends. `submission_id` is minted once per page and resent on every retry. */
+export type FormSubmitPayload = {
+  token: string
+  submission_id: string
+  version_id: string
+  answers: Answers
+}
+
+/**
+ * The public submit (#47), sent exactly like the lookup: token in the body, no credentials,
+ * `Origin` kept. 200 `received` or `already_received` (a retry of what was filed); a 422
+ * `invalid_answers` carries `errors: {key: code}` on the thrown error's body.
+ */
+export async function submitPublicForm(payload: FormSubmitPayload): Promise<{ status: string }> {
+  const res = await fetch('/api/public/forms/submit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    credentials: 'omit',
+    referrerPolicy: 'origin',
+    cache: 'no-store',
+  })
+  if (!res.ok) throw await failure(res, 'Could not send the form')
+  return res.json()
+}
+
+/** One completed form, as the profile lists it: metadata, never answers. */
+export type FormSubmissionSummary = {
+  id: string
+  template_id: string
+  template_name: string
+  version: number
+  method: 'link' | 'scan'
+  submitted_at: string
+}
+
+/** One completed form opened (`forms.view`; logged): its own version's fields, and answers. */
+export type FormSubmissionDetail = FormSubmissionSummary & {
+  fields: { key: string; type: FieldType; label: string }[]
+  answers: Answers
+}
+
+export async function fetchClientSubmissions(customerId: string): Promise<FormSubmissionSummary[]> {
+  const res = await fetch(`/api/customers/${customerId}/forms`)
+  if (!res.ok) throw await failure(res, 'Could not load the completed forms')
+  return (await res.json()).submissions
+}
+
+export async function fetchFormSubmission(customerId: string, id: string): Promise<FormSubmissionDetail> {
+  const res = await fetch(`/api/customers/${customerId}/forms/${id}`)
   if (!res.ok) throw await failure(res, 'Could not open the form')
   return res.json()
 }

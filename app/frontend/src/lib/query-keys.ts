@@ -56,3 +56,6 @@ export const FORM_VERSIONS = ['form-versions'] as const
 /** The "Send form" dialog's choices (`forms.issue`), and one client's open links (id after). */
 export const SENDABLE_FORMS = ['sendable-forms'] as const
 export const FORM_LINKS = ['form-links'] as const
+/** One client's completed forms (`forms.view`; metadata), id after; and one opened (logged). */
+export const FORM_SUBMISSIONS = ['form-submissions'] as const
+export const FORM_SUBMISSION = ['form-submission'] as const

@@ -26,13 +26,16 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import {
+  fetchClientSubmissions,
+  fetchFormSubmission,
   fetchOpenFormLinks,
   fetchSendableForms,
   issueFormLink,
   revokeFormLink,
+  type FormSubmissionDetail,
   type IssuedFormLink,
 } from '@/lib/api'
-import { FORM_LINKS, SENDABLE_FORMS } from '@/lib/query-keys'
+import { FORM_LINKS, FORM_SUBMISSION, FORM_SUBMISSIONS, SENDABLE_FORMS } from '@/lib/query-keys'
 
 /**
  * The profile's "Forms" card (`forms.issue`, Staff Mode; #46): send a form, and see and revoke
@@ -42,13 +45,30 @@ import { FORM_LINKS, SENDABLE_FORMS } from '@/lib/query-keys'
  * is the only copy outside the client's email: the dialog shows it with Copy and a QR code —
  * the in-clinic flow is a tablet that is never signed in, which scans the code and is handed
  * to the client — and it is gone when the dialog closes.
+ *
+ * **Completed forms** (`forms.view`; #47): the list is metadata — form, version, method, when —
+ * and opening one is a logged read of the chart that shows the answers with the labels of the
+ * version they were given against. The opened answers are never kept in the query cache.
  */
-export function ClientFormsCard(props: { customerId: string; timezone: string; suppressed: boolean }) {
+export function ClientFormsCard(props: {
+  customerId: string
+  timezone: string
+  suppressed: boolean
+  canSend: boolean
+  canView: boolean
+}) {
   const [sending, setSending] = useState(false)
+  const [opening, setOpening] = useState<string | null>(null)
   const queryClient = useQueryClient()
   const links = useQuery({
     queryKey: [...FORM_LINKS, props.customerId],
     queryFn: () => fetchOpenFormLinks(props.customerId),
+    enabled: props.canSend,
+  })
+  const completed = useQuery({
+    queryKey: [...FORM_SUBMISSIONS, props.customerId],
+    queryFn: () => fetchClientSubmissions(props.customerId),
+    enabled: props.canView,
   })
   const revoke = useMutation({
     mutationFn: (linkId: string) => revokeFormLink(props.customerId, linkId),
@@ -71,56 +91,113 @@ export function ClientFormsCard(props: { customerId: string; timezone: string; s
         <CardTitle className="text-base font-medium">
           <h2>Forms</h2>
         </CardTitle>
-        {!props.suppressed && (
+        {props.canSend && !props.suppressed && (
           <Button size="sm" variant="outline" onClick={() => setSending(true)}>
             <Send aria-hidden />
             Send form
           </Button>
         )}
       </CardHeader>
-      <CardContent>
-        {links.isPending ? (
-          <Skeleton className="h-10 w-full" />
-        ) : links.isError ? (
-          <p className="text-sm text-destructive">{links.error.message}</p>
-        ) : links.data.length === 0 ? (
-          <p className="text-sm text-muted-foreground">No forms waiting to be filled in.</p>
-        ) : (
-          <Table aria-label="Open form links">
-            <TableHeader>
-              <TableRow>
-                <TableHead>Form</TableHead>
-                <TableHead>Sent</TableHead>
-                <TableHead>Expires</TableHead>
-                <TableHead className="sr-only">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {links.data.map((link) => (
-                <TableRow key={link.id}>
-                  <TableCell>
-                    {link.template_name}{' '}
-                    <span className="text-muted-foreground">v{link.version}</span>
-                  </TableCell>
-                  <TableCell>{when(link.issued_at)}</TableCell>
-                  <TableCell>{when(link.expires_at)}</TableCell>
-                  <TableCell className="text-right">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={revoke.isPending}
-                      onClick={() => revoke.mutate(link.id)}
-                      aria-label={`Revoke ${link.template_name}`}
-                    >
-                      Revoke
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+      <CardContent className="flex flex-col gap-6">
+        {props.canView && (
+          <section className="flex flex-col gap-2">
+            <h3 className="text-sm font-medium">Completed</h3>
+            {completed.isPending ? (
+              <Skeleton className="h-10 w-full" />
+            ) : completed.isError ? (
+              <p className="text-sm text-destructive">{completed.error.message}</p>
+            ) : completed.data.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No completed forms yet.</p>
+            ) : (
+              <Table aria-label="Completed forms">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Form</TableHead>
+                    <TableHead>Method</TableHead>
+                    <TableHead>Submitted</TableHead>
+                    <TableHead className="sr-only">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {completed.data.map((s) => (
+                    <TableRow key={s.id}>
+                      <TableCell>
+                        {s.template_name} <span className="text-muted-foreground">v{s.version}</span>
+                      </TableCell>
+                      <TableCell>{s.method === 'link' ? 'Link' : 'Scan'}</TableCell>
+                      <TableCell>{when(s.submitted_at)}</TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setOpening(s.id)}
+                          aria-label={`Open ${s.template_name}`}
+                        >
+                          Open
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </section>
+        )}
+        {props.canSend && (
+          <section className="flex flex-col gap-2">
+            {props.canView && <h3 className="text-sm font-medium">Waiting to be filled in</h3>}
+            {links.isPending ? (
+              <Skeleton className="h-10 w-full" />
+            ) : links.isError ? (
+              <p className="text-sm text-destructive">{links.error.message}</p>
+            ) : links.data.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No forms waiting to be filled in.</p>
+            ) : (
+              <Table aria-label="Open form links">
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Form</TableHead>
+                    <TableHead>Sent</TableHead>
+                    <TableHead>Expires</TableHead>
+                    <TableHead className="sr-only">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {links.data.map((link) => (
+                    <TableRow key={link.id}>
+                      <TableCell>
+                        {link.template_name}{' '}
+                        <span className="text-muted-foreground">v{link.version}</span>
+                      </TableCell>
+                      <TableCell>{when(link.issued_at)}</TableCell>
+                      <TableCell>{when(link.expires_at)}</TableCell>
+                      <TableCell className="text-right">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={revoke.isPending}
+                          onClick={() => revoke.mutate(link.id)}
+                          aria-label={`Revoke ${link.template_name}`}
+                        >
+                          Revoke
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </section>
         )}
       </CardContent>
+      {opening && (
+        <SubmissionDialog
+          customerId={props.customerId}
+          submissionId={opening}
+          when={when}
+          onClose={() => setOpening(null)}
+        />
+      )}
       {sending && (
         <SendFormDialog
           customerId={props.customerId}
@@ -239,4 +316,87 @@ function IssuedLink(props: { link: IssuedFormLink; when: (instant: string) => st
       </DialogFooter>
     </div>
   )
+}
+
+function SubmissionDialog(props: {
+  customerId: string
+  submissionId: string
+  when: (instant: string) => string
+  onClose: () => void
+}) {
+  // Each open is a logged read (ADR-0002), and the answers are PHI: fetched fresh, never kept.
+  const submission = useQuery({
+    queryKey: [...FORM_SUBMISSION, props.customerId, props.submissionId],
+    queryFn: () => fetchFormSubmission(props.customerId, props.submissionId),
+    gcTime: 0,
+    staleTime: Infinity,
+    retry: false,
+    refetchOnWindowFocus: false,
+  })
+  const data = submission.data
+  return (
+    <Dialog open onOpenChange={(open) => !open && props.onClose()}>
+      <DialogContent className="max-h-[85dvh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>{data ? `${data.template_name} v${data.version}` : 'Completed form'}</DialogTitle>
+          <DialogDescription>
+            {data ? `Submitted ${props.when(data.submitted_at)}.` : 'Opening the form…'}
+          </DialogDescription>
+        </DialogHeader>
+        {submission.isPending ? (
+          <Skeleton className="h-32 w-full" />
+        ) : submission.isError ? (
+          <p role="alert" className="text-sm text-destructive">
+            {submission.error.message}
+          </p>
+        ) : (
+          <dl className="flex flex-col gap-4">
+            {data!.fields
+              .filter((f) => f.type === 'heading' || f.key in data!.answers)
+              .map((f) =>
+                f.type === 'heading' ? (
+                  <h4 key={f.key} className="text-base font-semibold">
+                    {f.label}
+                  </h4>
+                ) : (
+                  <div key={f.key} className="flex flex-col gap-1">
+                    <dt className="text-sm text-muted-foreground whitespace-pre-wrap">{f.label}</dt>
+                    <dd className="text-sm">
+                      <Answer field={f} value={data!.answers[f.key]} />
+                    </dd>
+                  </div>
+                ),
+              )}
+          </dl>
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function Answer(props: { field: FormSubmissionDetail['fields'][number]; value: unknown }) {
+  const { field, value } = props
+  switch (field.type) {
+    case 'yes_no':
+      return <>{value === 'yes' ? 'Yes' : 'No'}</>
+    case 'multi_choice':
+      return <>{(value as string[]).join(', ')}</>
+    case 'acknowledgement':
+      return <>Agreed</>
+    case 'signature': {
+      const signature = value as { name: string; image: string }
+      return (
+        <div className="flex flex-col gap-1">
+          <img
+            src={signature.image}
+            alt={`Signature of ${signature.name}`}
+            className="h-20 w-auto self-start rounded border bg-white"
+          />
+          <span>{signature.name}</span>
+        </div>
+      )
+    }
+    default:
+      return <span className="whitespace-pre-wrap">{String(value)}</span>
+  }
 }

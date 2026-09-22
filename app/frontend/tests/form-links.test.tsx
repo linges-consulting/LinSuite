@@ -221,9 +221,8 @@ for (const signedIn of [true, false]) {
     expect(await screen.findByRole('heading', { name: 'Prenatal intake' })).toBeInTheDocument()
     expect(screen.getByText('Hi Priya,')).toBeInTheDocument()
     expect(screen.getByText(BUSINESS_NAME)).toBeInTheDocument()
-    // No shell and no submit yet (Task 4).
+    // No shell: nothing of the staff app is reachable from here.
     expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /submit/i })).not.toBeInTheDocument()
 
     expect(screen.queryByLabelText(/How many weeks/)).not.toBeInTheDocument()
     await user.click(screen.getByRole('radio', { name: 'Yes' }))

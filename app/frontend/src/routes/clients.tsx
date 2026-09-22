@@ -215,6 +215,7 @@ export function ClientPage() {
   const canEdit = user?.capabilities.includes('customers.manage') ?? false
   const canAudit = user?.capabilities.includes('audit.view') ?? false
   const canSendForms = user?.capabilities.includes('forms.issue') ?? false
+  const canViewForms = user?.capabilities.includes('forms.view') ?? false
   // An Admin Mode capability: offered only while the window is open, never as a refusal.
   const canErase =
     (user?.capabilities.includes('customers.erase') ?? false) && user?.mode === 'admin'
@@ -420,11 +421,13 @@ export function ClientPage() {
             </CardContent>
           </Card>
 
-          {canSendForms && (
+          {(canSendForms || canViewForms) && (
             <ClientFormsCard
               customerId={id}
               timezone={profile.data.timezone}
               suppressed={profile.data.customer.suppressed}
+              canSend={canSendForms}
+              canView={canViewForms}
             />
           )}
 
