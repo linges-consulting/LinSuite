@@ -37,20 +37,28 @@ from core.config import get_settings
 from core.db import Base, session_scope
 
 # `linsuite_app` writes everywhere except the append-only logs; `linsuite_purge` is the
-# privileged role the retention-expiry job runs as, and only ever reads and deletes.
+# privileged role the retention-expiry job runs as: it reads, deletes, and records its purges.
 APP_ROLE, PURGE_ROLE = "linsuite_app", "linsuite_purge"
 APP_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE")
 # Per-table departures from the default. Extend this, never bypass the test.
 APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "audit_events": ("SELECT", "INSERT"),
     "audit_access_log": ("SELECT", "INSERT"),
+    # A key is written once and never rewritten; only the purge role destroys one (0024).
+    "customer_document_keys": ("SELECT", "INSERT"),
 }
+# The purge role reads and deletes everywhere and writes nowhere — except the fact of its own
+# purge, which ADR-0001 §6 puts in the purge transaction (0024, pre-flight D11).
 PURGE_PRIVILEGES = ("SELECT", "DELETE")
+PURGE_EXCEPTIONS: dict[str, tuple[str, ...]] = {
+    "audit_events": ("SELECT", "INSERT", "DELETE"),
+}
 # (table, trigger) pairs that must be attached and firing.
 TRIGGERS = (
     ("appointments", "tg_appointments_staff_concurrency"),
     ("audit_events", "audit_events_no_rewrite"),
     ("audit_access_log", "audit_access_log_no_rewrite"),
+    ("customer_document_keys", "customer_document_keys_guard"),
 )
 
 
@@ -126,15 +134,10 @@ async def test_both_roles_hold_the_privileges_they_are_meant_to_on_every_table(d
                 for privilege in APP_PRIVILEGES:
                     granted = await may(APP_ROLE, table, privilege)
                     assert granted is (privilege in wanted), f"{APP_ROLE} {privilege} on {table}"
-                for privilege in PURGE_PRIVILEGES:
-                    assert await may(PURGE_ROLE, table, privilege), (
-                        f"{PURGE_ROLE} {privilege} {table}"
-                    )
-                # Today, on every table: the purge role only ever reads and deletes. (Task 6
-                # amends this to "INSERT only on audit_events", once erasure needs to write
-                # the fact of its own purge from inside the purge transaction.)
-                for privilege in ("INSERT", "UPDATE"):
-                    assert not await may(PURGE_ROLE, table, privilege), (
+                purge_wanted = PURGE_EXCEPTIONS.get(parent, PURGE_PRIVILEGES)
+                for privilege in APP_PRIVILEGES:
+                    granted = await may(PURGE_ROLE, table, privilege)
+                    assert granted is (privilege in purge_wanted), (
                         f"{PURGE_ROLE} {privilege} on {table}"
                     )
                 # Never, for either: TRUNCATE is a DELETE that fires no trigger and leaves

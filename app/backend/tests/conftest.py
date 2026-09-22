@@ -54,6 +54,9 @@ def database(tmp_path_factory, redis_server) -> Iterator[dict[str, str]]:
             # The AES-256 key the TOTP secrets are sealed with. Fixed, so a test can decrypt
             # what the app wrote and prove the column holds a ciphertext and not the secret.
             "MFA_ENCRYPTION_KEY": "11" * 32,
+            # The master key every client's document key is wrapped under. Fixed and distinct
+            # from the MFA key, so a test that unwraps under the wrong one fails for real.
+            "DOCUMENT_MASTER_KEY": "22" * 32,
             # The ASGI harness speaks http://, and a `Secure` cookie is never sent over it.
             # Production leaves this on; `test_the_session_cookie_is_secure_when_configured`
             # is what proves the flag is wired up.
@@ -135,3 +138,20 @@ async def add_account(email: str, password_hash: str, *, role: str | None = None
         user_id = row.scalar_one()
         await db.commit()
     return str(user_id)
+
+
+async def wipe_document_keys() -> None:
+    """Clear `customer_document_keys` so a fixture can delete its customers.
+
+    Neither runtime role may do this wholesale — the app role holds no DELETE and the purge
+    role is refused by the trigger for any client under a retention hold (migration 0024) —
+    so it runs as the schema owner, the one role the trigger lets through. Tests only."""
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    owner = create_async_engine(os.environ["DATABASE_URL_MIGRATE"])
+    try:
+        async with owner.begin() as conn:
+            await conn.execute(text("DELETE FROM customer_document_keys"))
+    finally:
+        await owner.dispose()

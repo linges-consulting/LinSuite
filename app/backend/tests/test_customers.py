@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import text
 
 from core.db import get_purge_engine, session_scope
+from tests.conftest import wipe_document_keys
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -28,6 +29,7 @@ CUSTOMERS = "/api/customers"
 async def claimed_instance(client):
     async with get_purge_engine().begin() as purge:
         await purge.execute(text("DELETE FROM audit_events"))
+    await wipe_document_keys()
     async with session_scope() as db:
         for table in (
             "appointment_resources",

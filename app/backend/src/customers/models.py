@@ -19,7 +19,18 @@ can actually type.
 import uuid
 from datetime import date, datetime
 
-from sqlalchemy import CheckConstraint, Date, DateTime, Index, String, Text, func, text
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    SmallInteger,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
@@ -72,3 +83,24 @@ class Customer(Base):
     retention_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CustomerDocumentKey(Base):
+    """One client's data-encryption key, wrapped under `DOCUMENT_MASTER_KEY` (`keys.py`).
+
+    Deleting this row is the crypto-shred (ADR-0001 §5): every document sealed under the key
+    becomes unreadable at once. So it is written once and never rewritten —
+    `linsuite_app` holds SELECT and INSERT only — and `customer_document_keys_guard` (0024)
+    lets only the purge role delete it, and only when the client is not under a retention hold.
+    No `ON DELETE CASCADE`: a cascade runs as the table owner, which the guard lets through, so
+    deleting a customer would be a way round it."""
+
+    __tablename__ = "customer_document_keys"
+
+    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id"), primary_key=True)
+    # `core.crypto` format: base64 of nonce || ciphertext+tag. The nonce lives inside it.
+    wrapped_key: Mapped[str] = mapped_column(Text)
+    # Which master key wrapped it. Always 1 until master-key rotation exists (out of scope); it
+    # is here so a rotation can re-wrap row by row and know which rows it has done.
+    master_key_version: Mapped[int] = mapped_column(SmallInteger, server_default=text("1"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

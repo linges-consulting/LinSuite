@@ -40,13 +40,19 @@ def _cipher(key_hex: str) -> AESGCM:
     return AESGCM(key)
 
 
-def encrypt(plaintext: str, key_hex: str) -> str:
-    """Base64 of `nonce || ciphertext`, in one column and one round trip."""
+def encrypt(plaintext: str, key_hex: str, associated_data: bytes | None = None) -> str:
+    """Base64 of `nonce || ciphertext`, in one column and one round trip.
+
+    `associated_data` is authenticated but not stored: `decrypt` must be handed the same
+    bytes, so a ciphertext bound to one row cannot be copied onto another and still open."""
     nonce = os.urandom(_NONCE_BYTES)
-    sealed = _cipher(key_hex).encrypt(nonce, plaintext.encode(), None)
+    sealed = _cipher(key_hex).encrypt(nonce, plaintext.encode(), associated_data)
     return base64.b64encode(nonce + sealed).decode()
 
 
-def decrypt(blob: str, key_hex: str) -> str:
+def decrypt(blob: str, key_hex: str, associated_data: bytes | None = None) -> str:
+    """Raises `cryptography.exceptions.InvalidTag` for a wrong key, wrong associated data or
+    an edited ciphertext — never returns something else."""
     raw = base64.b64decode(blob)
-    return _cipher(key_hex).decrypt(raw[:_NONCE_BYTES], raw[_NONCE_BYTES:], None).decode()
+    cipher = _cipher(key_hex)
+    return cipher.decrypt(raw[:_NONCE_BYTES], raw[_NONCE_BYTES:], associated_data).decode()

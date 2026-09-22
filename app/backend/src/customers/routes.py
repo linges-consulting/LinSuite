@@ -42,7 +42,7 @@ from core.access_log import LogAccess
 from core.audit import record_event
 from core.db import SessionDep
 from core.models import Business
-from customers import retention
+from customers import keys, retention
 from customers.classification import Classification, classify
 from customers.models import Customer
 from scheduling.models import Appointment
@@ -259,6 +259,8 @@ async def create_customer(db: AsyncSession, payload: CustomerIn, actor_id: uuid.
         raise HTTPException(
             status_code=409, detail="A customer with that email already exists."
         ) from None
+    # Every client made from here on has a document key, so erasure always has one to shred.
+    await keys.create_key(db, customer.id)
     record_event(
         db,
         "customer.created",

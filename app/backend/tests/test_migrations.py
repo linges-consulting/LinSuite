@@ -113,3 +113,28 @@ async def test_migration_0023_round_trips(database):
 
     await _upgrade_to("head")
     assert await _retention_columns() == 4
+
+
+async def _document_keys() -> tuple[bool, bool, bool]:
+    """(table exists, guard function exists, purge may INSERT into audit_events)."""
+    async with session_scope() as db:
+        table = await db.scalar(text("SELECT to_regclass('customer_document_keys') IS NOT NULL"))
+        function = await db.scalar(
+            text("SELECT to_regprocedure('public.customer_document_keys_guard()') IS NOT NULL")
+        )
+        insert = await db.scalar(
+            text("SELECT has_table_privilege('linsuite_purge', 'audit_events', 'INSERT')")
+        )
+    return bool(table), bool(function), bool(insert)
+
+
+async def test_migration_0024_round_trips(database):
+    """0024 adds the key table, its guard and the purge role's one INSERT; the downgrade takes
+    all three back, so the re-upgrade's CREATE and GRANT succeed."""
+    assert await _document_keys() == (True, True, True)
+
+    await _downgrade_to("0023")
+    assert await _document_keys() == (False, False, False)
+
+    await _upgrade_to("head")
+    assert await _document_keys() == (True, True, True)

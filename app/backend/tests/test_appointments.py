@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 
 from core.db import get_purge_engine, session_scope
 from scheduling.clock import localize
+from tests.conftest import wipe_document_keys
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -53,6 +54,7 @@ async def claimed_instance(client):
     async def wipe():
         async with get_purge_engine().begin() as purge:
             await purge.execute(text("DELETE FROM audit_events"))
+        await wipe_document_keys()
         async with session_scope() as db:
             for table in (
                 "appointment_resources",
