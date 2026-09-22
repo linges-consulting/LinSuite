@@ -18,12 +18,15 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
+    ForeignKey,
     Identity,
     Index,
     Integer,
+    LargeBinary,
     PrimaryKeyConstraint,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     func,
     text,
@@ -219,3 +222,41 @@ class AccessLogEntry(Base):
     resource_id: Mapped[str] = mapped_column(String(64))
     action: Mapped[str] = mapped_column(String(16))
     ip: Mapped[str | None] = mapped_column(INET)
+
+
+class Document(Base):
+    """One sealed document — a signed consent, an intake form, a scan (`core/documents.py`).
+
+    Immutable (CLAUDE.md): `linsuite_app` holds SELECT and INSERT only, and `documents_guard`
+    (0026) refuses UPDATE and DELETE to everyone but the table owner — except DELETE by
+    `linsuite_purge` for a client not under a retention hold. Written and read only through
+    `store_document`/`fetch_document`.
+
+    `customer_id` references the client's *key row*, not `customers`, with no cascade
+    (ADR-0001 rule 7): inserting a document locks the key row it is sealed under, so a purge
+    deleting that key serialises against the insert, and the purge must delete the documents
+    first. A string FK, so `core/` still imports no domain module.
+    """
+
+    __tablename__ = "documents"
+    __table_args__ = (
+        # A re-run render of the same source is `ON CONFLICT DO NOTHING`, never a second copy.
+        UniqueConstraint("kind", "source_id", name="uq_documents_kind_source_id"),
+        CheckConstraint("octet_length(sha256) = 32", name="ck_documents_sha256_length"),
+        Index("ix_documents_customer_id", "customer_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customer_document_keys.customer_id"))
+    # What produced it (`form_submission`, ...) and that thing's id.
+    kind: Mapped[str] = mapped_column(Text)
+    source_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    content_type: Mapped[str] = mapped_column(Text)
+    # `core.crypto.seal`: nonce || ciphertext || tag.
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
+    # SHA-256 of the plaintext, checked after every decrypt.
+    sha256: Mapped[bytes] = mapped_column(LargeBinary)
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

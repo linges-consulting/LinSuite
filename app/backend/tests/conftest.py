@@ -141,7 +141,7 @@ async def add_account(email: str, password_hash: str, *, role: str | None = None
 
 
 async def wipe_document_keys() -> None:
-    """Clear `customer_document_keys` so a fixture can delete its customers.
+    """Clear `documents` and `customer_document_keys` so a fixture can delete its customers.
 
     Neither runtime role may do this wholesale — the app role holds no DELETE and the purge
     role is refused by the trigger for any client under a retention hold (migration 0024) —
@@ -152,6 +152,7 @@ async def wipe_document_keys() -> None:
     owner = create_async_engine(os.environ["DATABASE_URL_MIGRATE"])
     try:
         async with owner.begin() as conn:
+            await conn.execute(text("DELETE FROM documents"))  # their FK holds the keys
             await conn.execute(text("DELETE FROM customer_document_keys"))
     finally:
         await owner.dispose()

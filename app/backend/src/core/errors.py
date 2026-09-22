@@ -88,3 +88,11 @@ def is_retryable(error: Exception) -> bool:
         for candidate in (orig, getattr(orig, "__cause__", None))
         for code in (getattr(candidate, "sqlstate", None), getattr(candidate, "pgcode", None))
     )
+
+
+class DocumentIntegrityError(Exception):
+    """A stored document failed authentication or its SHA-256 check (`core.documents`).
+
+    Deliberately not an `HTTPException`: nothing a request did caused it and no retry will
+    fix it — the row, the key or the database was altered — so it surfaces as a 500 and the
+    log line carries the document id only, never content or key material."""

@@ -56,3 +56,28 @@ def decrypt(blob: str, key_hex: str, associated_data: bytes | None = None) -> st
     raw = base64.b64decode(blob)
     cipher = _cipher(key_hex)
     return cipher.decrypt(raw[:_NONCE_BYTES], raw[_NONCE_BYTES:], associated_data).decode()
+
+
+# --- bytes, under a raw key: the document store (`core/documents.py`) -------------------------
+#
+# Beside the str API rather than through it: a document is megabytes of bytes, and a per-client
+# DEK arrives as raw bytes — base64 and hex round trips would buy nothing. Not cached per key
+# like `_cipher`: an `lru_cache` of client DEKs would keep up to 128 of them alive in memory
+# for the life of the process, and building an `AESGCM` is cheap next to sealing a PDF.
+
+
+def _aes256(key: bytes) -> AESGCM:
+    if len(key) != KEY_BYTES:
+        raise ValueError(f"An AES-256 key is {KEY_BYTES} bytes.")
+    return AESGCM(key)
+
+
+def seal(plaintext: bytes, key: bytes, associated_data: bytes) -> bytes:
+    """`nonce || ciphertext || tag`, with a fresh random 96-bit nonce every call."""
+    nonce = os.urandom(_NONCE_BYTES)
+    return nonce + _aes256(key).encrypt(nonce, plaintext, associated_data)
+
+
+def open_sealed(blob: bytes, key: bytes, associated_data: bytes) -> bytes:
+    """Raises `InvalidTag` for a wrong key, other associated data or any edited byte."""
+    return _aes256(key).decrypt(blob[:_NONCE_BYTES], blob[_NONCE_BYTES:], associated_data)

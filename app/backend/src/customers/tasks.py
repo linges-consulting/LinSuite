@@ -6,9 +6,9 @@ the client's `customer_document_keys` row, the crypto-shred of ADR-0001 §5 — 
 here, in a Celery task, never in a request.
 
 **One purge transaction, in a fixed order:** the `customer.key_destroyed` audit row, then
-the client's documents (none exist before Phase 8 — see `_shred`), then the key. All or
-nothing: an erasure with no audit row, or an audit row for an erasure that did not happen,
-cannot be committed. Nothing is written when there is nothing to delete, so re-running is
+the client's documents (their FK to the key row forces it), then the key. All or nothing:
+an erasure with no audit row, or an audit row for an erasure that did not happen, cannot be
+committed. Nothing is written when there is nothing to delete, so re-running is
 silent.
 
 **Eligibility is the database's.** The key's guard trigger (0024) refuses the DELETE while
@@ -45,9 +45,13 @@ from customers.models import ALWAYS_ERASED, ERASED_NAMES
 log = logging.getLogger(__name__)
 
 PURGE_AUTHORITY = "linsuite_purge"
-# The guard's own refusal. Any other `insufficient_privilege` — a grant gone missing — is a
-# real fault and must not be mistaken for "held" night after night.
-_GUARD_REFUSAL = "customer_document_keys: DELETE is not permitted"
+# The guards' own refusals — the key's (0024) and the shared record guard on `documents`
+# (0026). Any other `insufficient_privilege` — a grant gone missing — is a real fault and must
+# not be mistaken for "held" night after night.
+_GUARD_REFUSALS = (
+    "customer_document_keys: DELETE is not permitted",
+    "documents: DELETE is not permitted",
+)
 # The trigger's predicate, verbatim: not held = no hold, or a hold that has passed.
 _NOT_HELD = "(retention_expires_at IS NULL OR retention_expires_at < now())"
 
@@ -76,8 +80,12 @@ async def _shred(purge: AsyncEngine, customer_id: str, request_id: str | None) -
                 ),
                 {"c": customer_id, "m": metadata},
             )
-            # Phase 8: delete the client's document rows here — after the audit row, before
-            # the key they are sealed under (ADR-0001 amendment, rule 7).
+            # The client's sealed rows, after the audit row and before the key they are
+            # sealed under (ADR-0001 rule 8) — their FK to the key row forces this order.
+            # Task 4: `DELETE FROM form_submissions` goes here too, beside documents.
+            await conn.execute(
+                text("DELETE FROM documents WHERE customer_id = :c"), {"c": customer_id}
+            )
             deleted = (
                 await conn.execute(
                     text("DELETE FROM customer_document_keys WHERE customer_id = :c"),
@@ -86,7 +94,7 @@ async def _shred(purge: AsyncEngine, customer_id: str, request_id: str | None) -
             ).rowcount
         except DBAPIError as error:
             await transaction.rollback()
-            if _GUARD_REFUSAL in str(error):
+            if any(refusal in str(error) for refusal in _GUARD_REFUSALS):
                 return False  # held: the trigger said no, which is its job
             raise
         if deleted:

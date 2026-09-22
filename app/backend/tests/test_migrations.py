@@ -177,3 +177,25 @@ async def test_migration_0025_round_trips(database):
 
     await _upgrade_to("head")
     assert await _erasure() == (True, True, 1)
+
+
+async def _documents() -> tuple[bool, bool]:
+    """(documents exists, customer_record_guard exists)."""
+    async with session_scope() as db:
+        table = await db.scalar(text("SELECT to_regclass('documents') IS NOT NULL"))
+        function = await db.scalar(
+            text("SELECT to_regprocedure('public.customer_record_guard()') IS NOT NULL")
+        )
+    return bool(table), bool(function)
+
+
+async def test_migration_0026_round_trips(database):
+    """0026 adds `documents` and the shared guard; the downgrade drops both, so the
+    re-upgrade's CREATEs succeed."""
+    assert await _documents() == (True, True)
+
+    await _downgrade_to("0025")
+    assert await _documents() == (False, False)
+
+    await _upgrade_to("head")
+    assert await _documents() == (True, True)

@@ -48,6 +48,8 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "customer_document_keys": ("SELECT", "INSERT"),
     # The record that an erasure was honoured: the app stamps `purged_at`, never deletes it.
     "erasure_requests": ("SELECT", "INSERT", "UPDATE"),
+    # Sealed documents are immutable; only the purge role removes one (0026).
+    "documents": ("SELECT", "INSERT"),
 }
 # The purge role reads and deletes everywhere and writes nowhere — except the fact of its own
 # purge, which ADR-0001 §6 puts in the purge transaction (0024, pre-flight D11).
@@ -61,6 +63,7 @@ TRIGGERS = (
     ("audit_events", "audit_events_no_rewrite"),
     ("audit_access_log", "audit_access_log_no_rewrite"),
     ("customer_document_keys", "customer_document_keys_guard"),
+    ("documents", "documents_guard"),
 )
 
 
@@ -236,6 +239,7 @@ async def test_every_trigger_and_security_definer_function_pins_its_search_path(
         "audit_events_append_only",
         "audit_access_log_append_only",
         "customer_document_keys_guard",
+        "customer_record_guard",
         "appointments_enforce_staff_concurrency",
         "ensure_access_log_partitions",
     } <= set(found)
