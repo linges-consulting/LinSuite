@@ -13,7 +13,9 @@ accepted that it can be forgotten. These two rules are what close that gap: (a) 
 customer-scoped route — any method, not only GET — whose `response_model` actually carries a
 PHI field (`core.access_log.PHI_FIELDS`, walked recursively through nested models, lists and
 `Optional`) carries `LogAccess` unless it is named in `NOT_PHI`; (b) the set of routes
-carrying it equals `LOGGED`, so adding a PHI endpoint is a visible edit to this file. Both are
+carrying it equals `LOGGED`, so adding a PHI endpoint is a visible edit to this file; (c) a
+customer-scoped route with no `response_model` at all — a `JSONResponse` or a bare dict, which
+rule (a) cannot see into — fails unless `UNMODELLED` names it with a reason. All three are
 proven against probe routes mounted for the test, so a green build is not a rule that never
 fires. Rule (a) started GET-only and missed exactly the bug a fix round found: `PATCH
 /customers/{id}` returned the full profile — DOB, both contacts, notes — with no
@@ -59,6 +61,12 @@ LOGGED = {("GET", "/api/customers/{customer_id}")}
 # Customer-scoped GETs that deliberately do not log. Empty: nothing under a customer's path
 # is metadata yet (the access report itself will live under `/api/admin/...`).
 NOT_PHI: set[tuple[str, str]] = set()
+
+# Customer-scoped routes with no declared response model, each with the reason it is safe.
+# Rule (a) reads what a route discloses off its `response_model`; a handler returning a
+# `JSONResponse` or a bare dict has none, so rule (a) would pass it whatever it sends. Rule (c)
+# refuses that blind spot: declare a model, or name the route here and say why. Empty in #7.
+UNMODELLED: dict[tuple[str, str], str] = {}
 
 PROBE = "/api/customers/{customer_id}/probe"
 
@@ -238,6 +246,7 @@ class Mounted:
     tags: frozenset[str]
     dependant: Dependant
     response_model: type | None
+    status_code: int | None = None
 
     @property
     def phi_resource(self) -> str | None:
@@ -276,6 +285,7 @@ def mounted_routes(app) -> list[Mounted]:
     found = []
     for route, context in _iter_routes_with_context(app.routes):
         response_model = getattr(route, "response_model", None)
+        status_code = getattr(route, "status_code", None)
         if context is not None and context.dependant is not None:
             found.append(
                 Mounted(
@@ -284,6 +294,7 @@ def mounted_routes(app) -> list[Mounted]:
                     frozenset(str(t) for t in context.tags),
                     context.dependant,
                     response_model,
+                    status_code,
                 )
             )
         elif isinstance(route, APIRoute):
@@ -294,6 +305,7 @@ def mounted_routes(app) -> list[Mounted]:
                     frozenset(str(t) for t in route.tags),
                     route.dependant,
                     response_model,
+                    status_code,
                 )
             )
     return found
@@ -314,6 +326,20 @@ def unlogged_phi_routes(app) -> set[tuple[str, str]]:
     }
 
 
+def unmodelled_routes(app, allowed=UNMODELLED) -> set[tuple[str, str]]:
+    """Rule (c): customer-scoped routes with no `response_model`, and no `UNMODELLED` entry.
+    Rule (a) cannot see into a response nobody declared, so a route rule (a) cannot judge
+    is a failure here rather than a pass there. A `204` route has no body to disclose and
+    no model to declare, so it is not a gap."""
+    return {
+        (method, r.path)
+        for r in mounted_routes(app)
+        if r.customer_scoped and r.response_model is None and r.status_code != 204
+        for method in r.methods
+        if (method, r.path) not in allowed
+    }
+
+
 def logged_routes(app) -> set[tuple[str, str]]:
     """Rule (b): every route carrying `LogAccess`, whatever its method or path."""
     return {
@@ -330,6 +356,10 @@ class _ProbeOut(BaseModel):
 
     ok: bool
     notes: str | None = None
+
+
+class _NoPhiOut(BaseModel):
+    ok: bool
 
 
 @pytest.fixture
@@ -363,9 +393,18 @@ def test_every_phi_route_in_the_real_app_is_logged_and_named():
     # The walk really reached inside the included routers, not just the top level.
     assert len(routes) > 50, [r.path for r in routes]
     assert unlogged_phi_routes(app) == set()
+    assert unmodelled_routes(app) == set()
     assert logged_routes(app) == LOGGED
-    # The allowlist may only name routes that exist, or it is a stale exemption.
-    assert NOT_PHI <= {(method, r.path) for r in routes for method in r.methods}
+    # The allowlists may only name routes that exist, or they are stale exemptions.
+    served = {(method, r.path) for r in routes for method in r.methods}
+    assert NOT_PHI <= served
+    assert set(UNMODELLED) <= served
+    assert all(reason.strip() for reason in UNMODELLED.values())
+    # The access report names a customer but is administration, not the chart: it is not
+    # customer-scoped, carries no PHI field, and does not log (pre-flight §8, Task 8).
+    report = ("GET", "/api/admin/customers/{customer_id}/access-log")
+    assert report in served
+    assert report not in logged_routes(app)
 
 
 def test_a_customer_scoped_get_returning_phi_without_log_access_fails_rule_a(probe):
@@ -384,9 +423,33 @@ def test_a_customer_scoped_get_returning_no_phi_field_never_needed_log_access(pr
     from auth.capabilities import Requires
     from main import app
 
-    probe([Depends(Requires("customers.view"))])  # default response_model=None
+    probe([Depends(Requires("customers.view"))], response_model=_NoPhiOut)
 
     assert ("GET", PROBE) not in unlogged_phi_routes(app)
+    assert ("GET", PROBE) not in unmodelled_routes(app)
+
+
+def test_a_customer_scoped_route_with_no_response_model_fails_rule_c(probe):
+    """The blind spot rule (c) closes: a handler returning a `JSONResponse` or a dict has no
+    `response_model`, so rule (a) has nothing to read PHI fields off and passes it — whatever
+    it actually sends."""
+    from auth.capabilities import Requires
+    from main import app
+
+    probe([Depends(Requires("customers.view"))])  # response_model=None
+
+    assert ("GET", PROBE) not in unlogged_phi_routes(app)  # rule (a) is blind to it...
+    assert ("GET", PROBE) in unmodelled_routes(app)  # ...rule (c) is not
+
+
+def test_an_unmodelled_route_named_with_a_reason_passes_rule_c(probe):
+    from auth.capabilities import Requires
+    from main import app
+
+    probe([Depends(Requires("customers.view"))])
+
+    allowed = {("GET", PROBE): "A probe: returns only {'ok': true}."}
+    assert ("GET", PROBE) not in unmodelled_routes(app, allowed)
 
 
 def test_a_customer_scoped_patch_returning_phi_without_log_access_fails_rule_a(probe):
