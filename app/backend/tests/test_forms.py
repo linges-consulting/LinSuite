@@ -257,8 +257,16 @@ async def test_a_published_key_cannot_change_its_type(client):
     template = await make(client)
     await save(client, template)
     await publish(client, template["id"])
+    # Dropped in v2 ...
+    changed = schema()
+    changed["fields"][1].pop("show_if")
+    changed["fields"] = changed["fields"][1:]
+    await save(client, template, schema=changed)
+    assert (await publish(client, template["id"])).status_code == 201
+    # ... and brought back as another type in the next draft.
     changed = schema()
     changed["fields"][0]["type"] = "short_text"
+    changed["fields"][1].pop("show_if")
     resp = await client.put(
         f"{FORMS}/{template['id']}/draft",
         json={"name": "Prenatal intake", "kind": "intake", "schema": changed},

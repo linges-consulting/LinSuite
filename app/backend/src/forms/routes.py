@@ -271,16 +271,25 @@ async def save_draft(
     template = await _template(db, template_id, lock=True)
     if template.retired_at is not None:
         return _retired()
+    # Every version, not just the latest: a key dropped in v2 and brought back in v3 still
+    # has v1's answers filed under it.
+    published = {
+        f["key"]: f["type"]
+        for schema in await db.scalars(
+            select(FormTemplateVersion.schema)
+            .where(FormTemplateVersion.template_id == template_id)
+            .order_by(FormTemplateVersion.number)
+        )
+        for f in schema["fields"]
+    }
+    for field in payload.schema_.fields:
+        if published.get(field.key, field.type) != field.type:
+            raise refuse(
+                "schema",
+                f"“{field.label}” was published as another type. Remove it and add a new "
+                "field instead.",
+            )
     latest = await _latest(db, template_id)
-    if latest is not None:
-        published = {f["key"]: f["type"] for f in latest.schema["fields"]}
-        for field in payload.schema_.fields:
-            if published.get(field.key, field.type) != field.type:
-                raise refuse(
-                    "schema",
-                    f"“{field.label}” was published as another type. Remove it and add a new "
-                    "field instead.",
-                )
 
     template.name = payload.name
     template.kind = payload.kind
