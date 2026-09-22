@@ -50,6 +50,8 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "erasure_requests": ("SELECT", "INSERT", "UPDATE"),
     # Sealed documents are immutable; only the purge role removes one (0026).
     "documents": ("SELECT", "INSERT"),
+    # A published form version is frozen; nobody but the owner removes one (0027).
+    "form_template_versions": ("SELECT", "INSERT"),
 }
 # The purge role reads and deletes everywhere and writes nowhere — except the fact of its own
 # purge, which ADR-0001 §6 puts in the purge transaction (0024, pre-flight D11).
@@ -64,6 +66,7 @@ TRIGGERS = (
     ("audit_access_log", "audit_access_log_no_rewrite"),
     ("customer_document_keys", "customer_document_keys_guard"),
     ("documents", "documents_guard"),
+    ("form_template_versions", "form_template_versions_append_only"),
 )
 
 
@@ -240,6 +243,7 @@ async def test_every_trigger_and_security_definer_function_pins_its_search_path(
         "audit_access_log_append_only",
         "customer_document_keys_guard",
         "customer_record_guard",
+        "form_template_versions_append_only",
         "appointments_enforce_staff_concurrency",
         "ensure_access_log_partitions",
     } <= set(found)

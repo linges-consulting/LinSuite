@@ -199,3 +199,32 @@ async def test_migration_0026_round_trips(database):
 
     await _upgrade_to("head")
     assert await _documents() == (True, True)
+
+
+async def _form_templates() -> tuple[bool, bool, bool, int]:
+    """(form_templates exists, form_template_versions exists, its append-only function exists,
+    roles holding `forms.manage`)."""
+    async with session_scope() as db:
+        templates = await db.scalar(text("SELECT to_regclass('form_templates') IS NOT NULL"))
+        versions = await db.scalar(text("SELECT to_regclass('form_template_versions') IS NOT NULL"))
+        function = await db.scalar(
+            text(
+                "SELECT to_regprocedure('public.form_template_versions_append_only()') IS NOT NULL"
+            )
+        )
+        holders = await db.scalar(
+            text("SELECT count(*) FROM role_capabilities WHERE capability = 'forms.manage'")
+        )
+    return bool(templates), bool(versions), bool(function), int(holders)
+
+
+async def test_migration_0027_round_trips(database):
+    """0027 adds both template tables, the append-only trigger function and the
+    Administrator's `forms.manage`; the downgrade takes all of it back out."""
+    assert await _form_templates() == (True, True, True, 1)
+
+    await _downgrade_to("0026")
+    assert await _form_templates() == (False, False, False, 0)
+
+    await _upgrade_to("head")
+    assert await _form_templates() == (True, True, True, 1)

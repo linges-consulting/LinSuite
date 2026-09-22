@@ -32,6 +32,7 @@ from core.redis import get_redis
 from customers.access_report import router as access_report_router
 from customers.erasure import router as erasure_router
 from customers.routes import router as customers_router
+from forms.routes import router as forms_router
 from scheduling.appointments import router as appointments_router
 from scheduling.closures import router as closures_router
 from scheduling.hours import router as hours_router
@@ -227,6 +228,8 @@ api.include_router(access_report_router)
 api.include_router(roster_router)
 # The calendar's one read: roster, shifts, absences, closures and bookings together.
 api.include_router(schedule_router)
+# Settings → Forms: templates and their frozen versions (`forms.manage`, Admin Mode).
+api.include_router(forms_router)
 api.include_router(business_router)
 api.include_router(branding_router)
 app.include_router(api)

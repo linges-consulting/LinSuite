@@ -82,6 +82,12 @@ CAPABILITIES: tuple[Capability, ...] = (
         # who opened their chart, so it sits behind the same short window as the settings.
         requires_admin_mode=True,
     ),
+    Capability(
+        "forms.manage",
+        "Build and publish intake forms, consents and waivers.",
+        "Administration",
+        requires_admin_mode=True,
+    ),
     Capability("schedule.view", "See the appointment calendar.", "Schedule"),
     Capability("schedule.manage", "Book, move and cancel appointments.", "Schedule"),
     Capability(
