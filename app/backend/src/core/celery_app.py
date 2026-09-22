@@ -10,6 +10,7 @@ use, which is exactly when the setting is wanted.
 """
 
 from celery import Celery
+from celery.schedules import crontab
 from celery.signals import setup_logging
 
 from core.config import get_settings
@@ -24,6 +25,17 @@ def _configure(sender: Celery, **_: object) -> None:
     sender.conf.broker_url = settings.redis_url
     sender.conf.result_backend = settings.redis_url
     sender.conf.task_acks_late = True
+    # Run by the one `beat` service (infra/compose.yaml) — never `worker -B`, so scaling the
+    # worker never runs two schedulers. Beat only enqueues; the worker does the work.
+    sender.conf.timezone = "UTC"
+    sender.conf.beat_schedule = {
+        # Nightly at 03:15 UTC. Idempotent and a no-op on all but one night a year, so the
+        # hour does not matter.
+        "maintain-partitions": {
+            "task": "core.tasks.maintain_partitions",
+            "schedule": crontab(hour=3, minute=15),
+        },
+    }
 
 
 @setup_logging.connect

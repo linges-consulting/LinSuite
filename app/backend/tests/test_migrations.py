@@ -65,3 +65,26 @@ async def test_migration_0019_round_trips(database):
 
     await _upgrade_to("head")
     assert await _present() == (True, True, 2)
+
+
+async def _partition_function_present() -> bool:
+    async with session_scope() as db:
+        return bool(
+            await db.scalar(
+                text("SELECT to_regprocedure('public.ensure_access_log_partitions()') IS NOT NULL")
+            )
+        )
+
+
+async def test_migration_0021_round_trips(database):
+    """0021 adds only the function: its downgrade drops it and leaves the partitions, which
+    are data (0019's downgrade takes them with the parent)."""
+    assert await _partition_function_present()
+
+    await _downgrade_to("0020")
+    assert not await _partition_function_present()
+    assert await _present() == (True, True, 2)
+
+    await _upgrade_to("head")
+    assert await _partition_function_present()
+    assert await _present() == (True, True, 2)

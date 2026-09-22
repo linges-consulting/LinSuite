@@ -20,6 +20,7 @@ from core.config import get_settings
 from core.db import SessionDep, get_engine, get_purge_engine, session_scope
 from core.errors import SERVICE_UNAVAILABLE, UPLOAD_ORIGIN_REQUIRED, Forbidden
 from core.logging import configure_logging
+from core.partitions import ensure_on_boot
 from core.redis import get_redis
 from customers.routes import router as customers_router
 from scheduling.appointments import router as appointments_router
@@ -43,6 +44,8 @@ log = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     configure_logging(get_settings().log_level)
+    # Before anything can open a profile: the access log is fail-closed (core/partitions.py).
+    await ensure_on_boot(get_engine())
     # A fresh instance mints a setup token on every boot until the wizard is completed.
     async with session_scope() as session:
         await bootstrap_setup_token(session)
