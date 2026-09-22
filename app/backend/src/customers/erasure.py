@@ -105,12 +105,6 @@ def erasure_out(
     )
 
 
-def _instant(value: datetime | None) -> str | None:
-    if value is None:
-        return None
-    return "infinity" if value == retention.INFINITY else value.isoformat()
-
-
 @router.post(
     "/{customer_id}/erasure",
     status_code=201,
@@ -161,11 +155,9 @@ async def request_erasure(
         target_type="customer",
         target_id=str(customer.id),
         actor_user_id=actor.id,
-        metadata={
-            "held": held,
-            "held_until": _instant(expires_at) if held else None,
-            "request_id": str(request.id),
-        },
+        # The fact, never the data (ADR-0001 §6): the hold's end derives from the DOB, and an
+        # audit row outlives the erasure. It stays in `erasure_requests.held_until`.
+        metadata={"held": held, "request_id": str(request.id)},
     )
     await db.commit()
 

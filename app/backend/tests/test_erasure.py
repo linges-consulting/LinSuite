@@ -220,11 +220,7 @@ async def test_an_unheld_request_anonymises_shreds_the_key_and_audits_both_halve
     assert len(requested) == 1
     assert requested[0]["actor_user_id"] == await admin_id()
     assert requested[0]["target_id"] == customer_id
-    assert requested[0]["metadata"] == {
-        "held": False,
-        "held_until": None,
-        "request_id": str(request["id"]),
-    }
+    assert requested[0]["metadata"] == {"held": False, "request_id": str(request["id"])}
     destroyed = await events("customer.key_destroyed")
     assert destroyed == [
         {
@@ -276,6 +272,9 @@ async def test_a_held_request_keeps_the_chart_purges_contacts_and_the_key_surviv
     assert request["purged_at"] is None
     assert request["held_until"] == before["retention_expires_at"]
     assert request["held_reason"] == body["held_reason"]
+    # The hold's end derives from the DOB: it lives in `erasure_requests`, never the audit log.
+    [requested] = await events("customer.erasure_requested")
+    assert requested["metadata"] == {"held": True, "request_id": str(request["id"])}
 
     profile = (await client.get(f"{CUSTOMERS}/{customer_id}")).json()
     assert len(profile["appointments"]) == 1
