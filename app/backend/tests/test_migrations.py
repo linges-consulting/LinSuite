@@ -301,9 +301,7 @@ async def _form_compliance() -> tuple[bool, bool, bool]:
                 "'ck_form_templates_valid_for_months'"
             )
         )
-        services = await db.scalar(
-            text("SELECT to_regclass('form_template_services') IS NOT NULL")
-        )
+        services = await db.scalar(text("SELECT to_regclass('form_template_services') IS NOT NULL"))
     return bool(columns), bool(check), bool(services)
 
 

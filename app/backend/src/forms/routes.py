@@ -235,9 +235,7 @@ async def list_templates(_: FormManager, db: SessionDep) -> dict[str, list[Templ
         select(FormTemplateService.template_id, FormTemplateService.service_id)
     ):
         services.setdefault(template_id, []).append(str(service_id))
-    return {
-        "templates": [_out(t, latest.get(t.id), services[t.id]) for t in templates]
-    }
+    return {"templates": [_out(t, latest.get(t.id), services[t.id]) for t in templates]}
 
 
 async def _service_ids(db: SessionDep, template_id: uuid.UUID) -> list[str]:

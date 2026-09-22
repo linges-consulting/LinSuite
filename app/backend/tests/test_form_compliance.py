@@ -335,9 +335,7 @@ async def test_the_dashboard_writes_no_access_log_row_and_does_not_scale_with_cl
 
     async def one_non_compliant_client() -> None:
         customer_id = await make_customer(client)
-        booked = await book(
-            client, service_id, me, at(f"{next(hour)}:00"), customer_id=customer_id
-        )
+        booked = await book(client, service_id, me, at(f"{next(hour)}:00"), customer_id=customer_id)
         assert booked.status_code == 201, booked.text
 
     await one_non_compliant_client()
