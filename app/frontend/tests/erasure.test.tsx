@@ -1,9 +1,13 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { QueryClient } from '@tanstack/react-query'
 import { afterEach, expect, test, vi } from 'vitest'
 import { renderApp, stubApi, type Call } from './harness'
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
 
 /**
  * Erasure on the client profile (Task 7, ADR-0001 §3). What is worth pinning: the action is
@@ -81,7 +85,14 @@ function fake({ me = ME as object, customer = DETAIL as object } = {}) {
         const held = (current.retention as { status: string }).status !== 'not_held'
         const erasure = held
           ? ERASED_HELD
-          : { ...ERASED_HELD, held: false, held_until: null, held_reason: null, retained: [] }
+          : {
+              ...ERASED_HELD,
+              held: false,
+              held_until: null,
+              held_reason: null,
+              retained: [],
+              purged_at: '2026-09-21T15:00:01Z',
+            }
         current = held
           ? { ...current, email: null, phone: null, notes: null, suppressed: true, erasure }
           : {
@@ -210,4 +221,62 @@ test('outside Admin Mode, or without the capability, there is no erasure action'
   renderApp('/clients/c1')
   await screen.findByRole('heading', { name: 'Priya Nair' })
   expect(screen.queryByRole('button', { name: 'More actions' })).not.toBeInTheDocument()
+})
+
+test('an erasure refreshes the calendar too, whose cards carry the client name and contacts', async () => {
+  const { calls } = fake()
+  const { user, dialog } = await openDialog()
+  const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries')
+
+  await user.click(within(dialog).getByRole('button', { name: 'Erase client' }))
+
+  await waitFor(() => expect(erasureCalls(calls)).toHaveLength(1))
+  await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['appointments'] }))
+})
+
+test('an erased, held client offers only a date-of-birth correction, and sends only that', async () => {
+  const { calls } = fake({
+    customer: {
+      ...DETAIL,
+      email: null,
+      phone: null,
+      notes: null,
+      retention: HELD,
+      suppressed: true,
+      erasure: ERASED_HELD,
+    },
+  })
+  const user = userEvent.setup()
+  renderApp('/clients/c1')
+
+  await user.click(await screen.findByRole('button', { name: 'Edit details' }))
+  const dialog = await screen.findByRole('dialog')
+  expect(within(dialog).getByText(/only the date of birth can be corrected/i)).toBeInTheDocument()
+  expect(within(dialog).queryAllByRole('textbox')).toHaveLength(0)
+  expect(within(dialog).queryByLabelText('Email')).not.toBeInTheDocument()
+  const dob = within(dialog).getByLabelText('Date of birth')
+  fireEvent.change(dob, { target: { value: '2014-05-01' } })
+  await user.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+
+  await waitFor(() =>
+    expect(calls.filter((c) => c.method === 'PATCH').map((c) => c.body)).toEqual([
+      { date_of_birth: '2014-05-01' },
+    ]),
+  )
+})
+
+test('once the hold has ended but the purge has not run, the banner says what is still to go', async () => {
+  fake({
+    customer: {
+      ...DETAIL,
+      retention: { status: 'expired', expires_on: '2026-09-01' },
+      suppressed: true,
+      erasure: { ...ERASED_HELD, held: false, held_until: null, held_reason: null, retained: [] },
+    },
+  })
+  renderApp('/clients/c1')
+
+  const banner = await screen.findByRole('status', { name: 'Erasure requested' })
+  expect(banner).not.toHaveTextContent(/Nothing personal is retained/)
+  expect(banner).toHaveTextContent(/still on this record is removed by tonight/)
 })

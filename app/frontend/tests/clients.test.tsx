@@ -353,7 +353,7 @@ const ACCESS_LOG = {
       actor_user_id: 'u9',
       actor_name: 'u9',
       actor_role: 'Staff',
-      resource_type: 'customer_profile',
+      resource_type: 'customer_erasure',
       resource_id: 'c1',
       action: 'view',
       ip: null,
@@ -422,6 +422,8 @@ test('an audit.view holder in Admin Mode sees who opened the record, on the busi
   expect(within(rows[0]).getByText(/10:05/)).toBeInTheDocument()
   // A departed account: the id stands in for the name, and the row is still there.
   expect(within(rows[1]).getByText('u9')).toBeInTheDocument()
+  // The erasure POST logs its own row — the one an investigator most wants to read.
+  expect(within(rows[1]).getByText('Requested erasure')).toBeInTheDocument()
   expect(screen.getByLabelText('From')).toHaveValue('2026-06-21')
   expect(screen.getByLabelText('To')).toHaveValue('2026-09-19')
 })

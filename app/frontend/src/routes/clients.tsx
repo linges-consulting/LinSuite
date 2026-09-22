@@ -58,7 +58,7 @@ import {
 } from '@/lib/api'
 import { useSession } from '@/lib/auth'
 import { formatPhone } from '@/lib/phone'
-import { CUSTOMERS } from '@/lib/query-keys'
+import { APPOINTMENTS, CUSTOMERS } from '@/lib/query-keys'
 
 const PAGE_SIZE = 50
 
@@ -482,6 +482,8 @@ function ErasureDialog({ customer, onClose }: { customer: CustomerDetail; onClos
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [...PROFILE, customer.id] })
       queryClient.invalidateQueries({ queryKey: CUSTOMERS })
+      // Calendar cards carry the client's name and contacts; after an erasure they are stale.
+      queryClient.invalidateQueries({ queryKey: APPOINTMENTS })
       toast.success('Erasure recorded')
       onClose()
     },
@@ -584,6 +586,13 @@ function ErasureBanner({ erasure }: { erasure: Erasure }) {
           <p>
             Retained: {erasure.retained.join(', ')}. {erasure.held_reason}.
           </p>
+        ) : erasure.purged_at === null ? (
+          // Not held, not finished: a hold that has since ended, or a purge still queued. The
+          // nightly job finishes either, so nothing is promised gone before it has run.
+          <p>
+            No longer held. Anything personal still on this record is removed by tonight at the
+            latest; visit history stays against an anonymous record.
+          </p>
         ) : (
           <p>
             Nothing personal is retained. Visit history stays against an anonymous record,
@@ -601,9 +610,12 @@ function ErasureBanner({ erasure }: { erasure: Erasure }) {
 const ACCESS_LOG = ['customer-access-log'] as const
 const ACCESS_PAGE_SIZE = 25
 
-/** What an entry was, in words. Only profile opens exist today; forms and session notes
- *  will add their own resource types, and an unknown one still reads as its raw key. */
-const OPENED: Record<string, string> = { customer_profile: 'Opened profile' }
+/** What an entry was, in words. Forms and session notes will add their own resource types,
+ *  and an unknown one still reads as its raw key. */
+const OPENED: Record<string, string> = {
+  customer_profile: 'Opened profile',
+  customer_erasure: 'Requested erasure',
+}
 
 /**
  * Who opened this record, when, as what and from where (ADR-0002 §6). Shown to holders of
@@ -952,6 +964,9 @@ const MIN_DOB = '1900-01-01'
  * field would otherwise show up in that trail as a change nobody made. Server errors land
  * under the field FastAPI named in `loc`; a duplicate email (409, no `loc`) is put under
  * the email field by hand, since that is the one field a 409 here is ever about.
+ *
+ * After an erasure the server takes one edit only — a DOB correction on a chart still held
+ * (`update_customer`) — so a suppressed client gets that one field and nothing else.
  */
 function ClientEditDialog({ customer, onClose }: { customer: CustomerDetail; onClose: () => void }) {
   const queryClient = useQueryClient()
@@ -960,17 +975,25 @@ function ClientEditDialog({ customer, onClose }: { customer: CustomerDetail; onC
   const [errors, setErrors] = useState<Record<string, string>>({})
   const set = (patch: Partial<EditableCustomer>) => setDraft((d) => ({ ...d, ...patch }))
 
+  const dobOnly = customer.suppressed
   const save = useMutation({
     mutationFn: () => updateCustomer(customer.id, diffPatch(original, draft)),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [...PROFILE, customer.id] })
       queryClient.invalidateQueries({ queryKey: CUSTOMERS })
+      queryClient.invalidateQueries({ queryKey: APPOINTMENTS })
       toast.success('Client details saved')
       onClose()
     },
     onError: (error) => {
       const found = fieldErrors(error)
-      if (Object.keys(found).length === 0 && error instanceof ApiError && error.status === 409) {
+      // In the DOB-only form a 409 is the suppression refusal, shown as a form error.
+      if (
+        !dobOnly &&
+        Object.keys(found).length === 0 &&
+        error instanceof ApiError &&
+        error.status === 409
+      ) {
         found.email = error.message
       }
       setErrors(found)
@@ -997,51 +1020,57 @@ function ClientEditDialog({ customer, onClose }: { customer: CustomerDetail; onC
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Edit details</DialogTitle>
+          <DialogTitle>{dobOnly ? 'Correct date of birth' : 'Edit details'}</DialogTitle>
           <DialogDescription>
-            Contact information, emergency and secondary contacts, and front-desk notes.
+            {dobOnly
+              ? 'Erasure was requested, so only the date of birth can be corrected — it decides how long the record is held.'
+              : 'Contact information, emergency and secondary contacts, and front-desk notes.'}
           </DialogDescription>
         </DialogHeader>
 
         <Form onSubmit={() => !incomplete && save.mutate()}>
-          <div className="grid gap-5 sm:grid-cols-2">
-            <FormField label="First name" htmlFor="client-first" error={errors.first_name}>
-              <Input
-                id="client-first"
-                required
-                maxLength={100}
-                value={draft.first_name}
-                onChange={(e) => set({ first_name: e.target.value })}
-              />
-            </FormField>
-            <FormField label="Last name" htmlFor="client-last" error={errors.last_name}>
-              <Input
-                id="client-last"
-                required
-                maxLength={100}
-                value={draft.last_name}
-                onChange={(e) => set({ last_name: e.target.value })}
-              />
-            </FormField>
-          </div>
+          {!dobOnly && (
+            <>
+              <div className="grid gap-5 sm:grid-cols-2">
+                <FormField label="First name" htmlFor="client-first" error={errors.first_name}>
+                  <Input
+                    id="client-first"
+                    required
+                    maxLength={100}
+                    value={draft.first_name}
+                    onChange={(e) => set({ first_name: e.target.value })}
+                  />
+                </FormField>
+                <FormField label="Last name" htmlFor="client-last" error={errors.last_name}>
+                  <Input
+                    id="client-last"
+                    required
+                    maxLength={100}
+                    value={draft.last_name}
+                    onChange={(e) => set({ last_name: e.target.value })}
+                  />
+                </FormField>
+              </div>
 
-          <div className="grid gap-5 sm:grid-cols-2">
-            <FormField label="Phone" htmlFor="client-phone" error={errors.phone}>
-              <Input
-                id="client-phone"
-                value={draft.phone}
-                onChange={(e) => set({ phone: e.target.value })}
-              />
-            </FormField>
-            <FormField label="Email" htmlFor="client-email" error={errors.email}>
-              <Input
-                id="client-email"
-                type="email"
-                value={draft.email}
-                onChange={(e) => set({ email: e.target.value })}
-              />
-            </FormField>
-          </div>
+              <div className="grid gap-5 sm:grid-cols-2">
+                <FormField label="Phone" htmlFor="client-phone" error={errors.phone}>
+                  <Input
+                    id="client-phone"
+                    value={draft.phone}
+                    onChange={(e) => set({ phone: e.target.value })}
+                  />
+                </FormField>
+                <FormField label="Email" htmlFor="client-email" error={errors.email}>
+                  <Input
+                    id="client-email"
+                    type="email"
+                    value={draft.email}
+                    onChange={(e) => set({ email: e.target.value })}
+                  />
+                </FormField>
+              </div>
+            </>
+          )}
 
           <FormField label="Date of birth" htmlFor="client-dob" error={errors.date_of_birth}>
             <Input
@@ -1055,99 +1084,103 @@ function ClientEditDialog({ customer, onClose }: { customer: CustomerDetail; onC
             />
           </FormField>
 
-          <fieldset className="flex flex-col gap-4 rounded-xl border border-input p-4">
-            <legend className="px-1 text-sm font-medium">Emergency contact</legend>
-            <div className="grid gap-5 sm:grid-cols-2">
-              <FormField
-                label="Name"
-                htmlFor="emergency-contact-name"
-                error={errors.emergency_contact_name}
-              >
-                <Input
-                  id="emergency-contact-name"
-                  value={draft.emergency_contact_name}
-                  onChange={(e) => set({ emergency_contact_name: e.target.value })}
-                />
-              </FormField>
-              <FormField
-                label="Relationship"
-                htmlFor="emergency-contact-relationship"
-                error={errors.emergency_contact_relationship}
-              >
-                <Input
-                  id="emergency-contact-relationship"
-                  value={draft.emergency_contact_relationship}
-                  onChange={(e) => set({ emergency_contact_relationship: e.target.value })}
-                />
-              </FormField>
-            </div>
-            <FormField
-              label="Phone"
-              htmlFor="emergency-contact-phone"
-              error={errors.emergency_contact_phone}
-            >
-              <Input
-                id="emergency-contact-phone"
-                value={draft.emergency_contact_phone}
-                onChange={(e) => set({ emergency_contact_phone: e.target.value })}
-              />
-            </FormField>
-          </fieldset>
+          {!dobOnly && (
+            <>
+              <fieldset className="flex flex-col gap-4 rounded-xl border border-input p-4">
+                <legend className="px-1 text-sm font-medium">Emergency contact</legend>
+                <div className="grid gap-5 sm:grid-cols-2">
+                  <FormField
+                    label="Name"
+                    htmlFor="emergency-contact-name"
+                    error={errors.emergency_contact_name}
+                  >
+                    <Input
+                      id="emergency-contact-name"
+                      value={draft.emergency_contact_name}
+                      onChange={(e) => set({ emergency_contact_name: e.target.value })}
+                    />
+                  </FormField>
+                  <FormField
+                    label="Relationship"
+                    htmlFor="emergency-contact-relationship"
+                    error={errors.emergency_contact_relationship}
+                  >
+                    <Input
+                      id="emergency-contact-relationship"
+                      value={draft.emergency_contact_relationship}
+                      onChange={(e) => set({ emergency_contact_relationship: e.target.value })}
+                    />
+                  </FormField>
+                </div>
+                <FormField
+                  label="Phone"
+                  htmlFor="emergency-contact-phone"
+                  error={errors.emergency_contact_phone}
+                >
+                  <Input
+                    id="emergency-contact-phone"
+                    value={draft.emergency_contact_phone}
+                    onChange={(e) => set({ emergency_contact_phone: e.target.value })}
+                  />
+                </FormField>
+              </fieldset>
 
-          <fieldset className="flex flex-col gap-4 rounded-xl border border-input p-4">
-            <legend className="px-1 text-sm font-medium">Secondary contact</legend>
-            <div className="grid gap-5 sm:grid-cols-2">
-              <FormField
-                label="Name"
-                htmlFor="secondary-contact-name"
-                error={errors.secondary_contact_name}
-              >
-                <Input
-                  id="secondary-contact-name"
-                  value={draft.secondary_contact_name}
-                  onChange={(e) => set({ secondary_contact_name: e.target.value })}
-                />
-              </FormField>
-              <FormField
-                label="Phone"
-                htmlFor="secondary-contact-phone"
-                error={errors.secondary_contact_phone}
-              >
-                <Input
-                  id="secondary-contact-phone"
-                  value={draft.secondary_contact_phone}
-                  onChange={(e) => set({ secondary_contact_phone: e.target.value })}
-                />
-              </FormField>
-            </div>
-            <FormField
-              label="Email"
-              htmlFor="secondary-contact-email"
-              error={errors.secondary_contact_email}
-            >
-              <Input
-                id="secondary-contact-email"
-                type="email"
-                value={draft.secondary_contact_email}
-                onChange={(e) => set({ secondary_contact_email: e.target.value })}
-              />
-            </FormField>
-          </fieldset>
+              <fieldset className="flex flex-col gap-4 rounded-xl border border-input p-4">
+                <legend className="px-1 text-sm font-medium">Secondary contact</legend>
+                <div className="grid gap-5 sm:grid-cols-2">
+                  <FormField
+                    label="Name"
+                    htmlFor="secondary-contact-name"
+                    error={errors.secondary_contact_name}
+                  >
+                    <Input
+                      id="secondary-contact-name"
+                      value={draft.secondary_contact_name}
+                      onChange={(e) => set({ secondary_contact_name: e.target.value })}
+                    />
+                  </FormField>
+                  <FormField
+                    label="Phone"
+                    htmlFor="secondary-contact-phone"
+                    error={errors.secondary_contact_phone}
+                  >
+                    <Input
+                      id="secondary-contact-phone"
+                      value={draft.secondary_contact_phone}
+                      onChange={(e) => set({ secondary_contact_phone: e.target.value })}
+                    />
+                  </FormField>
+                </div>
+                <FormField
+                  label="Email"
+                  htmlFor="secondary-contact-email"
+                  error={errors.secondary_contact_email}
+                >
+                  <Input
+                    id="secondary-contact-email"
+                    type="email"
+                    value={draft.secondary_contact_email}
+                    onChange={(e) => set({ secondary_contact_email: e.target.value })}
+                  />
+                </FormField>
+              </fieldset>
 
-          <FormField
-            label="Notes"
-            htmlFor="client-notes"
-            error={errors.notes}
-            hint="Front-desk notes — not a clinical record."
-          >
-            <Textarea
-              id="client-notes"
-              rows={3}
-              maxLength={2000}
-              value={draft.notes}
-              onChange={(e) => set({ notes: e.target.value })}
-            />
-          </FormField>
+              <FormField
+                label="Notes"
+                htmlFor="client-notes"
+                error={errors.notes}
+                hint="Front-desk notes — not a clinical record."
+              >
+                <Textarea
+                  id="client-notes"
+                  rows={3}
+                  maxLength={2000}
+                  value={draft.notes}
+                  onChange={(e) => set({ notes: e.target.value })}
+                />
+              </FormField>
+            </>
+          )}
 
           {save.error && Object.keys(errors).length === 0 && <FormError>{save.error.message}</FormError>}
 
