@@ -361,6 +361,88 @@ async def test_a_retired_template_takes_no_new_draft_or_version(client):
     assert again.json()["code"] == "template_retired"
 
 
+# --- Task 8 (#51): compliance settings, identity-level -----------------------------------------
+
+
+async def _settings(client, template_id: str, **body):
+    payload = {"applies_to_all": False, "valid_for_months": None, "service_ids": [], **body}
+    return await client.put(f"{FORMS}/{template_id}/settings", json=payload)
+
+
+async def test_settings_save_and_read_back_applies_to_and_valid_for_months(client):
+    await as_admin(client)
+    template = await make(client)
+    service = await client.post(
+        "/api/admin/services", json={"name": "Consult", "duration_minutes": 30, "price_cents": 5000}
+    )
+    assert service.status_code == 201, service.text
+    service_id = service.json()["id"]
+
+    saved = await _settings(client, template["id"], service_ids=[service_id], valid_for_months=12)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["applies_to_all"] is False
+    assert saved.json()["valid_for_months"] == 12
+    assert saved.json()["service_ids"] == [service_id]
+
+    read = await client.get(f"{FORMS}/{template['id']}")
+    assert read.json()["service_ids"] == [service_id]
+    (row,) = [t for t in (await client.get(FORMS)).json()["templates"] if t["id"] == template["id"]]
+    assert row["service_ids"] == [service_id]
+
+
+async def test_every_client_and_specific_services_are_mutually_exclusive(client):
+    await as_admin(client)
+    template = await make(client)
+    refused = await _settings(
+        client, template["id"], applies_to_all=True, service_ids=[str(uuid.uuid4())]
+    )
+    assert refused.status_code == 422, refused.text
+
+
+async def test_settings_refuses_an_unknown_service(client):
+    await as_admin(client)
+    template = await make(client)
+    refused = await _settings(client, template["id"], service_ids=[str(uuid.uuid4())])
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"][0]["loc"] == ["body", "service_ids"]
+
+
+async def test_settings_refuses_a_period_outside_one_to_one_twenty_months(client):
+    await as_admin(client)
+    template = await make(client)
+    too_long = await _settings(client, template["id"], valid_for_months=121)
+    assert too_long.status_code == 422, too_long.text
+    too_short = await _settings(client, template["id"], valid_for_months=0)
+    assert too_short.status_code == 422, too_short.text
+
+
+async def test_a_retired_template_takes_no_new_settings(client):
+    await as_admin(client)
+    template = await make(client)
+    await save(client, template)
+    await publish(client, template["id"])
+    await client.post(f"{FORMS}/{template['id']}/retire", json={})
+
+    refused = await _settings(client, template["id"], applies_to_all=True)
+    assert refused.status_code == 409
+    assert refused.json()["code"] == "template_retired"
+
+
+async def test_settings_saved_is_audited(client):
+    await as_admin(client)
+    template = await make(client)
+    await _settings(client, template["id"], applies_to_all=True, valid_for_months=6)
+
+    saved = [row for row in await audit() if row[0] == "form_template.settings_saved"]
+    assert saved == [
+        (
+            "form_template.settings_saved",
+            template["id"],
+            {"applies_to_all": True, "valid_for_months": 6, "service_count": 0},
+        )
+    ]
+
+
 async def test_a_never_published_template_can_be_deleted(client):
     await as_admin(client)
     template = await make(client)
@@ -420,6 +502,10 @@ async def _every_route(client, template_id: str) -> list:
         await client.post(f"{FORMS}/{template_id}/publish", json={"requires_resignature": False}),
         await client.get(f"{FORMS}/{template_id}/versions"),
         await client.get(f"{FORMS}/{template_id}/versions/1"),
+        await client.put(
+            f"{FORMS}/{template_id}/settings",
+            json={"applies_to_all": True, "valid_for_months": None, "service_ids": []},
+        ),
         await client.post(f"{FORMS}/{template_id}/retire", json={}),
         await delete(client, template_id),
     ]
@@ -444,7 +530,7 @@ async def test_every_route_needs_forms_manage(client):
     await as_admin(client, "deputy@cedar.example", deputy_password)
 
     refusals = await _every_route(client, template["id"])
-    assert [r.status_code for r in refusals] == [403] * 9
+    assert [r.status_code for r in refusals] == [403] * 10
     assert {r.json()["code"] for r in refusals} == {"capability_required"}
 
 
@@ -456,7 +542,7 @@ async def test_every_route_is_refused_in_staff_mode(client):
     assert login.status_code == 200  # Staff Mode
 
     refusals = await _every_route(client, template["id"])
-    assert [r.status_code for r in refusals] == [403] * 9
+    assert [r.status_code for r in refusals] == [403] * 10
     assert {r.json()["code"] for r in refusals} == {"admin_mode_required"}
 
 
