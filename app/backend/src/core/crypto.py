@@ -19,10 +19,12 @@ import base64
 import os
 from functools import lru_cache
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # 96 bits, the size GCM is specified for; anything else costs an extra hashing step.
 _NONCE_BYTES = 12
+_TAG_BYTES = 16
 KEY_BYTES = 32
 
 
@@ -79,5 +81,9 @@ def seal(plaintext: bytes, key: bytes, associated_data: bytes) -> bytes:
 
 
 def open_sealed(blob: bytes, key: bytes, associated_data: bytes) -> bytes:
-    """Raises `InvalidTag` for a wrong key, other associated data or any edited byte."""
+    """Raises `InvalidTag` for a wrong key, other associated data or any edited byte —
+    including a blob cut too short to hold a nonce and a tag, which AESGCM would otherwise
+    answer with a `ValueError` for the empty nonce."""
+    if len(blob) < _NONCE_BYTES + _TAG_BYTES:
+        raise InvalidTag
     return _aes256(key).decrypt(blob[:_NONCE_BYTES], blob[_NONCE_BYTES:], associated_data)

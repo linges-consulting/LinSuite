@@ -1,7 +1,7 @@
 """The document store: sealed bytes in PostgreSQL, verified on every read (CLAUDE.md).
 
 `store_document` seals a document with AES-256-GCM under a key the caller hands in and stages
-the row in the caller's transaction; `fetch_document` opens it and checks its SHA-256. Nothing
+the row in the caller's transaction; `fetch_document` opens it and checks its digest. Nothing
 else reads or writes `documents`.
 
 **The key is a parameter.** `core/` imports no domain module, and the per-client DEK lives in
@@ -12,9 +12,15 @@ erasure must not destroy them — pre-flight C10).
 
 **What binds a blob to its row.** The id is chosen here, before sealing, and it and the
 customer id are the GCM associated data: a ciphertext copied onto another row, or a row
-re-pointed at another client, fails authentication. The plaintext's SHA-256 is stored beside
-it and compared after every decrypt. Either failure raises `DocumentIntegrityError` — never a
-partial read, never a fallback — and is logged by id only.
+re-pointed at another client, fails authentication. An HMAC-SHA256 of the plaintext is stored
+beside it and compared (constant-time) after every decrypt. Either failure raises
+`DocumentIntegrityError` — never a partial read, never a fallback — and is logged by id only.
+
+**Why a keyed digest, not a bare SHA-256.** A plain hash is the one value a `pg_dump` or offsite
+backup holder could use *without* the master key, to confirm a guessed low-entropy document —
+and backups outlive the shred. The HMAC key is derived (HKDF-SHA256, fixed `info`) from the key
+the document is sealed under, so the digest is as unusable as the ciphertext once that key goes.
+A separate subkey rather than the DEK itself: one key, one job.
 
 **If storage ever moves** (tech-stack §3 keeps the door open to object storage at scale), this
 file is the one to change: callers see ids and bytes, never the table.
@@ -26,15 +32,25 @@ import logging
 import uuid
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.hashes import SHA256
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core import crypto
-from core.errors import DocumentIntegrityError
+from core.errors import DocumentIntegrityError, DocumentNotFound
 from core.models import Document
 
 log = logging.getLogger(__name__)
+
+
+_DIGEST_INFO = b"linsuite/document-digest"
+
+
+def _digest(content: bytes, key: bytes) -> bytes:
+    subkey = HKDF(algorithm=SHA256(), length=32, salt=None, info=_DIGEST_INFO).derive(key)
+    return hmac.new(subkey, content, hashlib.sha256).digest()
 
 
 def _associated_data(document_id: uuid.UUID, customer_id: uuid.UUID) -> bytes:
@@ -64,7 +80,7 @@ async def store_document(
             source_id=source_id,
             content_type=content_type,
             ciphertext=crypto.seal(content, key, _associated_data(document_id, customer_id)),
-            sha256=hashlib.sha256(content).digest(),
+            digest=_digest(content, key),
             size_bytes=len(content),
         )
         .on_conflict_do_nothing(index_elements=["kind", "source_id"])
@@ -85,26 +101,28 @@ async def store_document(
 
 
 async def fetch_document(
-    db: AsyncSession, *, key: bytes, document_id: uuid.UUID
+    db: AsyncSession, *, key: bytes, customer_id: uuid.UUID, document_id: uuid.UUID
 ) -> tuple[bytes, str]:
-    """(content, content_type). Raises `DocumentIntegrityError` if the blob does not
-    authenticate under this key and row, or its hash does not match; `NoResultFound` if there
-    is no such document."""
+    """(content, content_type) of this client's document. Raises `DocumentNotFound` for an
+    unknown id or one belonging to another client, and `DocumentIntegrityError` if the blob
+    does not authenticate under this key and row or its digest does not match."""
     row = (
         await db.execute(
-            select(
-                Document.customer_id, Document.ciphertext, Document.sha256, Document.content_type
-            ).where(Document.id == document_id)
+            select(Document.ciphertext, Document.digest, Document.content_type).where(
+                Document.id == document_id, Document.customer_id == customer_id
+            )
         )
-    ).one()
+    ).one_or_none()
+    if row is None:
+        raise DocumentNotFound(str(document_id))
     try:
         content = crypto.open_sealed(
-            row.ciphertext, key, _associated_data(document_id, row.customer_id)
+            row.ciphertext, key, _associated_data(document_id, customer_id)
         )
     except InvalidTag:
         log.error("document %s failed authentication", document_id)
         raise DocumentIntegrityError(str(document_id)) from None
-    if not hmac.compare_digest(hashlib.sha256(content).digest(), row.sha256):
-        log.error("document %s failed its SHA-256 check", document_id)
+    if not hmac.compare_digest(_digest(content, key), row.digest):
+        log.error("document %s failed its digest check", document_id)
         raise DocumentIntegrityError(str(document_id))
     return content, row.content_type

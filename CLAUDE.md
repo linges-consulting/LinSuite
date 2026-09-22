@@ -73,7 +73,7 @@ Constraints any implementation must honor:
 
 ### Document storage and immutability
 
-- PDFs live in **PostgreSQL `bytea`**, AES-256-GCM encrypted in the app layer, SHA-256 verified on read. No object storage, no filesystem. Access goes through `store_document`/`fetch_document` in `core/`. Each customer's data key lives wrapped under `DOCUMENT_MASTER_KEY` in `customer_document_keys` (`customers/keys.py`: `data_key(db, customer_id)`); deleting that row is the crypto-shred, allowed only to the purge role when the customer's retention hold is null or expired.
+- PDFs live in **PostgreSQL `bytea`**, AES-256-GCM encrypted in the app layer, HMAC-SHA256 (keyed from the client's key) verified on read. No object storage, no filesystem. Access goes through `store_document`/`fetch_document` in `core/`. Each customer's data key lives wrapped under `DOCUMENT_MASTER_KEY` in `customer_document_keys` (`customers/keys.py`: `data_key(db, customer_id)`); deleting that row is the crypto-shred, allowed only to the purge role when the customer's retention hold is null or expired.
 - Three document classes, and the distinction matters: **immutable** (signed consents, waivers, intake forms — `UPDATE`/`DELETE` revoked and trigger-blocked), **voidable** (invoices — never edited in place; cancel sets status + links a replacement, original retained for CRA's 6-year rule), **lockable** (session notes — mutable until locked).
 - Immutability is enforced by DB grants and triggers, never by PDF permission flags, which are advisory and trivially stripped.
 - Audit log is an append-only table with the same enforcement.

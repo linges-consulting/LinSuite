@@ -17,6 +17,8 @@ Create Date: 2026-09-22
   7): a document insert takes `FOR KEY SHARE` on the key row, so the purge's DELETE of that key
   serialises against it, and the purge has to delete the documents first (rule 8). A cascade
   would run as the owner, whom the guard lets through.
+- `digest` is an HMAC-SHA256 keyed from the client's DEK, not a bare SHA-256: a dump or an
+  offsite backup (which outlives the shred) cannot use it to confirm a guessed document.
 - Not partitioned (pre-flight C2): revisit at ~1 M rows.
 """
 
@@ -45,13 +47,13 @@ def upgrade() -> None:
         sa.Column("source_id", sa.Uuid(), nullable=False),
         sa.Column("content_type", sa.Text(), nullable=False),
         sa.Column("ciphertext", sa.LargeBinary(), nullable=False),
-        sa.Column("sha256", sa.LargeBinary(), nullable=False),
+        sa.Column("digest", sa.LargeBinary(), nullable=False),
         sa.Column("size_bytes", sa.Integer(), nullable=False),
         sa.Column(
             "created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.UniqueConstraint("kind", "source_id", name="uq_documents_kind_source_id"),
-        sa.CheckConstraint("octet_length(sha256) = 32", name="ck_documents_sha256_length"),
+        sa.CheckConstraint("octet_length(digest) = 32", name="ck_documents_digest_length"),
     )
     op.create_index("ix_documents_customer_id", "documents", ["customer_id"])
     op.execute("REVOKE UPDATE, DELETE ON documents FROM linsuite_app")

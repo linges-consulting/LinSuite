@@ -242,7 +242,7 @@ class Document(Base):
     __table_args__ = (
         # A re-run render of the same source is `ON CONFLICT DO NOTHING`, never a second copy.
         UniqueConstraint("kind", "source_id", name="uq_documents_kind_source_id"),
-        CheckConstraint("octet_length(sha256) = 32", name="ck_documents_sha256_length"),
+        CheckConstraint("octet_length(digest) = 32", name="ck_documents_digest_length"),
         Index("ix_documents_customer_id", "customer_id"),
     )
 
@@ -256,7 +256,8 @@ class Document(Base):
     content_type: Mapped[str] = mapped_column(Text)
     # `core.crypto.seal`: nonce || ciphertext || tag.
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
-    # SHA-256 of the plaintext, checked after every decrypt.
-    sha256: Mapped[bytes] = mapped_column(LargeBinary)
+    # HMAC-SHA256 of the plaintext under a subkey of the client's DEK (`core/documents.py`),
+    # checked after every decrypt. Keyed, not a bare hash: it dies with the key.
+    digest: Mapped[bytes] = mapped_column(LargeBinary)
     size_bytes: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

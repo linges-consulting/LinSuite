@@ -46,14 +46,25 @@ log = logging.getLogger(__name__)
 
 PURGE_AUTHORITY = "linsuite_purge"
 # The guards' own refusals — the key's (0024) and the shared record guard on `documents`
-# (0026). Any other `insufficient_privilege` — a grant gone missing — is a real fault and must
-# not be mistaken for "held" night after night.
-_GUARD_REFUSALS = (
-    "customer_document_keys: DELETE is not permitted",
-    "documents: DELETE is not permitted",
+# (0026) — matched as the exact table-qualified start of the message, so another table whose
+# name merely ends the same way cannot pass for either. Any other `insufficient_privilege` — a
+# grant gone missing — is a real fault and must not be mistaken for "held" night after night.
+_GUARD_REFUSALS = tuple(
+    f"{table}: DELETE is not permitted for " for table in ("customer_document_keys", "documents")
 )
+_FOREIGN_KEY_VIOLATION = "23503"
 # The trigger's predicate, verbatim: not held = no hold, or a hold that has passed.
 _NOT_HELD = "(retention_expires_at IS NULL OR retention_expires_at < now())"
+
+
+def _refused_by_guard(message: str) -> bool:
+    return message.startswith(_GUARD_REFUSALS)
+
+
+def _postgres(error: DBAPIError) -> tuple[str | None, str]:
+    """(SQLSTATE, the server's own message) — asyncpg's error is a cause down."""
+    cause = getattr(error.orig, "__cause__", None)
+    return getattr(error.orig, "sqlstate", None), str(cause or "")
 
 
 def _run(work: Callable[..., Awaitable[Any]], *args: object) -> Any:
@@ -94,8 +105,17 @@ async def _shred(purge: AsyncEngine, customer_id: str, request_id: str | None) -
             ).rowcount
         except DBAPIError as error:
             await transaction.rollback()
-            if any(refusal in str(error) for refusal in _GUARD_REFUSALS):
+            sqlstate, message = _postgres(error)
+            if _refused_by_guard(message):
                 return False  # held: the trigger said no, which is its job
+            if sqlstate == _FOREIGN_KEY_VIOLATION:
+                # A document committed for this client while the purge ran (it waited on the
+                # insert's lock on the key row, ADR-0001 rule 7). Nothing was destroyed; the
+                # next run deletes it with the rest.
+                log.warning(
+                    "key for customer %s gained a document mid-purge; deferred", customer_id
+                )
+                return False
             raise
         if deleted:
             await transaction.commit()

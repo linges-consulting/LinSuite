@@ -96,3 +96,10 @@ class DocumentIntegrityError(Exception):
     Deliberately not an `HTTPException`: nothing a request did caused it and no retry will
     fix it — the row, the key or the database was altered — so it surfaces as a 500 and the
     log line carries the document id only, never content or key material."""
+
+
+class DocumentNotFound(LookupError):
+    """No document with this id belongs to this client (`core.documents.fetch_document`).
+
+    Its own class, apart from `DocumentIntegrityError`, so a route can answer 404 for an
+    unknown or another client's id and still let a failed verification surface as a 500."""

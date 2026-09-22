@@ -9,11 +9,16 @@ purge role only DELETE and only while the client is not held; the FK to the key 
 S1: `customers.tasks._shred` deletes documents, then the key, or — held — nothing.
 """
 
+import asyncio
+import hashlib
+import hmac
 import os
 import uuid
 
 import pytest
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.hashes import SHA256
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
@@ -21,7 +26,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from core import crypto, documents
 from core.config import get_settings
 from core.db import get_purge_engine, session_scope
-from core.errors import DocumentIntegrityError
+from core.errors import DocumentIntegrityError, DocumentNotFound
 from customers import keys, tasks
 from tests.test_appointments import (  # noqa: F401 — the autouse fixture comes along
     as_admin,
@@ -69,6 +74,12 @@ def test_a_flipped_byte_a_wrong_key_or_other_associated_data_raises():
             attempt()
 
 
+@pytest.mark.parametrize("blob", [b"", b"\x00" * 5, b"\x00" * 12, b"\x00" * 27])
+def test_a_blob_too_short_to_hold_a_nonce_and_tag_raises_invalid_tag(blob):
+    with pytest.raises(InvalidTag):
+        crypto.open_sealed(blob, os.urandom(32), b"doc")
+
+
 def test_a_key_that_is_not_aes_256_is_refused():
     with pytest.raises(ValueError):
         crypto.seal(PDF, os.urandom(16), b"doc")
@@ -99,7 +110,9 @@ async def fetch(customer_id: str, document_id: uuid.UUID) -> tuple[bytes, str]:
     async with session_scope() as db:
         key = await keys.existing_key(db, uuid.UUID(customer_id))
         assert key is not None
-        return await documents.fetch_document(db, key=key, document_id=document_id)
+        return await documents.fetch_document(
+            db, key=key, customer_id=uuid.UUID(customer_id), document_id=document_id
+        )
 
 
 async def stored(document_id: uuid.UUID) -> dict:
@@ -150,8 +163,14 @@ async def test_a_stored_document_round_trips_and_its_hash_verifies(client):
     assert PDF not in row["ciphertext"]
     assert b"Priya" not in row["ciphertext"]
     assert row["size_bytes"] == len(PDF)
-    assert len(row["sha256"]) == 32
     assert str(row["customer_id"]) == customer_id
+    # Keyed from the client's DEK, not a bare hash: without the key, a dump cannot confirm a
+    # guessed document, and the digest dies with the key.
+    assert row["digest"] != hashlib.sha256(PDF).digest()
+    async with session_scope() as db:
+        key = await keys.existing_key(db, uuid.UUID(customer_id))
+    subkey = HKDF(SHA256(), 32, None, b"linsuite/document-digest").derive(key)
+    assert row["digest"] == hmac.new(subkey, PDF, "sha256").digest()
 
 
 async def test_two_stores_of_the_same_bytes_produce_different_ciphertexts(client):
@@ -183,7 +202,7 @@ def flip_last_byte(column: str) -> str:
     )
 
 
-@pytest.mark.parametrize("column", ["ciphertext", "sha256"])
+@pytest.mark.parametrize("column", ["ciphertext", "digest"])
 async def test_a_tampered_blob_or_hash_fails_verification(client, column, caplog):
     customer_id = await keyed_customer(None)
     document_id = await store(customer_id)
@@ -202,7 +221,7 @@ async def test_a_blob_copied_onto_another_document_row_fails_verification(client
     source, target = await store(customer_id), await store(customer_id, b"another form")
     await as_owner(
         "UPDATE documents SET ciphertext = (SELECT ciphertext FROM documents WHERE id = :s), "
-        "sha256 = (SELECT sha256 FROM documents WHERE id = :s) WHERE id = :t",
+        "digest = (SELECT digest FROM documents WHERE id = :s) WHERE id = :t",
         s=source,
         t=target,
     )
@@ -222,6 +241,25 @@ async def test_a_document_moved_onto_another_client_fails_verification(client):
 
     with pytest.raises(DocumentIntegrityError):
         await fetch(other_id, document_id)
+
+
+@pytest.mark.parametrize("blob", [b"", b"\x01\x02\x03\x04\x05"], ids=["empty", "five_bytes"])
+async def test_a_truncated_blob_fails_verification_not_with_a_value_error(client, blob):
+    customer_id = await keyed_customer(None)
+    document_id = await store(customer_id)
+    await as_owner("UPDATE documents SET ciphertext = :b WHERE id = :id", b=blob, id=document_id)
+
+    with pytest.raises(DocumentIntegrityError):
+        await fetch(customer_id, document_id)
+
+
+async def test_an_unknown_or_another_clients_document_is_not_found(client):
+    customer_id, other_id = await keyed_customer(None), await keyed_customer(None)
+    document_id = await store(customer_id)
+
+    for asked_as, asked_for in ((other_id, document_id), (customer_id, uuid.uuid4())):
+        with pytest.raises(DocumentNotFound):
+            await fetch(asked_as, asked_for)
 
 
 async def test_existing_key_never_creates_one(client):
@@ -430,6 +468,71 @@ async def test_the_nightly_job_destroys_an_expired_clients_documents_with_the_ke
 
     tasks.purge_expired.delay()
 
+    assert await document_rows(customer_id) == 0
+    assert await key_rows(customer_id) == 0
+    assert await key_destroyed_events(customer_id) == 1
+
+
+def test_only_the_guards_own_refusals_read_as_held():
+    """Matched by the exact table-qualified prefix, so a future `*documents` table's refusal
+    (or any other message that merely contains the words) is not mistaken for a hold."""
+    held = tasks._refused_by_guard
+    assert held("documents: DELETE is not permitted for linsuite_purge on customer x")
+    assert held("customer_document_keys: DELETE is not permitted for linsuite_purge on x")
+    assert not held("form_documents: DELETE is not permitted for linsuite_purge on customer x")
+    assert not held("permission denied for table documents")
+    assert not held("documents: UPDATE is not permitted for linsuite_purge on customer x")
+
+
+async def _wait_for_the_purge_to_block(shred: asyncio.Task) -> None:
+    """Watched as the owner: `pg_stat_activity` hides another role's wait state from the app
+    role."""
+    owner = create_async_engine(get_settings().database_url_migrate)
+    try:
+        for _ in range(200):
+            if shred.done():
+                return
+            async with owner.connect() as conn:
+                if await conn.scalar(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE usename = 'linsuite_purge' AND wait_event_type = 'Lock'"
+                    )
+                ):
+                    return
+            await asyncio.sleep(0.05)
+    finally:
+        await owner.dispose()
+    raise AssertionError("the purge never queued behind the document insert")
+
+
+async def test_a_document_inserted_while_the_purge_runs_defers_the_shred(client, caplog):
+    """ADR-0001 rule 7's race, unheld: the insert holds `FOR KEY SHARE` on the key row, the
+    purge's key DELETE waits for it, and once it commits the FK refuses the DELETE. That is
+    "try again next night" — False and a log line, not an exception out of the task."""
+    customer_id = await keyed_customer(None)
+    async with session_scope() as db:
+        key = await keys.data_key(db, uuid.UUID(customer_id))
+        await documents.store_document(
+            db,
+            key=key,
+            customer_id=uuid.UUID(customer_id),
+            kind="form_submission",
+            source_id=uuid.uuid4(),
+            content=PDF,
+            content_type="application/pdf",
+        )
+        shred = asyncio.create_task(tasks._shred(get_purge_engine(), customer_id, None))
+        await _wait_for_the_purge_to_block(shred)
+        await db.commit()
+
+    assert await shred is False
+    assert customer_id in caplog.text
+    assert await document_rows(customer_id) == 1
+    assert await key_rows(customer_id) == 1
+    assert await key_destroyed_events(customer_id) == 0
+
+    assert await tasks._shred(get_purge_engine(), customer_id, None) is True
     assert await document_rows(customer_id) == 0
     assert await key_rows(customer_id) == 0
     assert await key_destroyed_events(customer_id) == 1
