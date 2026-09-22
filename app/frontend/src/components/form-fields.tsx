@@ -6,7 +6,7 @@ import { YES_NO, type FormField } from '@/lib/forms'
 
 /**
  * One field of a form, as a client sees it. Shared by the builder's preview (Settings →
- * Forms) and the public form page (`/f/:token`), so what staff preview is what the client
+ * Forms) and the public form page (`/f/#<token>`), so what staff preview is what the client
  * gets. Visibility (`show_if`) is the caller's, through `lib/forms.ts`'s `visibleKeys`.
  */
 export function FormFieldInput(props: {

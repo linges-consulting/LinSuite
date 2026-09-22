@@ -2,8 +2,9 @@
 
 **The token.** `secrets.token_urlsafe(32)` — 256 bits, 43 url-safe characters. It exists in
 exactly two places: the `url` in the issue response (the one time it is returned) and the
-email. The row keeps `sha256(token)`; a database dump, a backup or an audit query yields no
-usable link. The public page looks a link up by that digest (`forms/public.py`).
+email — as the URL's fragment, `/f/#<token>`, never a path segment. The row keeps
+`sha256(token)`; a database dump, a backup or an audit query yields no usable link. The
+public page looks a link up by that digest (`forms/public.py`).
 
 **Pinned.** A link names one client and one *version* — the latest published when it was
 issued. Republishing later does not move it: the client fills in what staff sent.
@@ -76,7 +77,9 @@ def expires_at(issued_at: datetime) -> datetime:
 
 
 def url_of(token: str) -> str:
-    return f"{get_settings().app_base_url.rstrip('/')}/f/{token}"
+    """`…/f/#<token>`: the token is the fragment, which a browser never sends to any server —
+    so no static host, proxy or access log can record it (fix round 2)."""
+    return f"{get_settings().app_base_url.rstrip('/')}/f/#{token}"
 
 
 # --- the erasure hook --------------------------------------------------------------------------

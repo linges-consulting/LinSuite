@@ -11,7 +11,7 @@ afterEach(() => {
 /**
  * Secure form links (#46). The staff side: the profile's Forms card sends a form and shows
  * the link once — Copy, a QR code for the clinic tablet, and "Emailed to …" when the server
- * queued one — with the open links listed and revocable. The client side: `/f/:token`
+ * queued one — with the open links listed and revocable. The client side: `/f/#<token>`
  * renders the pinned schema for a signed-in and a signed-out browser alike, hides a
  * conditional field until its condition holds, and says plainly when a link is dead.
  */
@@ -19,7 +19,7 @@ afterEach(() => {
 const PREGNANT = '11111111-1111-4111-8111-111111111111'
 const WEEKS = '22222222-2222-4222-8222-222222222222'
 const TOKEN = 'k'.repeat(43)
-const URL_ = `http://localhost/f/${TOKEN}`
+const URL_ = `http://localhost/f/#${TOKEN}`
 
 const PUBLIC_FORM = {
   version_id: 'v1',
@@ -193,7 +193,17 @@ test('revoking an open link removes it from the list', async () => {
   expect(await screen.findByText('No forms waiting to be filled in.')).toBeInTheDocument()
 })
 
-// --- /f/:token ----------------------------------------------------------------------------------
+// --- /f/#<token> ------------------------------------------------------------------------------
+
+/** Open the page the way a browser does: the real address bar carries the fragment too, so
+ *  the test can prove it is cleared from there and not only from the router's copy. */
+function openLink(path: string) {
+  window.history.replaceState(null, '', path)
+  renderApp(path)
+}
+
+const lookups = () =>
+  vi.mocked(fetch).mock.calls.filter(([url]) => String(url).startsWith('/api/public/'))
 
 function publicLink(answer: () => Response, signedIn: boolean) {
   return stubApi({
@@ -206,7 +216,7 @@ for (const signedIn of [true, false]) {
   test(`the form page renders the pinned schema ${signedIn ? 'in a signed-in' : 'in a signed-out'} browser`, async () => {
     publicLink(() => Response.json(PUBLIC_FORM), signedIn)
     const user = userEvent.setup()
-    renderApp(`/f/${TOKEN}`)
+    openLink(`/f/#${TOKEN}`)
 
     expect(await screen.findByRole('heading', { name: 'Prenatal intake' })).toBeInTheDocument()
     expect(screen.getByText('Hi Priya,')).toBeInTheDocument()
@@ -227,9 +237,10 @@ for (const signedIn of [true, false]) {
     expect(lookup[0]).toBe('/api/public/forms/lookup')
     expect(lookup[1]).toMatchObject({ method: 'POST', credentials: 'omit', referrerPolicy: 'origin' })
     expect(JSON.parse(String(lookup[1]!.body))).toEqual({ token: TOKEN })
-    // Once open, the token leaves the address bar and the history entry: the next person on
-    // a shared tablet cannot go back to it. It lives on only in memory.
+    // The fragment is read once and cleared from the address bar and this history entry: the
+    // next person on a shared tablet cannot go back to it. It lives on only in memory.
     expect(window.location.pathname).toBe('/f/')
+    expect(window.location.hash).toBe('')
     expect(window.location.href).not.toContain(TOKEN)
   })
 }
@@ -239,12 +250,26 @@ test('a dead link says so and names the business to contact', async () => {
     () => Response.json({ detail: 'This link is no longer valid.', code: 'link_invalid' }, { status: 404 }),
     false,
   )
-  renderApp(`/f/${TOKEN}`)
+  openLink(`/f/#${TOKEN}`)
 
   expect(await screen.findByRole('heading', { name: 'This link is no longer valid' })).toBeInTheDocument()
   expect(await screen.findByText(`Please contact ${BUSINESS_NAME} for a new one.`)).toBeInTheDocument()
   expect(screen.queryByRole('heading', { name: 'Sign in' })).not.toBeInTheDocument()
 })
+
+for (const [what, path] of [
+  ['an empty fragment', '/f/'],
+  ['the old path form', `/f/${TOKEN}`],
+] as const) {
+  test(`${what} is a dead link, and nothing is looked up`, async () => {
+    publicLink(() => Response.json(PUBLIC_FORM), false)
+    openLink(path)
+
+    expect(await screen.findByRole('heading', { name: 'This link is no longer valid' })).toBeInTheDocument()
+    expect(lookups()).toHaveLength(0)
+    expect(window.location.href).not.toContain(TOKEN)
+  })
+}
 
 test('the document asks for no referrer before any script runs', async () => {
   const html = await import('../index.html?raw')

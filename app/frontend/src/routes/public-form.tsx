@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link2Off } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { useParams } from 'react-router'
+import { useLocation } from 'react-router'
 import { FormFieldInput } from '@/components/form-fields'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ApiError, fetchPublicForm } from '@/lib/api'
@@ -9,19 +9,30 @@ import { useBranding } from '@/lib/branding'
 import { visibleKeys, type Answers } from '@/lib/forms'
 
 /**
- * `/f/:token` — the page a client opens from a form link (#46; pre-flight C6).
+ * `/f/#<token>` — the page a client opens from a form link (#46; pre-flight C6).
+ *
+ * **The token is the URL's fragment** (fix round 2): a browser never sends a fragment to any
+ * server, so no static host, proxy or access log records it. It is read once, kept in memory,
+ * and cleared from the address bar and this history entry straight away — the next person
+ * handed a shared tablet cannot go back to it. A path under `/f` (the old `/f/<token>`) is
+ * never looked up: it is a dead link.
  *
  * Outside every gate in `App.tsx` and without the app shell: a signed-in browser (the front
  * desk checking a link, or a tablet somebody forgot to sign out) sees exactly what the client
  * sees, and nothing here reads or sends the staff session (`fetchPublicForm` omits
- * credentials). The token is in the URL, so `index.html` asks for no referrer on anything
- * the page loads; the lookup is a POST, never cached, retried or refetched; and once it
- * succeeds the token is replaced out of the address bar and history.
+ * credentials). `index.html` asks for no referrer on anything the page loads, and the
+ * lookup is a POST, never cached, retried or refetched.
  *
  * Submitting arrives with Task 4; until then the form renders with no submit button.
  */
 export function PublicFormPage() {
-  const { token = '' } = useParams()
+  const { hash } = useLocation()
+  // Read once, on mount; the router's copy of the location keeps the fragment, the address
+  // bar does not.
+  const [token] = useState(() => hash.replace(/^#/, ''))
+  useEffect(() => {
+    window.history.replaceState(null, '', '/f/')
+  }, [])
   const branding = useBranding()
   const form = useQuery({
     queryKey: ['public-form', token],
@@ -34,17 +45,7 @@ export function PublicFormPage() {
   })
   const [answers, setAnswers] = useState<Answers>({})
 
-  // Once the form is open, take the token out of the address bar and this history entry, so
-  // the next person handed a shared tablet cannot go back to it. It lives on in memory only
-  // (this component and the query). Straight to `window.history`, not the router: the router
-  // would re-match `/f/` and unmount the form.
-  const opened = form.isSuccess
-  useEffect(() => {
-    if (opened) window.history.replaceState(null, '', '/f/')
-  }, [opened])
-
-  // `/f/` itself — a reload after the token was taken out of the address bar — is a link
-  // that is no longer here to open.
+  // No fragment — a reload after it was cleared, or the old path form — is a dead link.
   if (form.isPending && token !== '') {
     return (
       <Page>

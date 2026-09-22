@@ -45,8 +45,9 @@ export default function App() {
     <Routes>
       {/* A client's form link, outside every gate below and before the setup and session
           reads: the page is the client's, whoever is signed in on this browser (#46). */}
-      <Route path="/f/:token" element={<PublicFormPage />} />
-      <Route path="/f" element={<PublicFormPage />} />
+      {/* `/f/#<token>`: the token is the fragment, which never reaches a server. Anything else
+          under `/f` — the old `/f/<token>` shape included — is a dead link, never a lookup. */}
+      <Route path="/f/*" element={<PublicFormPage />} />
       <Route path="*" element={<AppRoutes />} />
     </Routes>
   )

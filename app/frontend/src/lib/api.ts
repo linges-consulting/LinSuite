@@ -1141,7 +1141,7 @@ export async function revokeFormLink(customerId: string, linkId: string): Promis
   if (!res.ok) throw await failure(res, 'Could not revoke the link')
 }
 
-/** What `/f/:token` renders: the pinned version, the business, and a first name. */
+/** What `/f/#<token>` renders: the pinned version, the business, and a first name. */
 export type PublicForm = {
   version_id: string
   template_name: string

@@ -18,6 +18,7 @@ import logging
 import os
 import re
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
@@ -84,8 +85,9 @@ async def revoke(client, customer_id: str, link_id: str):
 
 
 def token_of(url: str) -> str:
-    assert url.startswith(f"{BASE}/f/"), url
-    return url.removeprefix(f"{BASE}/f/")
+    # The token is the fragment: a browser never sends it to any server (fix round 2).
+    assert url.startswith(f"{BASE}/f/#"), url
+    return url.removeprefix(f"{BASE}/f/#")
 
 
 async def as_owner(sql: str, **params) -> None:
@@ -372,6 +374,8 @@ async def test_the_link_is_emailed_when_the_client_has_an_address(client, sent_e
     assert emailed["emailed_to"] == "ana@x.example"
     assert [m.to for m in sent_emails] == ["ana@x.example"]
     assert emailed["url"] in sent_emails[0].text
+    token = token_of(emailed["url"])
+    assert f"/f/#{token}" in sent_emails[0].text and f"/f/{token}" not in sent_emails[0].text
 
     sent_emails.clear()
     silent = (await issue(client, without, template["id"])).json()
@@ -474,3 +478,21 @@ async def test_the_database_refuses_to_reopen_rewrite_or_delete_a_link(client):
     )
     again = "UPDATE form_links SET consumed_at = now() + interval '1 hour' WHERE id = :id"
     assert await _as_app(again, id=open_id) == "42501"
+
+
+def test_no_code_builds_a_link_with_the_token_in_the_path():
+    """The token lives in the fragment (`/f/#<token>`) and nowhere else: a path segment is
+    what static hosts, proxies and access logs write down. Scans both apps' sources."""
+    from tests.conftest import BACKEND_DIR
+
+    app = Path(BACKEND_DIR).parent
+    in_path = re.compile(r"/f/(\{|\$\{|:token)")
+    offenders = [
+        f"{source}:{number}"
+        for root in (app / "backend" / "src", app / "frontend" / "src")
+        for source in root.rglob("*")
+        if source.suffix in {".py", ".ts", ".tsx"}
+        for number, line in enumerate(source.read_text().splitlines(), 1)
+        if in_path.search(line)
+    ]
+    assert offenders == []
