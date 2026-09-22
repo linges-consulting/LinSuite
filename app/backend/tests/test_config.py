@@ -70,3 +70,54 @@ def test_the_document_master_key_is_required(monkeypatch):
     monkeypatch.delenv("DOCUMENT_MASTER_KEY", raising=False)
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **{k: v for k, v in VALID.items() if k != "document_master_key"})
+
+
+# --- the purge DSN is the worker's, not the web process's (Task 7 fix round 1) -------------
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_the_purge_dsn_is_optional_and_blank_means_absent(value, monkeypatch):
+    monkeypatch.delenv("DATABASE_URL_PURGE", raising=False)
+    overrides = {"database_url_purge": value} if value is not None else {}
+    base = {k: v for k, v in VALID.items() if k != "database_url_purge"}
+    assert Settings(_env_file=None, **base, **overrides).database_url_purge is None
+
+
+def _without_the_purge_dsn(monkeypatch):
+    from core.config import get_settings
+
+    monkeypatch.setenv("DATABASE_URL_PURGE", "")
+    get_settings.cache_clear()  # the caller clears it again after `monkeypatch.undo()`
+    return get_settings
+
+
+def test_the_worker_and_the_task_engines_refuse_to_start_without_it(monkeypatch, database):
+    from core.celery_app import _require_the_purge_dsn
+    from core.db import get_task_engines
+
+    get_settings = _without_the_purge_dsn(monkeypatch)
+    try:
+        with pytest.raises(RuntimeError, match="DATABASE_URL_PURGE"):
+            _require_the_purge_dsn()
+        with pytest.raises(RuntimeError, match="DATABASE_URL_PURGE"):
+            get_task_engines()
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()
+
+
+async def test_the_web_app_boots_and_serves_without_it(monkeypatch, database):
+    from httpx import ASGITransport, AsyncClient
+
+    from main import app
+
+    get_settings = _without_the_purge_dsn(monkeypatch)
+    try:
+        async with app.router.lifespan_context(app):
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                resp = await c.get("/api/health")
+        assert resp.status_code == 200, resp.text
+        assert get_settings().database_url_purge is None
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()

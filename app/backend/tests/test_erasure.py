@@ -9,6 +9,7 @@ The two errors that matter: removing anything under a live retention hold (every
 is asserted by name below), and a request path reaching the purge role.
 """
 
+import asyncio
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -513,3 +514,110 @@ async def test_an_unknown_client_is_404(client):
     await as_admin(client)
 
     assert (await erase(client, str(uuid.uuid4()))).status_code == 404
+
+
+# --- fix round 1 -------------------------------------------------------------------------
+
+
+async def test_a_passed_hold_reads_as_expired_and_nothing_is_promised_kept(client, monkeypatch):
+    """A hold that ended last month is not a hold: the profile says so (not "held until" a
+    past date), the request anonymises, and — with the enqueue lost, so `purged_at` is still
+    null — the summary does not claim a name is being retained on a row already renamed."""
+    await as_admin(client)
+    customer_id, _, _ = await held_minor(client)
+    await as_owner(
+        "UPDATE customers SET retention_expires_at = now() - interval '30 days' WHERE id = :id",
+        id=customer_id,
+    )
+    stored = (await row(customer_id))["retention_expires_at"]
+
+    before = (await client.get(f"{CUSTOMERS}/{customer_id}")).json()["customer"]
+    assert before["retention"] == {
+        "status": "expired",
+        "expires_on": stored.astimezone(ZoneInfo(TORONTO)).date().isoformat(),
+    }
+
+    def broker_down(*_, **__):
+        raise ConnectionError("broker unreachable")
+
+    monkeypatch.setattr(tasks.finish_erasure, "delay", broker_down)
+    body = (await erase(client, customer_id)).json()
+    monkeypatch.undo()
+
+    assert body["held"] is False and body["retained"] == []
+    after = (await client.get(f"{CUSTOMERS}/{customer_id}")).json()["customer"]
+    assert after["first_name"] == "Erased"
+    assert after["erasure"]["purged_at"] is None
+    assert after["erasure"]["held"] is False
+    assert after["erasure"]["retained"] == [] and after["erasure"]["held_reason"] is None
+
+
+async def test_a_tombstone_that_later_gains_a_hold_still_refuses_a_dob(client):
+    """The DOB exception is for a chart that was held when erasure was asked — not for an
+    anonymous tombstone that a later clinical entry happened to put under a hold."""
+    await as_admin(client)
+    await switch(client, "general_business")
+    customer_id, _, _ = await ready_customer(client)
+    assert (await erase(client, customer_id)).status_code == 201
+    await switch(client, "regulated_health")
+    await entry(customer_id)
+    assert (await row(customer_id))["retention_expires_at"] == retention.INFINITY
+
+    resp = await client.patch(f"{CUSTOMERS}/{customer_id}", json={"date_of_birth": "1990-01-01"})
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["code"] == "customer_suppressed"
+
+
+async def _wait_for_a_lock_wait(booking: asyncio.Task) -> None:
+    """Until some app-role backend is waiting on a row lock — the booking, queued behind the
+    erasure's `FOR UPDATE`. Gives up after 10 s, or as soon as the booking finishes unblocked."""
+    for _ in range(200):
+        if booking.done():
+            return
+        async with session_scope() as db:
+            waiting = await db.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE usename = 'linsuite_app' AND wait_event_type = 'Lock'"
+                )
+            )
+        if waiting:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("the booking never queued behind the erasure's lock")
+
+
+@pytest.mark.parametrize("kind", ["single", "group"])
+async def test_a_booking_racing_an_erasure_waits_for_it_and_is_refused(client, kind):
+    """The erasure handler holds the customer `FOR UPDATE` until it commits; the booking
+    reads the customer `FOR KEY SHARE`, so it queues, then reads `suppressed_at` as committed.
+    Stood in for here by an app-role transaction doing exactly what the handler does."""
+    await as_admin(client)
+    customer_id, service, me = await ready_customer(client)
+
+    async with session_scope() as eraser:
+        await eraser.execute(
+            text("SELECT 1 FROM customers WHERE id = :id FOR UPDATE"), {"id": customer_id}
+        )
+        await eraser.execute(
+            text("UPDATE customers SET suppressed_at = now() WHERE id = :id"), {"id": customer_id}
+        )
+        if kind == "single":
+            request = book(client, service, me, at("15:00"), customer_id=customer_id)
+        else:
+            request = book_group(
+                client, [{"service_id": service, "staff_id": me}], customer_id=customer_id
+            )
+        booking = asyncio.create_task(request)
+        await _wait_for_a_lock_wait(booking)
+        await eraser.commit()
+    resp = await booking
+
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["code"] == "customer_suppressed"
+    async with session_scope() as db:
+        booked = await db.scalar(
+            text("SELECT count(*) FROM appointments WHERE customer_id = :id"), {"id": customer_id}
+        )
+    assert booked == 0

@@ -157,6 +157,18 @@ test('under a hold, the dialog says what is kept, why and until when', async () 
   }
 })
 
+test('a hold that has already ended is not promised: name and DOB go, and the dialog says why', async () => {
+  fake({ customer: { ...DETAIL, retention: { status: 'expired', expires_on: '2025-08-01' } } })
+  const { dialog } = await openDialog()
+
+  expect(within(dialog).getByText(/Retention period ended .*2025 — no longer held/)).toBeInTheDocument()
+  const removed = within(dialog).getByRole('list', { name: 'Removed now' })
+  expect(within(removed).getByText(/^Name/)).toBeInTheDocument()
+  expect(within(removed).getByText(/Date of birth/)).toBeInTheDocument()
+  const kept = within(dialog).getByRole('list', { name: 'Kept' })
+  expect(within(kept).queryByText(/Date of birth/)).not.toBeInTheDocument()
+})
+
 test('a chart held with no date of birth says it is held until one is recorded', async () => {
   fake({ customer: { ...DETAIL, date_of_birth: null, retention: { status: 'needs_dob', expires_on: null } } })
   const { dialog } = await openDialog()

@@ -473,7 +473,10 @@ export function ClientPage() {
 function ErasureDialog({ customer, onClose }: { customer: CustomerDetail; onClose: () => void }) {
   const queryClient = useQueryClient()
   const [note, setNote] = useState('')
-  const held = customer.retention.status !== 'not_held'
+  // Held means what the server's `is_held` means: a live dated hold, or no DOB to date one.
+  // An `expired` hold is not held — promising to keep a name the server erases is the one
+  // thing this dialog must never do.
+  const held = customer.retention.status === 'held' || customer.retention.status === 'needs_dob'
   const erase = useMutation({
     mutationFn: () => requestErasure(customer.id, note.trim() || null),
     onSuccess: () => {
@@ -498,7 +501,9 @@ function ErasureDialog({ customer, onClose }: { customer: CustomerDetail; onClos
       ? `Regulated health record, held until ${formatDob(customer.retention.expires_on)}; destroyed automatically after that.`
       : customer.retention.status === 'held' || customer.retention.status === 'needs_dob'
         ? 'Regulated health record with no end date yet — held until a date of birth is recorded.'
-        : 'Not under a retention hold, so everything personal goes now.'
+        : customer.retention.status === 'expired' && customer.retention.expires_on
+          ? `Retention period ended ${formatDob(customer.retention.expires_on)} — no longer held, so everything personal goes now.`
+          : 'Not under a retention hold, so everything personal goes now.'
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
@@ -799,6 +804,13 @@ function RetentionLine({ retention }: { retention: CustomerDetail['retention'] }
       <span className="tabular-nums">Held until {formatDob(retention.expires_on)}</span>
     ) : (
       <Badge variant="warning">Held — expiry date unavailable</Badge>
+    )
+  }
+  if (retention.status === 'expired' && retention.expires_on) {
+    return (
+      <span className="tabular-nums text-muted-foreground">
+        Retention period ended {formatDob(retention.expires_on)} — no longer held
+      </span>
     )
   }
   if (retention.status === 'needs_dob') {

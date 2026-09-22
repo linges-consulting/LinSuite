@@ -343,20 +343,27 @@ class VisitOut(BaseModel):
 
 
 class RetentionOut(BaseModel):
-    """The "Records" line. `held` carries the local date the hold ends on; `needs_dob` is a
-    chart with no date of birth — held indefinitely (`'infinity'` in the column), which is
-    never sent as a fake date. PHI: derived from the DOB (`PHI_FIELDS` names it)."""
+    """The "Records" line. `held` carries the local date the hold ends on; `expired` the date
+    it ended on — no longer held, exactly as the purge trigger and `erasure.is_held` read it;
+    `needs_dob` is a chart with no date of birth — held indefinitely (`'infinity'` in the
+    column), which is never sent as a fake date. PHI: derived from the DOB (`PHI_FIELDS`)."""
 
-    status: Literal["not_held", "held", "needs_dob"]
+    status: Literal["not_held", "held", "expired", "needs_dob"]
     expires_on: date | None
 
 
-def retention_out(expires_at: datetime | None, timezone: str) -> RetentionOut:
+def retention_out(
+    expires_at: datetime | None, timezone: str, now: datetime | None = None
+) -> RetentionOut:
     if expires_at is None:
         return RetentionOut(status="not_held", expires_on=None)
     if expires_at == retention.INFINITY:
         return RetentionOut(status="needs_dob", expires_on=None)
-    return RetentionOut(status="held", expires_on=expires_at.astimezone(ZoneInfo(timezone)).date())
+    held = is_held(expires_at, now or datetime.now(UTC))
+    return RetentionOut(
+        status="held" if held else "expired",
+        expires_on=expires_at.astimezone(ZoneInfo(timezone)).date(),
+    )
 
 
 class CustomerDetailOut(CustomerOut):
@@ -402,11 +409,11 @@ def customer_detail_out(
         updated_at=customer.updated_at,
         retention=retention_out(customer.retention_expires_at, timezone),
         suppressed=customer.suppressed_at is not None,
-        # Held until the nightly job finishes it: a hold that passed last night still reads
-        # as held until its key is actually gone and `purged_at` is stamped.
+        # Held by the same predicate the request used: a passed hold is not a reason to
+        # promise a name is being kept (the row may already be named "Erased").
         erasure=erasure_out(
             request,
-            request.purged_at is None and customer.retention_expires_at is not None,
+            request.purged_at is None and is_held(customer.retention_expires_at, datetime.now(UTC)),
             customer.retention_expires_at,
             timezone,
         )
@@ -497,10 +504,18 @@ async def update_customer(
 
     sent = payload.model_dump(exclude_unset=True)
     # An erased profile is not refilled. The one edit it takes is a DOB correction on a chart
-    # that is still held — the only way an indefinite hold ('infinity', no DOB) ever ends.
+    # that was held when erasure was asked and is held still — the only way an indefinite
+    # hold ('infinity', no DOB) ever ends. A tombstone that later gains a hold is not one.
     if customer.suppressed_at is not None and (
         set(sent) != {"date_of_birth"}
         or not is_held(customer.retention_expires_at, datetime.now(UTC))
+        or await db.scalar(
+            select(ErasureRequest.held_until)
+            .where(ErasureRequest.customer_id == customer_id)
+            .order_by(ErasureRequest.requested_at.desc())
+            .limit(1)
+        )
+        is None
     ):
         return JSONResponse(
             status_code=409,

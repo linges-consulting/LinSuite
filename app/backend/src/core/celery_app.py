@@ -11,7 +11,7 @@ use, which is exactly when the setting is wanted.
 
 from celery import Celery
 from celery.schedules import crontab
-from celery.signals import setup_logging
+from celery.signals import setup_logging, worker_init
 
 from core.config import get_settings
 from core.logging import configure_logging
@@ -43,6 +43,16 @@ def _configure(sender: Celery, **_: object) -> None:
             "schedule": crontab(hour=3, minute=30),
         },
     }
+
+
+@worker_init.connect
+def _require_the_purge_dsn(**_: object) -> None:
+    """A worker runs the purge tasks, so it fails at boot without the purge DSN. Otherwise it
+    would start and only fail on the first nightly run. The web process never needs the DSN,
+    and beat only enqueues, so neither checks."""
+    from core.db import purge_dsn
+
+    purge_dsn()
 
 
 @setup_logging.connect

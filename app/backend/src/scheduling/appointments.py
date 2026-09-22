@@ -584,10 +584,18 @@ def invalid_transition(status: str) -> JSONResponse:
 
 def customer_suppressed() -> JSONResponse:
     """The client asked to be erased (Task 7): they are not bookable. The profile's history
-    stays; nothing new is added to it. The same 422 shape as `refuse`, with a code."""
-    # ponytail: read without a lock — an erasure committed between this read and the insert
-    # lets one last booking through; the appointment FK only takes KEY SHARE. Lock the row
-    # FOR SHARE here if that window ever matters.
+    stays; nothing new is added to it. The same 422 shape as `refuse`, with a code.
+
+    Race-free: both booking paths read the customer `FOR KEY SHARE`, which waits for the
+    erasure handler's `FOR UPDATE` and then sees `suppressed_at` as it committed. It cannot
+    deadlock. The erasure handler locks the business row `FOR SHARE` and then the customer
+    `FOR UPDATE`; its other locks are FK `KEY SHARE`s, which conflict with nothing a booking
+    takes. A booking locks the customer `FOR KEY SHARE` first, then
+    (on insert) the staff row `FOR UPDATE` in the concurrency trigger, then takes the FK's own
+    `KEY SHARE` on the customer again. It never locks the business row, and `_lock_group`
+    belongs to cancel/move, never to booking. The two share one lockable row, the customer's.
+    One shared lock cannot form a cycle. KEY SHARE conflicts with nothing a profile PATCH
+    takes (`FOR NO KEY UPDATE`), so front-desk edits never queue behind a booking."""
     return JSONResponse(
         status_code=422,
         content={
@@ -735,7 +743,13 @@ async def book_appointment(payload: BookingIn, actor: Scheduler, claims: ClaimsD
             )
         customer = await create_customer(db, payload.customer, actor.id)
     else:
-        customer = await db.get(Customer, payload.customer_id)
+        # FOR KEY SHARE: queues behind an erasure's FOR UPDATE, then reads it as committed.
+        customer = await db.get(
+            Customer,
+            payload.customer_id,
+            with_for_update={"key_share": True},
+            populate_existing=True,
+        )
         if customer is None:
             raise refuse("customer_id", "No such customer.")
         if customer.suppressed_at is not None:
@@ -1230,7 +1244,13 @@ async def book_group(payload: GroupBookingIn, actor: Scheduler, claims: ClaimsDe
             )
         customer = await create_customer(db, payload.customer, actor.id)
     else:
-        customer = await db.get(Customer, payload.customer_id)
+        # FOR KEY SHARE: queues behind an erasure's FOR UPDATE, then reads it as committed.
+        customer = await db.get(
+            Customer,
+            payload.customer_id,
+            with_for_update={"key_share": True},
+            populate_existing=True,
+        )
         if customer is None:
             raise refuse("customer_id", "No such customer.")
         if customer.suppressed_at is not None:

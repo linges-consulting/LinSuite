@@ -22,8 +22,11 @@ class Settings(BaseSettings):
     # Application role: what request handlers and workers use. DELETE is revoked on
     # immutable tables for this role (ADR-0001).
     database_url: str
-    # Privileged purge role: only the retention-expiry job connects with it (ADR-0001).
-    database_url_purge: str
+    # Privileged purge role: only the purge tasks connect with it (ADR-0001). Optional here
+    # so the web process can run without it, and it does (compose blanks it for `app`). The
+    # worker refuses to boot without it (`core/celery_app.py`), and so does
+    # `core.db.purge_dsn`.
+    database_url_purge: str | None = None
     # Schema owner: Alembic only. Creates roles, tables, triggers and grants.
     database_url_migrate: str
 
@@ -107,6 +110,11 @@ class Settings(BaseSettings):
     # First-run setup token (tech-stack §17): written 0600 here on every boot until setup
     # completes. In compose this path is a volume, so it survives a container replacement.
     setup_token_file: str = "/var/lib/linsuite/setup-token"
+
+    @field_validator("database_url_purge", mode="before")
+    @classmethod
+    def _blank_purge_dsn_is_absent(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
 
     @field_validator("jwt_secret", mode="after")
     @classmethod

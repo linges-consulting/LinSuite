@@ -344,9 +344,10 @@ async def test_a_temp_pg_class_cannot_let_the_app_role_rewrite_the_access_log(da
 PURGE_REACHERS = {
     "core/config.py": "declares the `DATABASE_URL_PURGE` setting",
     "core/db.py": "builds the purge engines",
+    "core/celery_app.py": "the worker refuses to boot without the purge DSN",
     "customers/tasks.py": "the purge tasks — the one production caller",
 }
-PURGE_TOKENS = ("database_url_purge", "get_purge_engine", "get_task_engines")
+PURGE_TOKENS = ("database_url_purge", "get_purge_engine", "get_task_engines", "purge_dsn")
 
 
 def test_only_the_purge_tasks_reach_the_purge_role():

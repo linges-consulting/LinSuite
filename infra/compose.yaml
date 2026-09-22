@@ -45,6 +45,9 @@ services:
       # access log records — is the caller and not traefik's container address. Safe only
       # because port 8000 is never published: the compose network is the only way in.
       FORWARDED_ALLOW_IPS: "*"
+      # The web process never uses the purge role (only the worker's tasks do), so it is
+      # not given the purge DSN. A compromised request handler then has no purge credential.
+      DATABASE_URL_PURGE: ""
     volumes:
       # Holds the 0600 first-run setup token; kept out of the image so a rebuild or a
       # `docker compose down` without `-v` does not silently re-open setup.

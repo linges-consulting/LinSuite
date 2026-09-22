@@ -1,10 +1,12 @@
 """Two engines, two roles (ADR-0001).
 
 `get_engine()` is the application engine: request handlers and Celery tasks use it via
-`get_session`. `get_purge_engine()` connects as `linsuite_purge` and is reserved for the
-retention-expiry job. Nothing else may import it: `customers/tasks.py` is its one production
-caller, and `test_only_the_purge_tasks_reach_the_purge_role` holds that line — the web
-process never builds it, so no request handler can reach the purge role at all.
+`get_session`. The purge role (`linsuite_purge`) is reached only through
+`get_task_engines()`, which the Celery tasks in `customers/tasks.py` call once per run.
+`get_purge_engine()` is a pooled purge engine the test suite uses to inspect and clean up;
+no production code calls it. `test_only_the_purge_tasks_reach_the_purge_role` enforces this:
+the web process never builds a purge engine, so no request handler can reach the purge role.
+It does not even need the purge DSN (`DATABASE_URL_PURGE` is blanked for the `app` service).
 """
 
 from collections.abc import AsyncIterator
@@ -38,9 +40,7 @@ def get_purge_engine() -> AsyncEngine:
     # `max_overflow=0` beside `pool_size=1`: the privileged role never holds more than one
     # connection, however many callers reach for it at once — the rest queue rather than the
     # pool quietly handing out a second one.
-    return create_async_engine(
-        get_settings().database_url_purge, pool_pre_ping=True, pool_size=1, max_overflow=0
-    )
+    return create_async_engine(purge_dsn(), pool_pre_ping=True, pool_size=1, max_overflow=0)
 
 
 def get_task_engines() -> tuple[AsyncEngine, AsyncEngine]:
@@ -52,8 +52,20 @@ def get_task_engines() -> tuple[AsyncEngine, AsyncEngine]:
     settings = get_settings()
     return (
         create_async_engine(settings.database_url, poolclass=NullPool),
-        create_async_engine(settings.database_url_purge, poolclass=NullPool),
+        create_async_engine(purge_dsn(), poolclass=NullPool),
     )
+
+
+def purge_dsn() -> str:
+    """`DATABASE_URL_PURGE`. Required only where the purge role is used. The worker also
+    checks it at boot (`core/celery_app.py`), so a worker without it never starts."""
+    dsn = get_settings().database_url_purge
+    if not dsn:
+        raise RuntimeError(
+            "DATABASE_URL_PURGE is not set: the purge tasks cannot run without it "
+            "(ADR-0001; see .env.example)."
+        )
+    return dsn
 
 
 @lru_cache

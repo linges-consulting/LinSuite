@@ -1156,8 +1156,9 @@ export type CustomerDetail = CustomerRecord & {
   notes: string | null
   updated_at: string
   /** When this chart may be destroyed (ADR-0001). `expires_on` is a business-local date,
-   *  only for `held`; `needs_dob` is held indefinitely until a date of birth is added. */
-  retention: { status: 'held' | 'not_held' | 'needs_dob'; expires_on: string | null }
+   *  for `held` (ends on) and `expired` (ended on — no longer held); `needs_dob` is held
+   *  indefinitely until a date of birth is added. */
+  retention: { status: 'held' | 'expired' | 'not_held' | 'needs_dob'; expires_on: string | null }
   /** Erasure was requested: hidden from the list, search and booking. */
   suppressed: boolean
   /** What was kept and why — null until an erasure is requested. */
