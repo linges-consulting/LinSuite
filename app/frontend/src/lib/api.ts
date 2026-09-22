@@ -1162,6 +1162,45 @@ export async function fetchCustomerProfile(id: string): Promise<CustomerProfile>
   return res.json()
 }
 
+/** One open of a client's record, as the access log holds it: identifiers only, never
+ *  what was seen. `actor_name` is resolved at read time and falls back to the id. */
+export type AccessEntry = {
+  id: number
+  occurred_at: string
+  actor_user_id: string
+  actor_name: string
+  actor_role: string
+  resource_type: string
+  resource_id: string
+  action: string
+  ip: string | null
+}
+
+/** A page of the report. `from`/`to` are the business-local dates actually applied — the
+ *  server's 90-day default when none were sent. */
+export type AccessReport = {
+  entries: AccessEntry[]
+  total: number
+  from: string
+  to: string
+  timezone: string
+}
+
+/** Admin Mode + `audit.view`. Reading it is not itself an access-log event. */
+export async function fetchAccessLog(
+  id: string,
+  query: { from?: string; to?: string; page?: number; page_size?: number },
+): Promise<AccessReport> {
+  const params = new URLSearchParams()
+  if (query.from) params.set('from', query.from)
+  if (query.to) params.set('to', query.to)
+  if (query.page) params.set('page', String(query.page))
+  if (query.page_size) params.set('page_size', String(query.page_size))
+  const res = await fetch(`/api/admin/customers/${encodeURIComponent(id)}/access-log?${params}`)
+  if (!res.ok) throw await failure(res, 'Could not load the access history')
+  return res.json()
+}
+
 /** Every field the edit dialog can send. A key left out of the object is left alone on the
  *  server — never sent as `null` by accident — which is what lets the dialog submit only
  *  what actually changed. */

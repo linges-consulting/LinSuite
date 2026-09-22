@@ -1,5 +1,15 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, ChevronLeft, ChevronRight, Pencil, SearchX, UserRound, Users } from 'lucide-react'
+import {
+  ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
+  History,
+  Pencil,
+  SearchX,
+  ShieldCheck,
+  UserRound,
+  Users,
+} from 'lucide-react'
 import { useDeferredValue, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
@@ -18,15 +28,18 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
 import {
   ApiError,
+  fetchAccessLog,
   fetchCustomerProfile,
   fetchCustomers,
   fieldErrors,
   updateCustomer,
+  type AccessEntry,
   type CustomerDetail,
   type CustomerPatch,
   type CustomerRecord,
@@ -189,6 +202,7 @@ export function ClientPage() {
   const { id = '' } = useParams()
   const { user } = useSession()
   const canEdit = user?.capabilities.includes('customers.manage') ?? false
+  const canAudit = user?.capabilities.includes('audit.view') ?? false
   const [editing, setEditing] = useState(false)
   const profile = useQuery({
     queryKey: [...PROFILE, id],
@@ -400,9 +414,166 @@ export function ClientPage() {
               </div>
             )}
           </section>
+
+          {canAudit && <AccessHistory customerId={id} adminMode={user?.mode === 'admin'} />}
         </>
       )}
     </div>
+  )
+}
+
+const ACCESS_LOG = ['customer-access-log'] as const
+const ACCESS_PAGE_SIZE = 25
+
+/** What an entry was, in words. Only profile opens exist today; forms and session notes
+ *  will add their own resource types, and an unknown one still reads as its raw key. */
+const OPENED: Record<string, string> = { customer_profile: 'Opened profile' }
+
+/**
+ * Who opened this record, when, as what and from where (ADR-0002 §6). Shown to holders of
+ * `audit.view` only — hidden otherwise, like Settings in the nav — and asked for only in
+ * Admin Mode: the capability is an administrative one, and a Staff Mode request would be
+ * a refusal the card can predict. The date range is the server's (`from`/`to`, business-
+ * local, 90 days by default), so the inputs show whatever range was actually applied.
+ */
+function AccessHistory({ customerId, adminMode }: { customerId: string; adminMode: boolean }) {
+  const [range, setRange] = useState<{ from?: string; to?: string }>({})
+  const [page, setPage] = useState(1)
+  const report = useQuery({
+    queryKey: [...ACCESS_LOG, customerId, range.from, range.to, page],
+    queryFn: () =>
+      fetchAccessLog(customerId, { ...range, page, page_size: ACCESS_PAGE_SIZE }),
+    enabled: adminMode,
+    placeholderData: keepPreviousData,
+  })
+  const from = range.from ?? report.data?.from ?? ''
+  const to = range.to ?? report.data?.to ?? ''
+  const total = report.data?.total ?? 0
+  const pages = Math.max(1, Math.ceil(total / ACCESS_PAGE_SIZE))
+  const first = (page - 1) * ACCESS_PAGE_SIZE + 1
+  const choose = (next: { from?: string; to?: string }) => {
+    setRange({ from, to, ...next })
+    setPage(1)
+  }
+
+  return (
+    <Card>
+      <CardHeader className="flex-row flex-wrap items-end justify-between gap-3">
+        <CardTitle className="text-base font-medium">
+          <h2>Access history</h2>
+        </CardTitle>
+        {adminMode && (
+          <div className="flex items-end gap-2">
+            <div className="grid gap-1">
+              <Label htmlFor="access-from" className="text-xs text-muted-foreground">
+                From
+              </Label>
+              <Input
+                id="access-from"
+                type="date"
+                className="w-40"
+                value={from}
+                max={to || undefined}
+                onChange={(e) => choose({ from: e.target.value })}
+              />
+            </div>
+            <div className="grid gap-1">
+              <Label htmlFor="access-to" className="text-xs text-muted-foreground">
+                To
+              </Label>
+              <Input
+                id="access-to"
+                type="date"
+                className="w-40"
+                value={to}
+                min={from || undefined}
+                onChange={(e) => choose({ to: e.target.value })}
+              />
+            </div>
+          </div>
+        )}
+      </CardHeader>
+      <CardContent>
+        {!adminMode ? (
+          <p className="flex items-center gap-2 text-muted-foreground">
+            <ShieldCheck className="size-4" aria-hidden />
+            Switch to Admin Mode to see who has opened this record.
+          </p>
+        ) : report.isPending ? (
+          <Skeleton className="h-40 w-full" />
+        ) : report.isError ? (
+          <p role="alert" className="text-destructive">
+            {report.error.message}
+          </p>
+        ) : report.data.entries.length === 0 ? (
+          <EmptyState
+            icon={History}
+            title="Nobody opened this record in these dates"
+            description="Every time someone opens this client's profile, it is listed here."
+          />
+        ) : (
+          <div className="rounded-xl border">
+            <Table aria-label="Access history">
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="pl-4">When</TableHead>
+                  <TableHead>Who</TableHead>
+                  <TableHead>Role</TableHead>
+                  <TableHead>What</TableHead>
+                  <TableHead className="pr-4">IP address</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {report.data.entries.map((entry) => (
+                  <AccessRow key={entry.id} entry={entry} timezone={report.data.timezone} />
+                ))}
+              </TableBody>
+            </Table>
+            {pages > 1 && (
+              <div className="flex items-center justify-between border-t px-4 py-2 text-muted-foreground">
+                <span className="tabular-nums">
+                  {first}–{Math.min(page * ACCESS_PAGE_SIZE, total)} of {total}
+                </span>
+                <div className="flex gap-1">
+                  <Button
+                    variant="outline"
+                    size="icon-sm"
+                    aria-label="Previous page"
+                    disabled={page <= 1}
+                    onClick={() => setPage((p) => p - 1)}
+                  >
+                    <ChevronLeft />
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="icon-sm"
+                    aria-label="Next page"
+                    disabled={page >= pages}
+                    onClick={() => setPage((p) => p + 1)}
+                  >
+                    <ChevronRight />
+                  </Button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function AccessRow({ entry, timezone }: { entry: AccessEntry; timezone: string }) {
+  return (
+    <TableRow className="h-10">
+      <TableCell className="pl-4 tabular-nums">
+        <time dateTime={entry.occurred_at}>{whenAt(entry.occurred_at, timezone)}</time>
+      </TableCell>
+      <TableCell className="max-w-48 truncate">{entry.actor_name}</TableCell>
+      <TableCell>{entry.actor_role}</TableCell>
+      <TableCell>{OPENED[entry.resource_type] ?? `${entry.action} ${entry.resource_type}`}</TableCell>
+      <TableCell className="pr-4 tabular-nums">{entry.ip ?? blank}</TableCell>
+    </TableRow>
   )
 }
 

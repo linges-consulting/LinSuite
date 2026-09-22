@@ -289,3 +289,131 @@ test('a date of birth in the future is refused before the round trip', async () 
 
   expect(screen.getByText('Date of birth cannot be in the future.')).toBeInTheDocument()
 })
+
+/**
+ * Access history (ADR-0002 §6): who opened this record, for holders of `audit.view`. What is
+ * worth pinning: the card never appears — and never asks — without the capability; it
+ * renders the server's rows on the business's clock; and the two date inputs are the
+ * server's range (`from`/`to`), not a filter over what happens to be loaded.
+ */
+
+const ACCESS_LOG = {
+  entries: [
+    {
+      id: 7,
+      occurred_at: '2026-09-18T14:05:00Z',
+      actor_user_id: 'u2',
+      actor_name: 'Ana Rossi',
+      actor_role: 'Front desk',
+      resource_type: 'customer_profile',
+      resource_id: 'c1',
+      action: 'view',
+      ip: '10.0.0.7',
+    },
+    {
+      id: 3,
+      occurred_at: '2026-09-01T13:00:00Z',
+      actor_user_id: 'u9',
+      actor_name: 'u9',
+      actor_role: 'Staff',
+      resource_type: 'customer_profile',
+      resource_id: 'c1',
+      action: 'view',
+      ip: null,
+    },
+  ],
+  total: 2,
+  from: '2026-06-21',
+  to: '2026-09-19',
+  timezone: 'America/Toronto',
+}
+
+const ME_AUDITOR = {
+  ...ME_WITH_MANAGE,
+  role: 'Administrator',
+  capabilities: ['admin', 'customers.view', 'audit.view'],
+  mode: 'admin',
+  can_switch_modes: true,
+  admin_grant_expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
+  admin_hard_limit_at: new Date(Date.now() + 30 * 60_000).toISOString(),
+}
+
+function auditor(me: object = ME_AUDITOR) {
+  return stubApi({
+    signedIn: true,
+    dualRole: false,
+    respond: (url: string) => {
+      const parsed = new URL(url, 'http://test')
+      if (url === '/api/auth/me') return Response.json(me)
+      if (parsed.pathname === '/api/customers/c1') return Response.json(PROFILE)
+      if (parsed.pathname === '/api/admin/customers/c1/access-log') {
+        const from = parsed.searchParams.get('from')
+        return Response.json(
+          from
+            ? { ...ACCESS_LOG, entries: [], total: 0, from, to: parsed.searchParams.get('to') }
+            : ACCESS_LOG,
+        )
+      }
+      return undefined
+    },
+  })
+}
+
+const reportCalls = (calls: Call[]) => calls.filter((c) => c.url.includes('/access-log'))
+
+test('without audit.view there is no access history card, and nothing asks for one', async () => {
+  const { calls } = fake()
+  renderApp('/clients/c1')
+  await screen.findByRole('heading', { name: 'Priya Nair' })
+
+  expect(screen.queryByRole('heading', { name: 'Access history' })).not.toBeInTheDocument()
+  expect(reportCalls(calls)).toHaveLength(0)
+})
+
+test('an audit.view holder in Admin Mode sees who opened the record, on the business clock', async () => {
+  auditor()
+  renderApp('/clients/c1')
+
+  const table = await screen.findByRole('table', { name: 'Access history' })
+  const rows = within(table).getAllByRole('row').slice(1)
+  expect(rows).toHaveLength(2)
+  expect(within(rows[0]).getByText('Ana Rossi')).toBeInTheDocument()
+  expect(within(rows[0]).getByText('Front desk')).toBeInTheDocument()
+  expect(within(rows[0]).getByText('Opened profile')).toBeInTheDocument()
+  expect(within(rows[0]).getByText('10.0.0.7')).toBeInTheDocument()
+  // 14:05Z on 18 September is 10:05 in Toronto.
+  expect(within(rows[0]).getByText(/10:05/)).toBeInTheDocument()
+  // A departed account: the id stands in for the name, and the row is still there.
+  expect(within(rows[1]).getByText('u9')).toBeInTheDocument()
+  expect(screen.getByLabelText('From')).toHaveValue('2026-06-21')
+  expect(screen.getByLabelText('To')).toHaveValue('2026-09-19')
+})
+
+test('changing the dates asks the server again with from and to', async () => {
+  const { calls } = auditor()
+  renderApp('/clients/c1')
+  await screen.findByRole('table', { name: 'Access history' })
+
+  fireEvent.change(screen.getByLabelText('From'), { target: { value: '2026-09-10' } })
+
+  await waitFor(() => {
+    const last = new URL(reportCalls(calls).at(-1)!.url, 'http://test')
+    expect(last.searchParams.get('from')).toBe('2026-09-10')
+    expect(last.searchParams.get('to')).toBe('2026-09-19')
+  })
+  expect(await screen.findByText('Nobody opened this record in these dates')).toBeInTheDocument()
+})
+
+test('in Staff Mode the card asks for Admin Mode instead of requesting a refusal', async () => {
+  const { calls } = auditor({
+    ...ME_AUDITOR,
+    mode: 'staff',
+    admin_grant_expires_at: null,
+    admin_hard_limit_at: null,
+  })
+  renderApp('/clients/c1')
+
+  expect(await screen.findByRole('heading', { name: 'Access history' })).toBeInTheDocument()
+  expect(screen.getByText(/Switch to Admin Mode/)).toBeInTheDocument()
+  expect(reportCalls(calls)).toHaveLength(0)
+})
