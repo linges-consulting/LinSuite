@@ -40,7 +40,7 @@ from tests.test_appointments import (  # noqa: F401 — the autouse fixture come
 )
 from tests.test_customer_profile import complete_visits, ready_customer
 from tests.test_document_keys import key_rows
-from tests.test_groups import book_group
+from tests.test_groups import book_group, two_providers
 from tests.test_retention_api import SECURITY, entry, stored, switch, years_ago
 
 NOW = datetime(2026, 9, 21, 12, tzinfo=UTC)
@@ -730,3 +730,93 @@ async def test_a_dob_patch_racing_a_profile_switch_no_longer_deadlocks(client, m
     assert switched.status_code == 200, switched.text
     assert (await row(customer_id))["date_of_birth"] == date(1980, 1, 1)
     assert (await stored(customer_id))[1] is None
+
+
+# --- M5: upcoming appointments block an erasure ---------------------------------------------
+
+
+async def assert_refused_for_upcoming(resp, count: int, customer_id: str) -> None:
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["code"] == "upcoming_appointments"
+    assert resp.json()["count"] == count
+    stored = await row(customer_id)
+    assert stored["suppressed_at"] is None
+    assert stored["email"] == PROFILE["email"]
+    async with session_scope() as db:
+        requests = await db.scalar(
+            text("SELECT count(*) FROM erasure_requests WHERE customer_id = :id"),
+            {"id": customer_id},
+        )
+    assert requests == 0
+    assert await events("customer.erasure_requested") == []
+
+
+async def test_an_upcoming_booking_blocks_erasure_until_it_is_cancelled(client):
+    await as_admin(client)
+    customer_id, service, me = await ready_customer(client)
+    await fill_profile(client, customer_id, years_ago(30))
+    made = await book(client, service, me, at("15:00"), customer_id=customer_id)
+    assert made.status_code == 201, made.text
+
+    await assert_refused_for_upcoming(await erase(client, customer_id), 1, customer_id)
+
+    cancelled = await client.post(f"{APPOINTMENTS}/{made.json()['id']}/cancel", json={})
+    assert cancelled.status_code == 200, cancelled.text
+    assert (await erase(client, customer_id)).status_code == 201
+
+
+async def test_a_past_appointment_still_confirmed_does_not_block(client):
+    """Nobody closed it out, but it cannot happen after the erasure: only the future blocks."""
+    await as_admin(client)
+    customer_id, service, me = await ready_customer(client)
+    made = await book(client, service, me, at("15:00"), customer_id=customer_id)
+    assert made.status_code == 201, made.text
+    await as_owner(
+        "UPDATE appointments SET starts_at = starts_at - interval '30 days', "
+        "ends_at = ends_at - interval '30 days' WHERE id = :id",
+        id=made.json()["id"],
+    )
+
+    assert (await erase(client, customer_id)).status_code == 201
+
+
+async def test_a_group_booking_counts_each_upcoming_link(client):
+    ana, ben = await two_providers(client)
+    customer_id = (
+        await client.post(CUSTOMERS, json={"first_name": "Priya", "last_name": "N"})
+    ).json()["id"]
+    await fill_profile(client, customer_id)
+    service = await make_service(client, [ana, ben])
+    made = await book_group(
+        client,
+        [{"service_id": service, "staff_id": ana}, {"service_id": service, "staff_id": ben}],
+        customer_id=customer_id,
+    )
+    assert made.status_code == 201, made.text
+
+    await assert_refused_for_upcoming(await erase(client, customer_id), 2, customer_id)
+
+
+async def test_a_booking_committed_just_before_the_erasure_takes_its_lock_blocks_it(
+    client, monkeypatch
+):
+    await as_admin(client)
+    customer_id, service, me = await ready_customer(client)
+    await fill_profile(client, customer_id, years_ago(30))
+    reached, release = asyncio.Event(), asyncio.Event()
+    original = retention._rules
+
+    async def slowed(db, **kwargs):
+        reached.set()
+        await release.wait()
+        return await original(db, **kwargs)
+
+    monkeypatch.setattr(retention, "_rules", slowed)
+    erasing = asyncio.create_task(erase(client, customer_id))
+    await asyncio.wait_for(reached.wait(), 10)
+    monkeypatch.setattr(retention, "_rules", original)
+    made = await book(client, service, me, at("15:00"), customer_id=customer_id)
+    assert made.status_code == 201, made.text
+    release.set()
+
+    await assert_refused_for_upcoming(await erasing, 1, customer_id)

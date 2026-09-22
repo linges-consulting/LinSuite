@@ -423,7 +423,11 @@ export function ClientPage() {
             <ClientEditDialog customer={profile.data.customer} onClose={() => setEditing(false)} />
           )}
           {erasing && (
-            <ErasureDialog customer={profile.data.customer} onClose={() => setErasing(false)} />
+            <ErasureDialog
+              customer={profile.data.customer}
+              appointments={profile.data.appointments}
+              onClose={() => setErasing(false)}
+            />
           )}
 
           <section aria-labelledby="visits" className="space-y-2">
@@ -469,8 +473,20 @@ export function ClientPage() {
  * split is the chart's retention hold, which the profile already carries: held, and the name,
  * DOB and visits stay until the hold ends; not held, and only the visits stay, against an
  * anonymous record. Contact details, both contacts and notes go either way.
+ *
+ * Upcoming confirmed visits block the request (owner decision, M5): counted here from the
+ * profile's own visit list, which already holds every appointment, and re-checked by the
+ * server, whose 409 `upcoming_appointments` count wins when the two disagree.
  */
-function ErasureDialog({ customer, onClose }: { customer: CustomerDetail; onClose: () => void }) {
+function ErasureDialog({
+  customer,
+  appointments,
+  onClose,
+}: {
+  customer: CustomerDetail
+  appointments: Visit[]
+  onClose: () => void
+}) {
   const queryClient = useQueryClient()
   const [note, setNote] = useState('')
   // Held means what the server's `is_held` means: a live dated hold, or no DOB to date one.
@@ -487,7 +503,18 @@ function ErasureDialog({ customer, onClose }: { customer: CustomerDetail; onClos
       toast.success('Erasure recorded')
       onClose()
     },
+    // The visit list was stale if the server counted differently; refetch it.
+    onError: () => queryClient.invalidateQueries({ queryKey: [...PROFILE, customer.id] }),
   })
+  const refused =
+    erase.error instanceof ApiError && erase.error.code === 'upcoming_appointments'
+      ? (erase.error.body as { count: number }).count
+      : null
+  // When the dialog opened: the count is a snapshot, and the server re-checks it anyway.
+  const [now] = useState(() => Date.now())
+  const upcoming =
+    refused ??
+    appointments.filter((a) => a.status === 'confirmed' && Date.parse(a.starts_at) > now).length
   const removed = [
     ...(held ? [] : ['Name — replaced with “Erased Client”', 'Date of birth']),
     'Email and phone',
@@ -549,19 +576,28 @@ function ErasureDialog({ customer, onClose }: { customer: CustomerDetail; onClos
             placeholder="How the client asked"
           />
         </FormField>
-        {erase.isError && <FormError>{erase.error.message}</FormError>}
+        {upcoming > 0 ? (
+          <p role="alert" className="text-sm font-medium text-destructive">
+            This client has {upcoming} upcoming appointment(s). Cancel or complete them before
+            requesting erasure.
+          </p>
+        ) : (
+          erase.isError && <FormError>{erase.error.message}</FormError>
+        )}
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onClose}>
-            Cancel
+            {upcoming > 0 ? 'Close' : 'Cancel'}
           </Button>
-          <Button
-            type="button"
-            variant="destructive"
-            disabled={erase.isPending}
-            onClick={() => erase.mutate()}
-          >
-            Erase client
-          </Button>
+          {upcoming === 0 && (
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={erase.isPending}
+              onClick={() => erase.mutate()}
+            >
+              Erase client
+            </Button>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>

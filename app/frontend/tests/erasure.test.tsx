@@ -73,7 +73,25 @@ const ME = {
 
 const STAFF_MODE = { ...ME, mode: 'staff', admin_grant_expires_at: null, admin_hard_limit_at: null }
 
-function fake({ me = ME as object, customer = DETAIL as object } = {}) {
+function visit(id: string, startsInDays: number, status = 'confirmed') {
+  const starts = new Date(Date.now() + startsInDays * 86_400_000)
+  return {
+    id,
+    starts_at: starts.toISOString(),
+    ends_at: new Date(starts.getTime() + 3_600_000).toISOString(),
+    status,
+    booking_group_id: null,
+    service: { id: 'v1', name: 'Swedish Massage' },
+    staff: { id: 's1', display_name: 'Ana Rossi', colour: 'blue' },
+  }
+}
+
+function fake({
+  me = ME as object,
+  customer = DETAIL as object,
+  appointments = [] as object[],
+  erasureAnswer = undefined as (() => Response) | undefined,
+} = {}) {
   let current: Record<string, unknown> = { ...customer }
   return stubApi({
     signedIn: true,
@@ -82,6 +100,7 @@ function fake({ me = ME as object, customer = DETAIL as object } = {}) {
       const path = new URL(url, 'http://test').pathname
       if (url === '/api/auth/me') return Response.json(me)
       if (path === '/api/customers/c1/erasure') {
+        if (erasureAnswer) return erasureAnswer()
         const held = (current.retention as { status: string }).status !== 'not_held'
         const erasure = held
           ? ERASED_HELD
@@ -109,7 +128,7 @@ function fake({ me = ME as object, customer = DETAIL as object } = {}) {
         return Response.json(erasure, { status: 201 })
       }
       if (path === '/api/customers/c1') {
-        return Response.json({ customer: current, timezone: 'America/Toronto', appointments: [] })
+        return Response.json({ customer: current, timezone: 'America/Toronto', appointments })
       }
       return undefined
     },
@@ -279,4 +298,43 @@ test('once the hold has ended but the purge has not run, the banner says what is
   const banner = await screen.findByRole('status', { name: 'Erasure requested' })
   expect(banner).not.toHaveTextContent(/Nothing personal is retained/)
   expect(banner).toHaveTextContent(/still on this record is removed by tonight/)
+})
+
+const UPCOMING_BLOCK = /This client has 2 upcoming appointment\(s\)\. Cancel or complete them before requesting erasure\./
+
+test('upcoming confirmed visits block the request: the dialog says so and offers no erase button', async () => {
+  const { calls } = fake({
+    appointments: [
+      visit('a1', 3),
+      visit('a2', 10),
+      visit('a3', 5, 'cancelled'),
+      visit('a4', -2), // past, never closed out: cannot happen after an erasure, so no block
+      visit('a5', -9, 'completed'),
+    ],
+  })
+  const { dialog } = await openDialog()
+
+  expect(within(dialog).getByText(UPCOMING_BLOCK)).toBeInTheDocument()
+  expect(within(dialog).queryByRole('button', { name: 'Erase client' })).not.toBeInTheDocument()
+  expect(erasureCalls(calls)).toHaveLength(0)
+})
+
+test("a 409 upcoming_appointments from the server shows the same message with the server's count", async () => {
+  fake({
+    erasureAnswer: () =>
+      Response.json(
+        {
+          detail: 'This client has 2 upcoming appointment(s).',
+          code: 'upcoming_appointments',
+          count: 2,
+        },
+        { status: 409 },
+      ),
+  })
+  const { user, dialog } = await openDialog()
+
+  await user.click(within(dialog).getByRole('button', { name: 'Erase client' }))
+
+  expect(await within(dialog).findByText(UPCOMING_BLOCK)).toBeInTheDocument()
+  expect(within(dialog).queryByRole('button', { name: 'Erase client' })).not.toBeInTheDocument()
 })

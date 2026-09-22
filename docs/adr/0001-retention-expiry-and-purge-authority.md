@@ -33,6 +33,8 @@ The value is recomputed when a clinical entry is inserted and when a date of bir
 
 It creates an `erasure_request`, immediately purges what is not held — marketing preferences, contact details beyond the record, non-clinical notes — and suppresses the profile from active views. The client is told what is retained and why. Held records are purged automatically once expiry passes.
 
+**A request is refused while the client has upcoming appointments** (product owner, M2 fix wave). Any `confirmed` appointment that has not started blocks it with a 409 `upcoming_appointments` carrying the count, and nothing is written. The admin cancels or completes those visits first, so an erased client never sits on the calendar as a live booking. A past appointment still `confirmed` does not block: it can no longer happen. The count is taken under the customer row lock, so a booking that committed first is counted and a later one waits and then meets the suppression.
+
 **4. Deletion authority belongs to a separate database role.**
 
 - `linsuite_app` — the application role. `DELETE` remains revoked on immutable tables.

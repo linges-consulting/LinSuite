@@ -15,6 +15,13 @@ business row `FOR SHARE` and the customer row `FOR UPDATE`, the order every rete
 takes them in, so a profile switch or a new clinical entry cannot slip between the decision
 and the purge.
 
+**Upcoming appointments block it** (owner decision, M5): while the client has a `confirmed`
+appointment that has not started, the answer is 409 `upcoming_appointments` with the count,
+and nothing is written — the admin cancels or completes them first. Counted after the
+customer lock: a booking holds the customer `FOR KEY SHARE`, so one that got in first has
+committed and is counted, and one that comes later waits and then sees the suppression.
+A past appointment still `confirmed` does not block; it cannot happen after the erasure.
+
 A failed enqueue does not fail the request: it is committed, and the nightly
 `purge_expired` finishes any request whose client is not held.
 """
@@ -26,7 +33,9 @@ from typing import Annotated
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import func, select
 
 from auth.capabilities import Requires
 from auth.session import CurrentUser
@@ -35,6 +44,7 @@ from core.audit import record_event
 from core.db import SessionDep
 from customers import retention, tasks
 from customers.models import ALWAYS_ERASED, ERASED_NAMES, Customer, ErasureRequest
+from scheduling.models import Appointment
 
 log = logging.getLogger(__name__)
 
@@ -128,6 +138,23 @@ async def request_erasure(
         )
 
     now = datetime.now(UTC)
+    upcoming = await db.scalar(
+        select(func.count()).where(
+            Appointment.customer_id == customer.id,
+            Appointment.status == "confirmed",
+            Appointment.starts_at > now,
+        )
+    )
+    if upcoming:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": f"This client has {upcoming} upcoming appointment(s). Cancel or "
+                "complete them before requesting erasure.",
+                "code": "upcoming_appointments",
+                "count": upcoming,
+            },
+        )
     expires_at = customer.retention_expires_at
     held = is_held(expires_at, now)
     for field in ALWAYS_ERASED:

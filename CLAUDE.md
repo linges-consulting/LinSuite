@@ -106,7 +106,7 @@ Constraints any implementation must honor:
 
 - **Immutable ≠ forever.** Indefinite retention violates PIPEDA. A *privileged purge role* — never the app role — runs the expiry job and is the only path allowed to delete from immutable tables.
 - Retention expiry is `max(last_entry + 10y, dob + 18y + 10y)` for `regulated_health` businesses — it depends on **date of birth**, not last visit. `general_business` tenants honour deletion requests promptly.
-- A deletion request never removes records under a live retention hold; it purges what isn't held and suppresses the profile.
+- A deletion request never removes records under a live retention hold; it purges what isn't held and suppresses the profile. It is refused while the client has upcoming confirmed appointments — cancel or complete them first.
 - **Audit log records reads, not just writes.** Viewing a profile, note, or form PDF is an auditable event (PHIPA requires it, and breach scoping is impossible without it). Highest-volume table — partitioned from day one.
 
 ### Auth specifics
