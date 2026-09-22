@@ -136,7 +136,7 @@ test('without a pointer, the typed name can be adopted as the signature, and Cle
   expect(sent[0].answers).toMatchObject({ [SIGNATURE]: { name: 'Priya Nair', image: DRAWN } })
 })
 
-test('a 422 puts each code under its own field', async () => {
+test('a 422 puts each code under its own field, mapping a signature the server refused to the specific hint', async () => {
   openForm({
     status: 422,
     body: {
@@ -153,10 +153,37 @@ test('a 422 puts each code under its own field', async () => {
   await waitFor(() =>
     expect(screen.getByLabelText(/How many weeks/)).toHaveAccessibleDescription('This is required.'),
   )
+  // The pad was drawn and named (`fillIn`), so an `invalid` from the server can only be its
+  // own stricter ink check — the same hint the client-side one gives for the same reason.
   expect(screen.getByRole('textbox', { name: 'Full name' })).toHaveAccessibleDescription(
-    'Draw your signature and type your full name.',
+    'Your signature is too small — please sign again.',
   )
   expect(screen.getByRole('radio', { name: 'Yes' })).not.toHaveAccessibleDescription()
+})
+
+test('an incomplete signature refused as invalid still gets the general prompt, not the ink hint', async () => {
+  // A server that (implausibly) marks a half-filled signature `invalid` rather than
+  // `required`: `message()` only shows the specific hint when both fields are actually
+  // filled in, so this edge case reads as "finish it", not "it was too small".
+  openForm({
+    status: 422,
+    body: {
+      detail: 'Some answers need attention.',
+      code: 'invalid_answers',
+      errors: { [SIGNATURE]: 'invalid' },
+    },
+  })
+  const user = userEvent.setup()
+  await user.click(await screen.findByRole('radio', { name: 'No' }))
+  await user.type(screen.getByRole('textbox', { name: 'Full name' }), 'Priya Nair')
+
+  await user.click(screen.getByRole('button', { name: 'Submit' }))
+
+  await waitFor(() =>
+    expect(screen.getByRole('textbox', { name: 'Full name' })).toHaveAccessibleDescription(
+      'Draw your signature and type your full name.',
+    ),
+  )
 })
 
 test('a network failure keeps the answers, and the retry sends the same submission id', async () => {

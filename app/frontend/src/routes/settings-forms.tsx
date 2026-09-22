@@ -47,10 +47,13 @@ import {
   createFormTemplate,
   deleteFormTemplate,
   fetchFormTemplates,
+  fetchFormVersion,
   fetchFormVersions,
+  fetchServices,
   publishFormTemplate,
   retireFormTemplate,
   saveFormDraft,
+  saveFormTemplateSettings,
   type FormKind,
   type FormTemplate,
 } from '@/lib/api'
@@ -68,7 +71,7 @@ import {
   type FieldType,
   type FormField,
 } from '@/lib/forms'
-import { FORM_TEMPLATES, FORM_VERSIONS } from '@/lib/query-keys'
+import { FORM_TEMPLATES, FORM_VERSIONS, SERVICES } from '@/lib/query-keys'
 
 /**
  * Settings → Forms: intake forms, consents and waivers (PRD §2, tech-stack §18).
@@ -189,9 +192,11 @@ function StatusBadge({ template }: { template: FormTemplate }) {
 function TemplateLine({ template, onEdit }: { template: FormTemplate; onEdit: () => void }) {
   const queryClient = useQueryClient()
   const refresh = () => queryClient.invalidateQueries({ queryKey: FORM_TEMPLATES })
+  const [retiring, setRetiring] = useState(false)
   const retire = useMutation({
     mutationFn: () => retireFormTemplate(template.id),
     onSuccess: () => {
+      setRetiring(false)
       toast.success(`Retired ${template.name}`, {
         description: 'No new links can be sent for it. Signed copies are kept.',
       })
@@ -238,16 +243,7 @@ function TemplateLine({ template, onEdit }: { template: FormTemplate; onEdit: ()
                   <DropdownMenuItem
                     variant="destructive"
                     disabled={retire.isPending}
-                    onSelect={() => {
-                      if (
-                        confirm(
-                          `Retire ${template.name}?\n\n` +
-                            'No new links can be sent for it. Every published version and every ' +
-                            'signed copy is kept.',
-                        )
-                      )
-                        retire.mutate()
-                    }}
+                    onSelect={() => setRetiring(true)}
                   >
                     <Archive aria-hidden />
                     Retire
@@ -269,7 +265,52 @@ function TemplateLine({ template, onEdit }: { template: FormTemplate; onEdit: ()
           )}
         </div>
       </TableCell>
+      {retiring && (
+        <RetireDialog
+          name={template.name}
+          pending={retire.isPending}
+          onClose={() => setRetiring(false)}
+          onConfirm={() => retire.mutate()}
+        />
+      )}
     </TableRow>
+  )
+}
+
+/** The consequence, said before it happens (fix: this used to be `window.confirm`, which
+ *  cannot format a sentence, is not themed, and does not match how Publish and Send ask the
+ *  same kind of question). */
+function RetireDialog(props: {
+  name: string
+  pending: boolean
+  onClose: () => void
+  onConfirm: () => void
+}) {
+  return (
+    <Dialog open onOpenChange={(open) => !open && props.onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Retire {props.name}?</DialogTitle>
+          <DialogDescription>
+            No new links can be sent for it, and every link still open for it is revoked at
+            once. Every published version and every signed copy is kept exactly as it is.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={props.onClose}>
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            disabled={props.pending}
+            onClick={props.onConfirm}
+          >
+            Retire
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -396,6 +437,43 @@ type Draft = {
   fields: FormField[]
 }
 
+/** A JSON serialisation with every object's keys sorted, so two field lists built the same
+ *  way but with properties touched in a different order (a patch here, a fresh field there)
+ *  still compare equal. `undefined` values drop out, the same as `JSON.stringify` already
+ *  does, matching the server's own `exclude_none` on the schema it stores. */
+function stableJSON(value: unknown): string {
+  const sort = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(sort)
+    if (v && typeof v === 'object') {
+      return Object.fromEntries(
+        Object.entries(v as Record<string, unknown>)
+          .filter(([, val]) => val !== undefined)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([k, val]) => [k, sort(val)]),
+      )
+    }
+    return v
+  }
+  return JSON.stringify(sort(value))
+}
+
+/** Fix: "Publish version N" used to open even when the draft is identical to what is already
+ *  published, so the server's `draft_unchanged` 409 was the first anyone heard of it. The same
+ *  five things the server's own `_flags` compares (`forms/routes.py`) — name, kind, the two
+ *  flags, and the fields. */
+function draftUnchanged(
+  draft: Pick<Draft, 'name' | 'kind' | 'is_health_form' | 'is_mandatory' | 'fields'>,
+  latest: { name: string; kind: FormKind; is_health_form: boolean; is_mandatory: boolean; schema: { fields: FormField[] } },
+): boolean {
+  return (
+    draft.name.trim() === latest.name &&
+    draft.kind === latest.kind &&
+    draft.is_health_form === latest.is_health_form &&
+    draft.is_mandatory === latest.is_mandatory &&
+    stableJSON(draft.fields) === stableJSON(latest.schema.fields)
+  )
+}
+
 /** What the label box is called for each type: a heading has no question. */
 function labelFor(type: FieldType): string {
   if (type === 'heading') return 'Heading'
@@ -419,6 +497,14 @@ function FormBuilder({ template, onBack }: { template: FormTemplate; onBack: () 
   const versions = useQuery({
     queryKey: [...FORM_VERSIONS, template.id],
     queryFn: () => fetchFormVersions(template.id),
+  })
+  // The latest published version's own fields — the summary list above has everything but
+  // these — fetched only to answer "would Publish have anything to publish". Same prefix as
+  // `versions` above, so `refresh()` already invalidates it.
+  const latestVersion = useQuery({
+    queryKey: [...FORM_VERSIONS, template.id, 'full', template.latest_version],
+    queryFn: () => fetchFormVersion(template.id, template.latest_version!),
+    enabled: template.latest_version !== null,
   })
   const retired = template.retired_at !== null
   const problems = [
@@ -486,6 +572,7 @@ function FormBuilder({ template, onBack }: { template: FormTemplate; onBack: () 
   })
   const busy = saveDraft.isPending || publish.isPending
   const canSave = !retired && problems.length === 0 && !busy
+  const unchanged = Boolean(latestVersion.data) && draftUnchanged(draft, latestVersion.data!)
   // The list this replaced took the focused "Edit" button with it; start keyboard and screen
   // reader users at the top of the builder rather than nowhere.
   const heading = useRef<HTMLHeadingElement>(null)
@@ -507,10 +594,21 @@ function FormBuilder({ template, onBack }: { template: FormTemplate; onBack: () 
         </div>
         <div className="flex items-center gap-2">
           {dirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
+          {!dirty && unchanged && (
+            <span className="text-xs text-muted-foreground">Nothing to publish</span>
+          )}
           <Button variant="outline" disabled={!canSave} onClick={() => saveDraft.mutate()}>
             Save draft
           </Button>
-          <Button disabled={!canSave} onClick={() => setPublishing(true)}>
+          <Button
+            disabled={!canSave || unchanged}
+            title={
+              unchanged
+                ? `Nothing has changed since version ${template.latest_version}.`
+                : undefined
+            }
+            onClick={() => setPublishing(true)}
+          >
             Publish…
           </Button>
         </div>
@@ -554,6 +652,8 @@ function FormBuilder({ template, onBack }: { template: FormTemplate; onBack: () 
               />
             </div>
           </section>
+
+          <ComplianceSettings template={template} />
 
           <section aria-label="Fields" className="flex flex-col gap-3">
             {draft.fields.length === 0 ? (
@@ -635,6 +735,133 @@ function FormBuilder({ template, onBack }: { template: FormTemplate; onBack: () 
         />
       )}
     </div>
+  )
+}
+
+const APPLIES_ALL = 'all'
+const APPLIES_SERVICES = 'services'
+
+/**
+ * Task 8 (#51): who the essential-forms checklist expects this form from, and how long a
+ * submission stays valid — identity-level settings (owner ruling Q6: services only, staff
+ * types dropped), saved through their own endpoint and taking effect immediately, with no
+ * publish involved. Only matters once this template is marked Mandatory above and published;
+ * this panel says so rather than pretending it acts on its own.
+ */
+function ComplianceSettings({ template }: { template: FormTemplate }) {
+  const queryClient = useQueryClient()
+  const [appliesTo, setAppliesTo] = useState(template.applies_to_all ? APPLIES_ALL : APPLIES_SERVICES)
+  const [serviceIds, setServiceIds] = useState<string[]>(template.service_ids ?? [])
+  const [validForMonths, setValidForMonths] = useState(
+    template.valid_for_months != null ? String(template.valid_for_months) : '',
+  )
+  const services = useQuery({ queryKey: SERVICES, queryFn: () => fetchServices() })
+  const months = validForMonths.trim() ? Number(validForMonths) : null
+  const monthsInvalid = months !== null && (!Number.isInteger(months) || months < 1 || months > 120)
+  const save = useMutation({
+    mutationFn: () =>
+      saveFormTemplateSettings(template.id, {
+        applies_to_all: appliesTo === APPLIES_ALL,
+        valid_for_months: months,
+        service_ids: appliesTo === APPLIES_ALL ? [] : serviceIds,
+      }),
+    onSuccess: () => {
+      toast.success('Settings saved')
+      queryClient.invalidateQueries({ queryKey: FORM_TEMPLATES })
+    },
+    onError: (error) => toast.error(error.message),
+  })
+
+  return (
+    <section aria-labelledby="compliance-settings-title" className="rounded-xl border p-4" role="region">
+      <h3 id="compliance-settings-title" className="text-base font-medium">
+        Essential-forms checklist
+      </h3>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Who is expected to have a current signed copy, and how long one stays valid. Only
+        applies while this form is marked Mandatory above, and is saved separately — no
+        publish needed.
+      </p>
+      <div className="mt-3 flex flex-col gap-4">
+        <fieldset className="flex flex-col gap-2">
+          <legend className="sr-only">Applies to</legend>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="radio"
+              name="applies-to"
+              className="size-4 accent-primary"
+              checked={appliesTo === APPLIES_ALL}
+              onChange={() => setAppliesTo(APPLIES_ALL)}
+            />
+            Every client
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="radio"
+              name="applies-to"
+              className="size-4 accent-primary"
+              checked={appliesTo === APPLIES_SERVICES}
+              onChange={() => setAppliesTo(APPLIES_SERVICES)}
+            />
+            Clients booked for these services
+          </label>
+          {appliesTo === APPLIES_SERVICES && (
+            <div className="ml-6 flex flex-col gap-1.5" role="group" aria-label="Services">
+              {services.isPending ? (
+                <Skeleton className="h-20 w-full" />
+              ) : services.data?.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No services in the catalog yet.</p>
+              ) : (
+                services.data
+                  ?.filter((s) => s.active)
+                  .map((s) => (
+                    <div key={s.id} className="flex items-center gap-2">
+                      <Checkbox
+                        id={`applies-service-${s.id}`}
+                        checked={serviceIds.includes(s.id)}
+                        onCheckedChange={(on) =>
+                          setServiceIds((ids) =>
+                            on ? [...ids, s.id] : ids.filter((id) => id !== s.id),
+                          )
+                        }
+                      />
+                      <Label htmlFor={`applies-service-${s.id}`} className="font-normal">
+                        {s.name}
+                      </Label>
+                    </div>
+                  ))
+              )}
+            </div>
+          )}
+        </fieldset>
+
+        <Field
+          label="Valid for (months)"
+          htmlFor="valid-for-months"
+          hint="Leave blank for a signature that never expires."
+          error={monthsInvalid ? 'Between 1 and 120 months.' : undefined}
+        >
+          <Input
+            id="valid-for-months"
+            type="number"
+            min={1}
+            max={120}
+            className="w-28"
+            value={validForMonths}
+            onChange={(e) => setValidForMonths(e.target.value)}
+          />
+        </Field>
+
+        <Button
+          size="sm"
+          className="self-start"
+          disabled={save.isPending || monthsInvalid}
+          onClick={() => save.mutate()}
+        >
+          Save settings
+        </Button>
+      </div>
+    </section>
   )
 }
 

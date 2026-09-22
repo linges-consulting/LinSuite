@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -13,6 +13,51 @@ const HEIGHT = 200
 const PAPER = '#ffffff'
 const INK = '#111827'
 
+// Mirrors `forms/submissions.py`'s `_has_ink` — same bounding-box and ink-ratio thresholds,
+// so a signature this pad accepts, the server accepts too (fix: a trivial stroke used to
+// pass here and only fail once it reached the server). Python and TypeScript share no code
+// in this repo, so these are duplicated by value; keep them in step with the server's.
+const MIN_INK_PIXELS = 20
+const MIN_INK_WIDTH = 0.05
+const MIN_INK_HEIGHT = 0.03
+const MAX_INK_RATIO = 0.6
+
+export const SIGNATURE_TOO_SMALL = 'Your signature is too small — please sign again.'
+
+/** Whether the pad's current pixels are a real signature, not a dot or a blotch. Fails open
+ *  (assumes yes) when pixel data cannot be read at all — a canvas the browser has tainted,
+ *  or a test double with no `getImageData` — so a real environment issue never blocks a
+ *  legitimate signature; the server is still the final judge either way. */
+function hasEnoughInk(ctx: CanvasRenderingContext2D): boolean {
+  let data: Uint8ClampedArray
+  try {
+    data = ctx.getImageData(0, 0, WIDTH, HEIGHT).data
+  } catch {
+    return true
+  }
+  let minX = WIDTH
+  let minY = HEIGHT
+  let maxX = -1
+  let maxY = -1
+  let dark = 0
+  for (let y = 0; y < HEIGHT; y++) {
+    for (let x = 0; x < WIDTH; x++) {
+      const i = (y * WIDTH + x) * 4
+      // The same luminance formula PIL's `convert('L')` uses.
+      const luminance = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+      if (luminance < 128) {
+        dark++
+        if (x < minX) minX = x
+        if (x > maxX) maxX = x
+        if (y < minY) minY = y
+        if (y > maxY) maxY = y
+      }
+    }
+  }
+  if (dark < MIN_INK_PIXELS || dark > MAX_INK_RATIO * WIDTH * HEIGHT) return false
+  return maxX - minX + 1 >= MIN_INK_WIDTH * WIDTH && maxY - minY + 1 >= MIN_INK_HEIGHT * HEIGHT
+}
+
 export type Signature = { name: string; image: string }
 
 /**
@@ -26,15 +71,27 @@ export type Signature = { name: string; image: string }
  *
  * The value is `{name, image}` (a PNG data URL, `''` until something is on the pad), or
  * `undefined` while both are empty — so an untouched block reads as unanswered.
+ *
+ * **The ink check** (fix: a trivial stroke used to pass here and only fail once it reached
+ * the server). A stroke that does not clear the server's thresholds still becomes the pad's
+ * answer — this never rewrites `lib/forms.ts`'s shared shape check, which a half-filled pad
+ * (a typed name with nothing drawn yet) already fails for an unrelated reason — but it shows
+ * its own hint right under the canvas, and reports itself through `onWeakChange` so the page
+ * can hold Submit back rather than round-tripping a signature the server would refuse anyway.
  */
 export function SignaturePad(props: {
   id: string
   value: unknown
   onChange: (value: Signature | undefined) => void
   describedBy?: string
+  /** Called with `true` right after a stroke or a typed signature that does not clear the
+   *  ink thresholds, `false` once it does (or the pad is cleared). Omitted by callers with no
+   *  Submit button to hold back — the builder's live preview, say. */
+  onWeakChange?: (weak: boolean) => void
 }) {
   const canvas = useRef<HTMLCanvasElement>(null)
   const drawing = useRef(false)
+  const [weak, setWeak] = useState(false)
   const current = (props.value ?? {}) as Partial<Signature>
   const name = current.name ?? ''
   const image = current.image ?? ''
@@ -61,6 +118,10 @@ export function SignaturePad(props: {
   const emit = (nextName: string, nextImage: string) =>
     props.onChange(nextName || nextImage ? { name: nextName, image: nextImage } : undefined)
   const snapshot = () => canvas.current?.toDataURL('image/png') ?? ''
+  const setWeakFlag = (value: boolean) => {
+    setWeak(value)
+    props.onWeakChange?.(value)
+  }
 
   const at = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const box = event.currentTarget.getBoundingClientRect()
@@ -91,6 +152,8 @@ export function SignaturePad(props: {
   const end = () => {
     if (!drawing.current) return
     drawing.current = false
+    const ctx = context()
+    setWeakFlag(!(!ctx || hasEnoughInk(ctx)))
     emit(name, snapshot())
   }
 
@@ -102,10 +165,12 @@ export function SignaturePad(props: {
     ctx.font = 'italic 56px "Segoe Script", "Brush Script MT", "Snell Roundhand", cursive'
     ctx.textBaseline = 'middle'
     ctx.fillText(name.trim(), 24, HEIGHT / 2, WIDTH - 48)
+    setWeakFlag(!hasEnoughInk(ctx))
     emit(name, snapshot())
   }
   const clear = () => {
     paper()
+    setWeakFlag(false)
     emit(name, '')
   }
 
@@ -123,6 +188,7 @@ export function SignaturePad(props: {
         onPointerUp={end}
         onPointerCancel={end}
       />
+      {weak && <p role="alert" className="text-sm text-destructive">{SIGNATURE_TOO_SMALL}</p>}
       <div className="flex flex-wrap gap-2">
         <Button type="button" variant="outline" size="sm" onClick={clear}>
           Clear signature

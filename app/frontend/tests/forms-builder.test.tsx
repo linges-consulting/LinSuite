@@ -34,11 +34,14 @@ function template(fields: FormField[], overrides: Row = {}): Row {
     latest_version: null,
     has_unpublished_changes: fields.length > 0,
     draft: { schema: { fields }, is_health_form: true, is_mandatory: false },
+    applies_to_all: false,
+    valid_for_months: null,
+    service_ids: [],
     ...overrides,
   }
 }
 
-function fakeServer(seed: Row, history: Row[] = []) {
+function fakeServer(seed: Row, history: Row[] = [], services: Row[] = []) {
   const templates: Row[] = [seed]
   const versions: Row[] = [...history]
   const calls: { url: string; method: string; body?: any }[] = []
@@ -60,12 +63,21 @@ function fakeServer(seed: Row, history: Row[] = []) {
         })
         return Response.json(row)
       }
+      if (url.endsWith('/settings') && method === 'PUT') {
+        Object.assign(row!, body)
+        return Response.json(row)
+      }
+      if (url.endsWith('/retire') && method === 'POST') {
+        Object.assign(row!, { retired_at: '2026-09-22T13:00:00Z' })
+        return Response.json(row)
+      }
       if (url.endsWith('/publish')) {
         const number = versions.length + 1
         const version = {
           number,
           name: row!.name,
           kind: row!.kind,
+          schema: row!.draft.schema,
           published_at: '2026-09-22T12:00:00Z',
           requires_resignature: body.requires_resignature,
           is_health_form: row!.draft.is_health_form,
@@ -84,11 +96,17 @@ function fakeServer(seed: Row, history: Row[] = []) {
         templates.push(created)
         return Response.json(created, { status: 201 })
       }
+      if (/\/versions\/\d+$/.test(url)) {
+        const number = Number(url.split('/').pop())
+        const version = versions.find((v) => v.number === number)
+        return version ? Response.json(version) : Response.json({}, { status: 404 })
+      }
       if (url.endsWith('/versions')) return Response.json({ versions })
+      if (url === '/api/admin/services') return Response.json({ services })
       return Response.json({}, { status: 404 })
     }),
   )
-  return { calls, templates }
+  return { calls, templates, versions }
 }
 
 function renderSettings() {
@@ -302,5 +320,148 @@ describe('the list', () => {
     expect(within(row).getByText('Intake')).toBeInTheDocument()
     expect(within(row).getByText('v2')).toBeInTheDocument()
     expect(within(row).getByText('Retired')).toBeInTheDocument()
+  })
+})
+
+// --- fix: Publish offers nothing to publish when the draft matches what is already out -------
+
+describe('the publish gate', () => {
+  it('disables Publish with a hint while the draft matches the latest version, and re-enables it on a real change', async () => {
+    const key = crypto.randomUUID()
+    const fields = [{ key, type: 'yes_no', label: 'Any allergies?', required: true }]
+    fakeServer(template(fields, { latest_version: 1, has_unpublished_changes: false }), [
+      {
+        number: 1,
+        name: 'Prenatal intake',
+        kind: 'intake',
+        schema: { fields },
+        published_at: '2026-09-21T12:00:00Z',
+        requires_resignature: false,
+        is_health_form: true,
+        is_mandatory: false,
+      },
+    ])
+    const user = userEvent.setup()
+    renderSettings()
+    await openBuilder(user)
+
+    const publishButton = await screen.findByRole('button', { name: 'Publish…' })
+    await waitFor(() => expect(publishButton).toBeDisabled())
+    expect(publishButton).toHaveAttribute('title', expect.stringContaining('Nothing has changed'))
+    expect(screen.getByText('Nothing to publish')).toBeInTheDocument()
+
+    await user.clear(screen.getByLabelText('Question'))
+    await user.type(screen.getByLabelText('Question'), 'Any allergies at all?')
+
+    expect(publishButton).toBeEnabled()
+    expect(screen.queryByText('Nothing to publish')).not.toBeInTheDocument()
+  })
+
+  it('still shows the server’s message if a 409 draft_unchanged reaches it anyway (a race, not a crash)', async () => {
+    fakeServer(template([{ key: crypto.randomUUID(), type: 'yes_no', label: 'Any?', required: true }]))
+    // Simulate the server refusing even though nothing locally marked Publish as offering
+    // nothing — the case the gate cannot see coming, such as another tab publishing first.
+    const fetchStub = vi.mocked(fetch)
+    const passthrough = fetchStub.getMockImplementation()!
+    fetchStub.mockImplementation(async (url, init) => {
+      if (String(url).endsWith('/publish')) {
+        return Response.json(
+          { detail: 'Nothing has changed since version 1.', code: 'draft_unchanged' },
+          { status: 409 },
+        )
+      }
+      return passthrough(url, init)
+    })
+    const user = userEvent.setup()
+    renderSettings()
+    await openBuilder(user)
+
+    await user.click(screen.getByRole('button', { name: 'Publish…' }))
+    const dialog = await screen.findByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Publish' }))
+
+    expect(await screen.findByText('Nothing has changed since version 1.')).toBeInTheDocument()
+  })
+})
+
+// --- fix: retiring asks in the app's own dialog, not window.confirm ---------------------------
+
+describe('retiring', () => {
+  it('asks in a dialog stating the consequence, never window.confirm', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm')
+    const server = fakeServer(template([], { latest_version: 1 }))
+    const user = userEvent.setup()
+    renderSettings()
+    await user.click(await screen.findByRole('tab', { name: 'Forms' }))
+
+    await user.click(await screen.findByRole('button', { name: 'Actions for Prenatal intake' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Retire' }))
+
+    const dialog = await screen.findByRole('dialog', { name: /Retire Prenatal intake/ })
+    expect(within(dialog).getByText(/no new links can be sent/i)).toBeInTheDocument()
+    expect(within(dialog).getByText(/revoked/i)).toBeInTheDocument()
+    expect(confirmSpy).not.toHaveBeenCalled()
+
+    await user.click(within(dialog).getByRole('button', { name: 'Retire' }))
+
+    await waitFor(() => {
+      expect(server.calls.some((c) => c.url.endsWith('/retire') && c.method === 'POST')).toBe(true)
+    })
+    expect(await screen.findByText('Retired Prenatal intake')).toBeInTheDocument()
+  })
+
+  it('cancelling the dialog retires nothing', async () => {
+    const server = fakeServer(template([], { latest_version: 1 }))
+    const user = userEvent.setup()
+    renderSettings()
+    await user.click(await screen.findByRole('tab', { name: 'Forms' }))
+    await user.click(await screen.findByRole('button', { name: 'Actions for Prenatal intake' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Retire' }))
+
+    const dialog = await screen.findByRole('dialog', { name: /Retire Prenatal intake/ })
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(server.calls.some((c) => c.url.endsWith('/retire'))).toBe(false)
+  })
+})
+
+// --- Task 8: the essential-forms checklist settings panel --------------------------------------
+
+describe('the essential-forms checklist settings', () => {
+  it('saves who it applies to and how long a submission stays valid', async () => {
+    const server = fakeServer(template([]), [], [
+      { id: 'svc1', name: 'Massage', active: true },
+      { id: 'svc2', name: 'Facial', active: true },
+    ])
+    const user = userEvent.setup()
+    renderSettings()
+    await openBuilder(user)
+
+    await user.click(await screen.findByRole('radio', { name: 'Clients booked for these services' }))
+    await user.click(await screen.findByRole('checkbox', { name: 'Massage' }))
+    await user.type(screen.getByLabelText('Valid for (months)'), '12')
+    await user.click(screen.getByRole('button', { name: 'Save settings' }))
+
+    await waitFor(() => {
+      const saved = server.calls.find((c) => c.url.endsWith('/settings'))
+      expect(saved?.body).toEqual({
+        applies_to_all: false,
+        valid_for_months: 12,
+        service_ids: ['svc1'],
+      })
+    })
+  })
+
+  it('rejects a period outside 1–120 months before it is ever sent', async () => {
+    fakeServer(template([]))
+    const user = userEvent.setup()
+    renderSettings()
+    await openBuilder(user)
+
+    await user.type(screen.getByLabelText('Valid for (months)'), '121')
+
+    expect(screen.getByRole('button', { name: 'Save settings' })).toBeDisabled()
+    expect(screen.getByText('Between 1 and 120 months.')).toBeInTheDocument()
   })
 })

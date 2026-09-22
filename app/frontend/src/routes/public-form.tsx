@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useLocation } from 'react-router'
 import { Form } from '@/components/form'
 import { FormFieldInput } from '@/components/form-fields'
+import { SIGNATURE_TOO_SMALL } from '@/components/signature-pad'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { ApiError, fetchPublicForm, submitPublicForm } from '@/lib/api'
@@ -54,6 +55,9 @@ export function PublicFormPage() {
   const [answers, setAnswers] = useState<Answers>({})
   const [submissionId] = useState(() => crypto.randomUUID())
   const [errors, setErrors] = useState<Record<string, string>>({})
+  // A drawn or typed signature that does not clear the server's ink thresholds: kept back
+  // from Submit rather than round-tripped for the server to refuse the same way.
+  const [weakSignature, setWeakSignature] = useState(false)
   const submit = useMutation({
     mutationFn: (payload: { version_id: string; answers: Answers }) =>
       submitPublicForm({ token, submission_id: submissionId, ...payload }),
@@ -113,7 +117,7 @@ export function PublicFormPage() {
   const send = () => {
     const found = validateAnswers(schema, answers)
     setErrors(found)
-    if (Object.keys(found).length === 0) {
+    if (Object.keys(found).length === 0 && !weakSignature) {
       submit.mutate({ version_id, answers: keptAnswers(schema, answers) })
     }
   }
@@ -140,8 +144,9 @@ export function PublicFormPage() {
               key={f.key}
               field={f}
               value={answers[f.key]}
-              error={errors[f.key] && message(f, errors[f.key])}
+              error={errors[f.key] && message(f, errors[f.key], answers[f.key])}
               onChange={(v) => setAnswers((a) => ({ ...a, [f.key]: v }))}
+              onSignatureWeakChange={f.type === 'signature' ? setWeakSignature : undefined}
             />
           ))}
         {unsent && (
@@ -150,7 +155,7 @@ export function PublicFormPage() {
             still here.
           </p>
         )}
-        <Button type="submit" className="self-start" disabled={submit.isPending}>
+        <Button type="submit" className="self-start" disabled={submit.isPending || weakSignature}>
           Submit
         </Button>
       </Form>
@@ -158,9 +163,20 @@ export function PublicFormPage() {
   )
 }
 
-/** What a per-field code from `validateAnswers` (or the server's 422) says to the client. */
-function message(field: FormField, code: string): string {
-  if (field.type === 'signature') return 'Draw your signature and type your full name.'
+/** What a per-field code from `validateAnswers` (or the server's 422) says to the client. A
+ *  signature answer with both a name and an image already on it, refused as `invalid`, can
+ *  only be the server's own ink check (the client-side one already holds Submit back before
+ *  a half-filled pad — an untyped name or an undrawn pad — ever reaches this code at all), so
+ *  that specific case gets the specific hint; anything else with a signature gets the general
+ *  prompt to finish it. */
+function message(field: FormField, code: string, value?: unknown): string {
+  if (field.type === 'signature') {
+    const signed = value as { name?: string; image?: string } | undefined
+    const complete = Boolean(signed?.name?.trim()) && Boolean(signed?.image?.trim())
+    return code === 'invalid' && complete
+      ? SIGNATURE_TOO_SMALL
+      : 'Draw your signature and type your full name.'
+  }
   return code === 'required' ? 'This is required.' : 'Check this answer.'
 }
 

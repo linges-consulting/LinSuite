@@ -59,3 +59,8 @@ export const FORM_LINKS = ['form-links'] as const
 /** One client's completed forms (`forms.view`; metadata), id after; and one opened (logged). */
 export const FORM_SUBMISSIONS = ['form-submissions'] as const
 export const FORM_SUBMISSION = ['form-submission'] as const
+/** One client's essential-forms compliance (id after): the profile banner. */
+export const COMPLIANCE = ['compliance'] as const
+/** The "Forms needed" dashboard (`forms.issue`): clients with an upcoming appointment and a
+ *  non-compliant essential form. */
+export const FORMS_NEEDED = ['forms-needed'] as const

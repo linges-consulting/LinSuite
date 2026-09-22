@@ -18,6 +18,9 @@ export function FormFieldInput(props: {
   value: unknown
   onChange: (value: unknown) => void
   error?: string
+  /** Signature fields only: told whenever a drawn or typed signature does not clear the
+   *  server's ink thresholds, so the page holding a Submit button can hold it back. */
+  onSignatureWeakChange?: (weak: boolean) => void
 }) {
   const { field, value, onChange, error } = props
   const id = `field-${field.key}`
@@ -103,7 +106,13 @@ export function FormFieldInput(props: {
         <div className="flex flex-col gap-2">
           <span className="text-sm font-medium">{label}</span>
           {help}
-          <SignaturePad id={id} value={value} onChange={onChange} describedBy={errorId} />
+          <SignaturePad
+            id={id}
+            value={value}
+            onChange={onChange}
+            describedBy={errorId}
+            onWeakChange={props.onSignatureWeakChange}
+          />
           {problem}
         </div>
       )

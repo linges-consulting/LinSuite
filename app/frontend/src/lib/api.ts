@@ -1027,6 +1027,10 @@ export type FormTemplate = {
   latest_version: number | null
   has_unpublished_changes: boolean
   draft: FormDraft
+  /** Task 8 (#51): identity-level compliance settings, edited outside versioning. */
+  applies_to_all: boolean
+  valid_for_months: number | null
+  service_ids: string[]
 }
 
 export type FormVersionSummary = {
@@ -1082,6 +1086,35 @@ export async function fetchFormVersions(id: string): Promise<FormVersionSummary[
   const res = await fetch(`/api/admin/forms/${id}/versions`)
   if (!res.ok) throw await failure(res, 'Could not load the version history')
   return (await res.json()).versions
+}
+
+/** A published version's own fields — the summary list has everything but these. Used only
+ *  to tell whether the current draft is unchanged from the latest published version (fix:
+ *  Publish must not offer a version identical to the one already published). */
+export type FormVersion = FormVersionSummary & { schema: FormSchema }
+
+export async function fetchFormVersion(id: string, number: number): Promise<FormVersion> {
+  const res = await fetch(`/api/admin/forms/${id}/versions/${number}`)
+  if (!res.ok) throw await failure(res, 'Could not load the version')
+  return res.json()
+}
+
+/** Task 8 (#51): who the essential-forms checklist expects this form from — every client, or
+ *  clients with an upcoming appointment for one of these services — and for how long a
+ *  submission stays valid. Identity-level: `PUT` here never touches the draft or a version. */
+export type FormTemplateSettings = {
+  applies_to_all: boolean
+  valid_for_months: number | null
+  service_ids: string[]
+}
+
+export async function saveFormTemplateSettings(
+  id: string,
+  settings: FormTemplateSettings,
+): Promise<FormTemplate> {
+  const res = await send('PUT', `/api/admin/forms/${id}/settings`, settings)
+  if (!res.ok) throw await failure(res, 'Could not save the settings')
+  return res.json()
 }
 
 export async function retireFormTemplate(id: string): Promise<FormTemplate> {
@@ -1331,6 +1364,14 @@ export async function searchCustomers(q: string): Promise<Customer[]> {
   const res = await fetch(`/api/customers?${new URLSearchParams({ q })}`)
   if (!res.ok) throw await failure(res, 'Could not search the customers')
   return (await res.json()).customers
+}
+
+/** `customers.manage`. The same endpoint the booking dialog's inline "new client" posts to —
+ *  one place a customer is made, whichever screen starts it. */
+export async function createCustomer(draft: CustomerDraft): Promise<Customer> {
+  const res = await send('POST', '/api/customers', draft)
+  if (!res.ok) throw await failure(res, 'Could not create the client')
+  return res.json()
 }
 
 /** A customer as the Clients list and profile show one: the picker's fields plus when the
