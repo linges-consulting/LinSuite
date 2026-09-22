@@ -41,6 +41,8 @@ class Customer(Base):
             "date_of_birth IS NULL OR date_of_birth <= CURRENT_DATE",
             name="ck_customers_dob_not_future",
         ),
+        # The purge job's scan: `retention_expires_at < now()`.
+        Index("ix_customers_retention_expires_at", "retention_expires_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -62,5 +64,11 @@ class Customer(Base):
     # Front-desk notes — non-clinical. A session note is a different, lockable document
     # (Phase 9); this is "prefers the corner chair", not a chart entry.
     notes: Mapped[str | None] = mapped_column(Text)
+    # --- Task 4 (#39): retention (ADR-0001) — written only by `customers/retention.py` ------
+    # The latest form submission or session note in the chart (Phases 8/9). Not an appointment.
+    last_clinical_entry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # NULL = not held; an instant = held until then; 'infinity' = held, DOB unknown. Derived
+    # from the DOB, so it is PHI: only ever on the logged profile response.
+    retention_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

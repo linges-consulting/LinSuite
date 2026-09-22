@@ -67,6 +67,10 @@ class Business(Base):
         CheckConstraint(
             "vip_visit_threshold BETWEEN 2 AND 1000", name="ck_businesses_vip_visit_threshold"
         ),
+        CheckConstraint(
+            "retention_profile IN ('regulated_health', 'general_business')",
+            name="ck_businesses_retention_profile",
+        ),
     )
 
     id: Mapped[int] = mapped_column(
@@ -127,6 +131,17 @@ class Business(Base):
     # appointments. Never stored on the customer — computed at read time from the count, so
     # lowering this number reclassifies everybody on the next read with no write to `customers`.
     vip_visit_threshold: Mapped[int] = mapped_column(Integer, server_default="10")
+
+    # --- retention (ADR-0001, pre-flight D3; `customers/retention.py`) ---------------------
+    # Which obligation wins. Default retain-side: a salon left on `regulated_health` holds data
+    # a little longer, a clinic left on `general_business` would purge a chart it must keep —
+    # only the first mistake is recoverable. Switched on Settings → Security, never the wizard.
+    retention_profile: Mapped[str] = mapped_column(
+        String(32), server_default=text("'regulated_health'")
+    )
+    # When an administrator last saved the profile explicitly. NULL means nobody has chosen
+    # yet, and the Security panel asks them to (the default is a default, not a decision).
+    retention_profile_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

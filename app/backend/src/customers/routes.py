@@ -27,7 +27,8 @@ dialog's own invalidation makes the next `GET` (which does log) the read of reco
 import re
 import uuid
 from datetime import UTC, date, datetime
-from typing import Annotated
+from typing import Annotated, Literal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -336,6 +337,23 @@ class VisitOut(BaseModel):
     staff: dict[str, str]
 
 
+class RetentionOut(BaseModel):
+    """The "Records" line. `held` carries the local date the hold ends on; `needs_dob` is a
+    chart with no date of birth — held indefinitely (`'infinity'` in the column), which is
+    never sent as a fake date. PHI: derived from the DOB (`PHI_FIELDS` names it)."""
+
+    status: Literal["not_held", "held", "needs_dob"]
+    expires_on: date | None
+
+
+def retention_out(expires_at: datetime | None, timezone: str) -> RetentionOut:
+    if expires_at is None:
+        return RetentionOut(status="not_held", expires_on=None)
+    if expires_at == retention.INFINITY:
+        return RetentionOut(status="needs_dob", expires_on=None)
+    return RetentionOut(status="held", expires_on=expires_at.astimezone(ZoneInfo(timezone)).date())
+
+
 class CustomerDetailOut(CustomerOut):
     """The full profile: everything the list carries, plus what only the profile shows.
 
@@ -353,9 +371,12 @@ class CustomerDetailOut(CustomerOut):
     secondary_contact_email: str | None
     notes: str | None
     updated_at: datetime
+    retention: RetentionOut
 
 
-def customer_detail_out(customer: Customer, classification: Classification) -> CustomerDetailOut:
+def customer_detail_out(
+    customer: Customer, classification: Classification, timezone: str
+) -> CustomerDetailOut:
     return CustomerDetailOut(
         **customer_out(customer, classification).model_dump(),
         date_of_birth=customer.date_of_birth,
@@ -367,6 +388,7 @@ def customer_detail_out(customer: Customer, classification: Classification) -> C
         secondary_contact_email=customer.secondary_contact_email,
         notes=customer.notes,
         updated_at=customer.updated_at,
+        retention=retention_out(customer.retention_expires_at, timezone),
     )
 
 
@@ -399,9 +421,10 @@ async def read_customer(customer_id: uuid.UUID, db: SessionDep) -> CustomerProfi
     business = await db.get(Business, 1)
     completed = sum(1 for a in visits if a.status == "completed")
     classification = classify(completed, (business.vip_visit_threshold if business else None) or 10)
+    timezone = (business.timezone if business else None) or "UTC"
     return CustomerProfileOut(
-        customer=customer_detail_out(customer, classification),
-        timezone=(business.timezone if business else None) or "UTC",
+        customer=customer_detail_out(customer, classification, timezone),
+        timezone=timezone,
         appointments=[
             VisitOut(
                 id=str(a.id),

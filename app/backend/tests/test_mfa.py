@@ -763,7 +763,12 @@ async def test_the_policy_is_read_and_written_from_the_security_settings(client)
 
     read = await client.get("/api/admin/business/security")
     assert read.status_code == 200, read.text
-    assert read.json() == {"mfa_required_for_admin": False, "mfa_email_otp_allowed": False}
+    assert read.json() == {
+        "mfa_required_for_admin": False,
+        "mfa_email_otp_allowed": False,
+        "retention_profile": "regulated_health",
+        "retention_profile_chosen": False,
+    }
 
     written = await client.patch(
         "/api/admin/business/security",

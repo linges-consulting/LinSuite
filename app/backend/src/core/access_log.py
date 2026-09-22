@@ -51,6 +51,8 @@ PHI_FIELDS: frozenset[str] = frozenset(
         "secondary_contact_phone",
         "secondary_contact_email",
         "notes",
+        # The retention hold: derived from the date of birth, so it discloses it (Task 4).
+        "retention",
     }
 )
 

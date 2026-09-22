@@ -686,6 +686,8 @@ WRITES = [
     ("PATCH", f"{BUSINESS}/timezone", {"timezone": "America/Halifax"}),
     ("PUT", f"{BUSINESS}/branding", {"brand_primary": "#aa0000", "brand_secondary": "#00aa00"}),
     ("DELETE", f"{BUSINESS}/logo", None),
+    # Releases every retention hold in the instance: never from a Staff Mode session.
+    ("PATCH", f"{BUSINESS}/security", {"retention_profile": "general_business"}),
 ]
 
 

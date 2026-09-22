@@ -88,3 +88,28 @@ async def test_migration_0021_round_trips(database):
     await _upgrade_to("head")
     assert await _partition_function_present()
     assert await _present() == (True, True, 2)
+
+
+async def _retention_columns() -> int:
+    async with session_scope() as db:
+        return int(
+            await db.scalar(
+                text(
+                    "SELECT count(*) FROM information_schema.columns WHERE column_name IN "
+                    "('retention_profile', 'retention_profile_set_at', "
+                    "'last_clinical_entry_at', 'retention_expires_at')"
+                )
+            )
+        )
+
+
+async def test_migration_0023_round_trips(database):
+    """0023 adds the retention profile and the two customer columns; its downgrade takes all
+    four (and the CHECK and index with them) back out, so the re-upgrade's CREATEs succeed."""
+    assert await _retention_columns() == 4
+
+    await _downgrade_to("0022")
+    assert await _retention_columns() == 0
+
+    await _upgrade_to("head")
+    assert await _retention_columns() == 4

@@ -15,18 +15,20 @@ read against it, so changing it re-interprets data that already exists. A field 
 somebody is editing to fix a typo in the postal code is the wrong place for that.
 """
 
-from datetime import datetime
-from typing import Annotated
+from datetime import UTC, datetime
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, UploadFile
 from pydantic import AfterValidator, BaseModel, BeforeValidator, EmailStr, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from auth.capabilities import Requires
 from auth.models import User
 from core.audit import record_event
 from core.db import SessionDep
 from core.models import Business
+from customers import retention
+from customers.models import Customer
 from scheduling import cache
 from settings import assets, branding, images
 from settings.models import FAVICON, LOGO, BrandingAsset
@@ -243,6 +245,9 @@ async def update_timezone(
             actor_user_id=admin.id,
             metadata={"timezone": [was, payload.timezone]},
         )
+        # Retention expiry is the end of a *local* day: a new zone moves every hold's instant.
+        await db.flush()
+        await retention.recompute_all(db)
     await db.commit()
     if was != payload.timezone:
         # Every recurring rule the engine reads is a wall-clock time against this zone.
@@ -434,15 +439,15 @@ async def serve_favicon(db: SessionDep, request: Request) -> Response:
     return await assets.serve(db, request, FAVICON)
 
 
-# --- the two multi-factor switches ----------------------------------------------------------
+# --- security: the two multi-factor switches and the retention profile ---------------------
 
 
 class SecurityPolicy(BaseModel):
-    """The two multi-factor decisions a business gets to make (PRD §1, tech-stack §14).
+    """What the Security panel reads: the two multi-factor decisions (PRD §1, tech-stack
+    §14) and which retention obligation wins (ADR-0001, tech-stack §16).
 
-    One model for reading and writing, because both fields are always sent: a PATCH that
-    could carry one of them would need a tri-state per field to tell "leave it" from "turn
-    it off", and this screen has two switches on it.
+    `retention_profile_chosen` is false until an administrator has saved the profile once —
+    the default is `regulated_health`, but a default is not a decision, so the panel asks.
     """
 
     # On by default. Off is the solo operator with one phone, who is better served by a
@@ -451,39 +456,87 @@ class SecurityPolicy(BaseModel):
     # Off by default, and the settings screen says why in as many words: an emailed code is
     # lower assurance, because the inbox usually lives in the same browser an attacker has.
     mfa_email_otp_allowed: bool
+    retention_profile: str
+    retention_profile_chosen: bool
+
+
+class SecurityChange(BaseModel):
+    """The panel saves the two MFA switches together, and the retention profile on its own
+    (it releases or creates holds on every client, so it has its own confirm). A field left
+    out — or sent as `null` — is left alone."""
+
+    mfa_required_for_admin: bool | None = None
+    mfa_email_otp_allowed: bool | None = None
+    retention_profile: Literal["regulated_health", "general_business"] | None = None
+
+
+def _security(business: Business) -> SecurityPolicy:
+    return SecurityPolicy(
+        mfa_required_for_admin=business.mfa_required_for_admin,
+        mfa_email_otp_allowed=business.mfa_email_otp_allowed,
+        retention_profile=business.retention_profile,
+        retention_profile_chosen=business.retention_profile_set_at is not None,
+    )
 
 
 @router.get("/business/security")
 async def read_security(db: SessionDep) -> SecurityPolicy:
-    business = await _business(db)
-    return SecurityPolicy(
-        mfa_required_for_admin=business.mfa_required_for_admin,
-        mfa_email_otp_allowed=business.mfa_email_otp_allowed,
-    )
+    return _security(await _business(db))
 
 
 @router.patch("/business/security")
 async def update_security(
-    payload: SecurityPolicy, admin: AdminCapability, db: SessionDep
+    payload: SecurityChange, admin: AdminCapability, db: SessionDep
 ) -> SecurityPolicy:
-    """Turning either of these off weakens the instance, so both are audited with a name."""
+    """Every change here weakens or strengthens the instance, so each is audited with a name.
+
+    A retention-profile save recomputes every client's `retention_expires_at` in this same
+    transaction (`customers.retention.recompute_all`), so the switch and the holds it implies
+    commit together or not at all. `regulated_health → general_business` releases every hold;
+    the audit event carries how many.
+    """
     business = await _business(db)
-    was = (business.mfa_required_for_admin, business.mfa_email_otp_allowed)
-    business.mfa_required_for_admin = payload.mfa_required_for_admin
-    business.mfa_email_otp_allowed = payload.mfa_email_otp_allowed
-    record_event(
-        db,
-        "business.security_changed",
-        target_type="business",
-        target_id=str(business.id),
-        actor_user_id=admin.id,
-        metadata={
-            "mfa_required_for_admin": [was[0], payload.mfa_required_for_admin],
-            "mfa_email_otp_allowed": [was[1], payload.mfa_email_otp_allowed],
-        },
-    )
+    if payload.mfa_required_for_admin is not None or payload.mfa_email_otp_allowed is not None:
+        was = (business.mfa_required_for_admin, business.mfa_email_otp_allowed)
+        if payload.mfa_required_for_admin is not None:
+            business.mfa_required_for_admin = payload.mfa_required_for_admin
+        if payload.mfa_email_otp_allowed is not None:
+            business.mfa_email_otp_allowed = payload.mfa_email_otp_allowed
+        record_event(
+            db,
+            "business.security_changed",
+            target_type="business",
+            target_id=str(business.id),
+            actor_user_id=admin.id,
+            metadata={
+                "mfa_required_for_admin": [was[0], business.mfa_required_for_admin],
+                "mfa_email_otp_allowed": [was[1], business.mfa_email_otp_allowed],
+            },
+        )
+    if payload.retention_profile is not None:
+        was_profile = business.retention_profile
+        held_before = await db.scalar(
+            select(func.count()).where(Customer.retention_expires_at.is_not(None))
+        )
+        business.retention_profile = payload.retention_profile
+        business.retention_profile_set_at = datetime.now(UTC)
+        await db.flush()
+        counts = await retention.recompute_all(db)
+        record_event(
+            db,
+            "business.retention_profile_changed",
+            target_type="business",
+            target_id=str(business.id),
+            actor_user_id=admin.id,
+            metadata={
+                "retention_profile": [was_profile, payload.retention_profile],
+                "customers_recomputed": counts["changed"],
+                "held": counts["held"],
+                "holds_released": max((held_before or 0) - counts["held"], 0),
+            },
+        )
     await db.commit()
-    return payload
+    return _security(business)
 
 
 # --- shared ---------------------------------------------------------------------------------
