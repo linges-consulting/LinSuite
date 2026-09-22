@@ -512,7 +512,12 @@ function AccessHistory({ customerId, adminMode }: { customerId: string; adminMod
             description="Every time someone opens this client's profile, it is listed here."
           />
         ) : (
-          <div className="rounded-xl border">
+          // The old range stays on screen while the new one loads; dimmed, so it is not
+          // read as the answer to the dates now in the inputs.
+          <div
+            className={`rounded-xl border transition-opacity ${report.isPlaceholderData ? 'opacity-60' : ''}`}
+            aria-busy={report.isPlaceholderData}
+          >
             <Table aria-label="Access history">
               <TableHeader>
                 <TableRow>

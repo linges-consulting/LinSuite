@@ -61,8 +61,11 @@ def response_phi_fields(model: type | None, _seen: frozenset[type] | None = None
     route's `response_model` is what FastAPI actually serialises; a field the handler happens
     to read but never returns is not a disclosure, so this walks the model, not the code.
     """
-    if model is None or not (isinstance(model, type) and issubclass(model, BaseModel)):
+    if model is None:
         return frozenset()
+    if not (isinstance(model, type) and issubclass(model, BaseModel)):
+        # `list[NoteOut]`, `NoteOut | None`, `dict[str, NoteOut]`: walk the wrapper too.
+        return _phi_fields_of_annotation(model, _seen or frozenset())
     seen = (_seen or frozenset()) | {model}
     found: set[str] = set()
     for name, field in model.model_fields.items():
@@ -81,6 +84,15 @@ def _phi_fields_of_annotation(annotation: object, seen: frozenset[type]) -> froz
     for arg in get_args(annotation):
         found |= _phi_fields_of_annotation(arg, seen)
     return frozenset(found)
+
+
+def declares_a_model(annotation: object) -> bool:
+    """Whether a response annotation contains a Pydantic model anywhere — the only shape
+    `response_phi_fields` can read field names off. `None`, `dict`, `dict[str, str]`, `Any`
+    and `list[dict]` do not: what they carry is invisible to the check."""
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return True
+    return any(declares_a_model(arg) for arg in get_args(annotation))
 
 
 def LogAccess(resource_type: str) -> Callable:  # noqa: N802 — a dependency factory, like `Requires`

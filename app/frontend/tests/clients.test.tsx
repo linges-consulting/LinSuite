@@ -392,9 +392,13 @@ test('an audit.view holder in Admin Mode sees who opened the record, on the busi
 test('changing the dates asks the server again with from and to', async () => {
   const { calls } = auditor()
   renderApp('/clients/c1')
-  await screen.findByRole('table', { name: 'Access history' })
+  const table = await screen.findByRole('table', { name: 'Access history' })
+  expect(table.closest('[aria-busy]')).toHaveAttribute('aria-busy', 'false')
 
   fireEvent.change(screen.getByLabelText('From'), { target: { value: '2026-09-10' } })
+
+  // The previous range stays up, marked busy, until the new one arrives.
+  expect(table.closest('[aria-busy]')).toHaveAttribute('aria-busy', 'true')
 
   await waitFor(() => {
     const last = new URL(reportCalls(calls).at(-1)!.url, 'http://test')

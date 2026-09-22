@@ -35,7 +35,7 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
-from core.access_log import response_phi_fields
+from core.access_log import declares_a_model, response_phi_fields
 from core.db import get_purge_engine, session_scope
 from tests.test_appointments import (  # noqa: F401 — the autouse fixture comes along
     CUSTOMERS,
@@ -327,14 +327,19 @@ def unlogged_phi_routes(app) -> set[tuple[str, str]]:
 
 
 def unmodelled_routes(app, allowed=UNMODELLED) -> set[tuple[str, str]]:
-    """Rule (c): customer-scoped routes with no `response_model`, and no `UNMODELLED` entry.
-    Rule (a) cannot see into a response nobody declared, so a route rule (a) cannot judge
+    """Rule (c): customer-scoped routes whose response model contains no Pydantic model
+    anywhere — none at all, `dict`, `dict[str, str]`, `Any`, `list[dict]` — and no
+    `UNMODELLED` entry. Rule (a) reads PHI off model fields, so a route rule (a) cannot judge
     is a failure here rather than a pass there. A `204` route has no body to disclose and
-    no model to declare, so it is not a gap."""
+    no model to declare, so it is not a gap.
+
+    What no static check sees: a handler that declares a model but returns a `JSONResponse`
+    itself bypasses that model, and sends whatever it built. Code review is the control
+    for that one."""
     return {
         (method, r.path)
         for r in mounted_routes(app)
-        if r.customer_scoped and r.response_model is None and r.status_code != 204
+        if r.customer_scoped and not declares_a_model(r.response_model) and r.status_code != 204
         for method in r.methods
         if (method, r.path) not in allowed
     }
@@ -450,6 +455,41 @@ def test_an_unmodelled_route_named_with_a_reason_passes_rule_c(probe):
 
     allowed = {("GET", PROBE): "A probe: returns only {'ok': true}."}
     assert ("GET", PROBE) not in unmodelled_routes(app, allowed)
+
+
+def _local_app(endpoint, **route):
+    """A throwaway app with one customer-scoped route — never the real one, never `src/`."""
+    from fastapi import FastAPI
+
+    from auth.capabilities import Requires
+
+    local = FastAPI()
+    local.add_api_route(
+        PROBE, endpoint, dependencies=[Depends(Requires("customers.view"))], **route
+    )
+    return local
+
+
+def test_a_dict_annotated_handler_under_a_customer_is_unmodelled_rule_c():
+    """`-> dict[str, str]` infers a response model, but one with no fields to read: rule (a)
+    sees nothing, so rule (c) must refuse it. The annotation is real in this codebase
+    (`scheduling/staff.py`)."""
+
+    async def notes(customer_id: uuid.UUID) -> dict[str, str]:
+        return {"notes": "PHI behind a dict"}
+
+    local = _local_app(notes)
+
+    assert ("GET", PROBE) in unmodelled_routes(local)
+
+
+def test_a_list_of_phi_models_without_log_access_fails_rule_a():
+    """The Phase 8/9 shape: `GET /customers/{id}/notes -> list[NoteOut]`. The walk has to go
+    through the top-level `list`, not only into fields of a top-level model."""
+    local = _local_app(lambda customer_id: [], response_model=list[_ProbeOut])
+
+    assert ("GET", PROBE) in unlogged_phi_routes(local)
+    assert ("GET", PROBE) not in unmodelled_routes(local)
 
 
 def test_a_customer_scoped_patch_returning_phi_without_log_access_fails_rule_a(probe):
