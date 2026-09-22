@@ -328,7 +328,7 @@ describe('the list', () => {
 describe('the publish gate', () => {
   it('disables Publish with a hint while the draft matches the latest version, and re-enables it on a real change', async () => {
     const key = crypto.randomUUID()
-    const fields = [{ key, type: 'yes_no', label: 'Any allergies?', required: true }]
+    const fields: FormField[] = [{ key, type: 'yes_no', label: 'Any allergies?', required: true }]
     fakeServer(template(fields, { latest_version: 1, has_unpublished_changes: false }), [
       {
         number: 1,

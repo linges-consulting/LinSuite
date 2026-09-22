@@ -7,6 +7,7 @@ import {
   Eraser,
   History,
   Pencil,
+  Plus,
   SearchX,
   ShieldCheck,
   ShieldOff,
@@ -44,6 +45,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Textarea } from '@/components/ui/textarea'
 import {
   ApiError,
+  createCustomer,
   fetchAccessLog,
   fetchCustomerProfile,
   fetchCustomers,
@@ -51,10 +53,11 @@ import {
   requestErasure,
   updateCustomer,
   type AccessEntry,
+  type Customer,
   type CustomerDetail,
   type Erasure,
+  type CustomerDraft,
   type CustomerPatch,
-  type CustomerRecord,
   type Visit,
 } from '@/lib/api'
 import { useSession } from '@/lib/auth'
@@ -73,6 +76,9 @@ const PAGE_SIZE = 50
  */
 export function ClientsPage() {
   const navigate = useNavigate()
+  const { user } = useSession()
+  const canCreate = user?.capabilities.includes('customers.manage') ?? false
+  const [creating, setCreating] = useState(false)
   const [q, setQ] = useState('')
   const [page, setPage] = useState(1)
   // Keystrokes update the box at once; the query follows when React has a moment.
@@ -102,12 +108,27 @@ export function ClientsPage() {
             setPage(1)
           }}
         />
-        {list.data && (
-          <p className="ml-auto text-muted-foreground tabular-nums" aria-live="polite">
-            {total === 1 ? '1 client' : `${total} clients`}
-          </p>
-        )}
+        <div className="ml-auto flex items-center gap-3">
+          {list.data && (
+            <p className="text-muted-foreground tabular-nums" aria-live="polite">
+              {total === 1 ? '1 client' : `${total} clients`}
+            </p>
+          )}
+          {canCreate && (
+            <Button size="sm" onClick={() => setCreating(true)}>
+              <Plus aria-hidden />
+              New client
+            </Button>
+          )}
+        </div>
       </div>
+
+      {creating && (
+        <NewClientDialog
+          onClose={() => setCreating(false)}
+          onCreated={(id) => navigate(`/clients/${id}`)}
+        />
+      )}
 
       {list.isPending ? (
         <Skeleton className="h-64 w-full" />
@@ -199,6 +220,115 @@ export function ClientsPage() {
         </div>
       )}
     </div>
+  )
+}
+
+/**
+ * Gap: clients could only be created from the booking dialog. `customers.manage`, the same
+ * capability the booking dialog's inline "new client" needs, posts to the same
+ * `POST /api/customers` the booking flow's `create_customer` serves either way — one place a
+ * customer is made, whichever screen starts it — then opens the new profile.
+ */
+function NewClientDialog({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void
+  onCreated: (id: string) => void
+}) {
+  const queryClient = useQueryClient()
+  const [draft, setDraft] = useState({ first_name: '', last_name: '', email: '', phone: '' })
+  const [errors, setErrors] = useState<Record<string, string>>({})
+  const set = (patch: Partial<typeof draft>) => setDraft((d) => ({ ...d, ...patch }))
+  const create = useMutation({
+    mutationFn: () => {
+      const payload: CustomerDraft = {
+        first_name: draft.first_name.trim(),
+        last_name: draft.last_name.trim(),
+        email: draft.email.trim() || null,
+        phone: draft.phone.trim() || null,
+      }
+      return createCustomer(payload)
+    },
+    onSuccess: (created) => {
+      queryClient.invalidateQueries({ queryKey: CUSTOMERS })
+      toast.success(`${fullName(created)} added`)
+      onCreated(created.id)
+    },
+    onError: (error) => {
+      const found = fieldErrors(error)
+      if (
+        Object.keys(found).length === 0 &&
+        error instanceof ApiError &&
+        error.status === 409
+      ) {
+        found.email = error.message
+      }
+      setErrors(found)
+    },
+  })
+  const incomplete = !draft.first_name.trim() || !draft.last_name.trim()
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>New client</DialogTitle>
+          <DialogDescription>Added to the client list right away.</DialogDescription>
+        </DialogHeader>
+        <Form onSubmit={() => !incomplete && create.mutate()}>
+          <div className="grid gap-5 sm:grid-cols-2">
+            <FormField label="First name" htmlFor="new-client-first" error={errors.first_name}>
+              <Input
+                id="new-client-first"
+                autoFocus
+                required
+                maxLength={100}
+                value={draft.first_name}
+                onChange={(e) => set({ first_name: e.target.value })}
+              />
+            </FormField>
+            <FormField label="Last name" htmlFor="new-client-last" error={errors.last_name}>
+              <Input
+                id="new-client-last"
+                required
+                maxLength={100}
+                value={draft.last_name}
+                onChange={(e) => set({ last_name: e.target.value })}
+              />
+            </FormField>
+          </div>
+          <div className="grid gap-5 sm:grid-cols-2">
+            <FormField label="Phone" htmlFor="new-client-phone" error={errors.phone}>
+              <Input
+                id="new-client-phone"
+                value={draft.phone}
+                onChange={(e) => set({ phone: e.target.value })}
+              />
+            </FormField>
+            <FormField label="Email" htmlFor="new-client-email" error={errors.email}>
+              <Input
+                id="new-client-email"
+                type="email"
+                value={draft.email}
+                onChange={(e) => set({ email: e.target.value })}
+              />
+            </FormField>
+          </div>
+          {create.error && Object.keys(errors).length === 0 && (
+            <FormError>{create.error.message}</FormError>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={create.isPending || incomplete}>
+              {create.isPending ? 'Creating…' : 'Create client'}
+            </Button>
+          </DialogFooter>
+        </Form>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -883,7 +1013,7 @@ function RetentionLine({ retention }: { retention: CustomerDetail['retention'] }
   return <Badge variant="warning">Retention status unknown</Badge>
 }
 
-function fullName(c: CustomerRecord): string {
+function fullName(c: Customer): string {
   return `${c.first_name} ${c.last_name}`
 }
 
