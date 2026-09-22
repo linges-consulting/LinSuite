@@ -1,3 +1,5 @@
+import type { FormSchema } from '@/lib/forms'
+
 /** FastAPI's 422 says which field it is unhappy about in `loc`; put the message under it.
  *  Shared by every edit form that shows a server error inline rather than as a toast.
  *
@@ -997,6 +999,91 @@ export async function reactivateService(id: string): Promise<ServiceRow> {
   const res = await send('POST', `/api/admin/services/${id}/reactivate`, {})
   if (!res.ok) throw await failure(res, 'Could not reactivate the service')
   return res.json()
+}
+
+// --- forms: templates and their frozen versions (Settings → Forms) ---------------------------
+
+export type FormKind = 'intake' | 'consent' | 'waiver' | 'other'
+
+/** What the next publish copies: the schema and the two versioned flags. */
+export type FormDraft = {
+  schema: FormSchema
+  is_health_form: boolean
+  is_mandatory: boolean
+}
+
+export type FormTemplate = {
+  id: string
+  name: string
+  kind: FormKind
+  retired_at: string | null
+  updated_at: string
+  latest_version: number | null
+  has_unpublished_changes: boolean
+  draft: FormDraft
+}
+
+export type FormVersionSummary = {
+  number: number
+  published_at: string
+  requires_resignature: boolean
+  is_health_form: boolean
+  is_mandatory: boolean
+}
+
+export async function fetchFormTemplates(): Promise<FormTemplate[]> {
+  const res = await fetch('/api/admin/forms')
+  if (!res.ok) throw await failure(res, 'Could not load the forms')
+  return (await res.json()).templates
+}
+
+export async function createFormTemplate(draft: {
+  name: string
+  kind: FormKind
+  is_health_form: boolean
+  is_mandatory: boolean
+}): Promise<FormTemplate> {
+  const res = await send('POST', '/api/admin/forms', draft)
+  if (!res.ok) throw await failure(res, 'Could not create the form')
+  return res.json()
+}
+
+/** The whole draft, replaced. Keys go back exactly as the builder minted them. */
+export async function saveFormDraft(
+  id: string,
+  draft: FormDraft & { name: string; kind: FormKind },
+): Promise<FormTemplate> {
+  const res = await send('PUT', `/api/admin/forms/${id}/draft`, draft)
+  if (!res.ok) throw await failure(res, 'Could not save the draft')
+  return res.json()
+}
+
+export async function publishFormTemplate(
+  id: string,
+  requiresResignature: boolean,
+): Promise<FormVersionSummary> {
+  const res = await send('POST', `/api/admin/forms/${id}/publish`, {
+    requires_resignature: requiresResignature,
+  })
+  if (!res.ok) throw await failure(res, 'Could not publish the form')
+  return res.json()
+}
+
+export async function fetchFormVersions(id: string): Promise<FormVersionSummary[]> {
+  const res = await fetch(`/api/admin/forms/${id}/versions`)
+  if (!res.ok) throw await failure(res, 'Could not load the version history')
+  return (await res.json()).versions
+}
+
+export async function retireFormTemplate(id: string): Promise<FormTemplate> {
+  const res = await send('POST', `/api/admin/forms/${id}/retire`, {})
+  if (!res.ok) throw await failure(res, 'Could not retire the form')
+  return res.json()
+}
+
+export async function deleteFormTemplate(id: string): Promise<void> {
+  const res = await send('DELETE', `/api/admin/forms/${id}`)
+  if (!res.ok) throw await failure(res, 'Could not delete the form')
 }
 
 // --- availability: the bookable slots -------------------------------------------------------

@@ -2,6 +2,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { BrandingPanel } from '@/routes/settings-branding'
 import { BusinessPanel } from '@/routes/settings-business'
 import { ClosuresPanel } from '@/routes/settings-closures'
+import { FormsPanel } from '@/routes/settings-forms'
 import { ResourcesPanel } from '@/routes/settings-resources'
 import { ServicesPanel } from '@/routes/settings-services'
 import { RolesPanel } from '@/routes/settings-roles'
@@ -29,6 +30,7 @@ export function SettingsPage() {
         <TabsTrigger value="staff">Staff</TabsTrigger>
         <TabsTrigger value="resources">Resources</TabsTrigger>
         <TabsTrigger value="services">Services</TabsTrigger>
+        <TabsTrigger value="forms">Forms</TabsTrigger>
         <TabsTrigger value="closures">Closures</TabsTrigger>
         <TabsTrigger value="security">Security</TabsTrigger>
       </TabsList>
@@ -49,6 +51,9 @@ export function SettingsPage() {
       </TabsContent>
       <TabsContent value="services">
         <ServicesPanel />
+      </TabsContent>
+      <TabsContent value="forms">
+        <FormsPanel />
       </TabsContent>
       <TabsContent value="closures">
         <ClosuresPanel />

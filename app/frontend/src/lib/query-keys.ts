@@ -50,3 +50,6 @@ export const SCHEDULE = ['schedule'] as const
  *  changes invalidate the prefix, because the profile's visits (and the erasure dialog's
  *  upcoming-visit count) are read from it. */
 export const CUSTOMER_PROFILE = ['customer-profile'] as const
+/** Settings → Forms: the template list, and one template's version history (id after it). */
+export const FORM_TEMPLATES = ['form-templates'] as const
+export const FORM_VERSIONS = ['form-versions'] as const
