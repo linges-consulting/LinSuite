@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
-import { CalendarPlus, RefreshCw } from 'lucide-react'
+import { CalendarPlus, ClipboardList, RefreshCw } from 'lucide-react'
+import { Link } from 'react-router'
 import { EmptyState } from '@/components/empty-state'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -12,12 +13,14 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { fetchAdminBusiness, fetchHealth } from '@/lib/api'
+import { fetchAdminBusiness, fetchFormsNeeded, fetchHealth, type ComplianceStatus } from '@/lib/api'
 import { useSession } from '@/lib/auth'
-import { BUSINESS } from '@/lib/query-keys'
+import { useBranding } from '@/lib/branding'
+import { BUSINESS, FORMS_NEEDED } from '@/lib/query-keys'
 
 export function HomePage() {
   const { user } = useSession()
+  const canSeeFormsNeeded = user?.capabilities.includes('forms.issue') ?? false
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6">
       <EmptyState
@@ -25,9 +28,84 @@ export function HomePage() {
         title="Your workspace is ready"
         description="Scheduling, clients and your service catalog arrive with the next releases. Until then, this page reports whether the backend is reachable."
       />
+      {canSeeFormsNeeded && <FormsNeededCard />}
       {user?.mode === 'admin' && <BusinessProfileCard />}
       <SystemStatus />
     </div>
+  )
+}
+
+const FORMS_NEEDED_DAYS = 14
+const STATUS_LABEL: Record<ComplianceStatus, string> = {
+  missing: 'Missing',
+  expired: 'Expired',
+  resign_required: 'Needs a new signature',
+}
+
+/**
+ * Task 8 (#51): who is coming in within the next two weeks with an essential form still
+ * outstanding — the front desk's "catch it before they sit down" list. Each row opens the
+ * client's profile, where the same banner (and its "Send form" shortcut) is waiting.
+ */
+function FormsNeededCard() {
+  const branding = useBranding()
+  const timezone = branding.data?.timezone
+  const { data, isPending, isError, error } = useQuery({
+    queryKey: [...FORMS_NEEDED, FORMS_NEEDED_DAYS],
+    queryFn: () => fetchFormsNeeded(FORMS_NEEDED_DAYS),
+    retry: false,
+  })
+
+  return (
+    <Card>
+      <CardHeader className="border-b">
+        <CardTitle>
+          <h2>Forms needed</h2>
+        </CardTitle>
+        <CardDescription>Clients booked in the next {FORMS_NEEDED_DAYS} days</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {isPending ? (
+          <Skeleton className="h-24 w-full" />
+        ) : isError ? (
+          <p role="alert" className="text-sm text-destructive">
+            {error.message}
+          </p>
+        ) : data.length === 0 ? (
+          <EmptyState
+            icon={ClipboardList}
+            title="Nothing outstanding"
+            description="Every client booked in the next two weeks has their essential forms up to date."
+          />
+        ) : (
+          <ul className="divide-y">
+            {data.map((entry) => (
+              <li key={entry.customer_id} className="flex items-center justify-between gap-3 py-2">
+                <div className="min-w-0">
+                  <Link to={`/clients/${entry.customer_id}`} className="font-medium hover:underline">
+                    {entry.customer_name}
+                  </Link>
+                  <p className="text-xs text-muted-foreground tabular-nums">
+                    {new Date(entry.next_appointment_at).toLocaleString('en-CA', {
+                      timeZone: timezone,
+                      dateStyle: 'medium',
+                      timeStyle: 'short',
+                    })}
+                  </p>
+                </div>
+                <div className="flex flex-wrap justify-end gap-1">
+                  {entry.templates.map((t) => (
+                    <Badge key={t.template_id} variant="warning">
+                      {t.name}: {STATUS_LABEL[t.status]}
+                    </Badge>
+                  ))}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
   )
 }
 

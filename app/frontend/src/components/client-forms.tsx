@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Copy, Send } from 'lucide-react'
-import { useState } from 'react'
+import { forwardRef, useImperativeHandle, useState } from 'react'
 import { toast } from 'sonner'
 import { Form } from '@/components/form'
 import { QrCode } from '@/components/qr-code'
@@ -49,16 +49,32 @@ import { FORM_LINKS, FORM_SUBMISSION, FORM_SUBMISSIONS, SENDABLE_FORMS } from '@
  * **Completed forms** (`forms.view`; #47): the list is metadata — form, version, method, when —
  * and opening one is a logged read of the chart that shows the answers with the labels of the
  * version they were given against. The opened answers are never kept in the query cache.
+ *
+ * **The compliance banner's shortcut** (Task 8, #51): `openSendFor(templateId)`, reached
+ * through a ref, opens the same send dialog with that template already chosen — the banner
+ * names a specific missing form, so the dialog should not make the front desk pick it again.
  */
-export function ClientFormsCard(props: {
-  customerId: string
-  timezone: string
-  suppressed: boolean
-  canSend: boolean
-  canView: boolean
-}) {
+export type ClientFormsCardHandle = { openSendFor: (templateId: string) => void }
+
+export const ClientFormsCard = forwardRef<
+  ClientFormsCardHandle,
+  {
+    customerId: string
+    timezone: string
+    suppressed: boolean
+    canSend: boolean
+    canView: boolean
+  }
+>(function ClientFormsCard(props, ref) {
   const [sending, setSending] = useState(false)
+  const [presetTemplateId, setPresetTemplateId] = useState<string | undefined>()
   const [opening, setOpening] = useState<string | null>(null)
+  useImperativeHandle(ref, () => ({
+    openSendFor: (templateId: string) => {
+      setPresetTemplateId(templateId)
+      setSending(true)
+    },
+  }))
   const queryClient = useQueryClient()
   const links = useQuery({
     queryKey: [...FORM_LINKS, props.customerId],
@@ -202,20 +218,25 @@ export function ClientFormsCard(props: {
         <SendFormDialog
           customerId={props.customerId}
           when={when}
-          onClose={() => setSending(false)}
+          presetTemplateId={presetTemplateId}
+          onClose={() => {
+            setSending(false)
+            setPresetTemplateId(undefined)
+          }}
         />
       )}
     </Card>
   )
-}
+})
 
 function SendFormDialog(props: {
   customerId: string
   when: (instant: string) => string
+  presetTemplateId?: string
   onClose: () => void
 }) {
   const queryClient = useQueryClient()
-  const [templateId, setTemplateId] = useState('')
+  const [templateId, setTemplateId] = useState(props.presetTemplateId ?? '')
   const forms = useQuery({ queryKey: SENDABLE_FORMS, queryFn: fetchSendableForms })
   const issue = useMutation({
     mutationFn: () => issueFormLink(props.customerId, templateId),

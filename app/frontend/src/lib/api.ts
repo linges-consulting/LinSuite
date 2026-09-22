@@ -1258,6 +1258,37 @@ export async function fetchFormSubmission(customerId: string, id: string): Promi
   return res.json()
 }
 
+// --- forms: essential-forms compliance (Task 8, #51) ------------------------------------------
+
+export type ComplianceStatus = 'missing' | 'expired' | 'resign_required'
+
+/** One essential template a client is not currently compliant with. Metadata — a name and a
+ *  status, never an answer (`core.access_log.PHI_FIELDS`) — so neither endpoint below logs. */
+export type ComplianceEntry = { template_id: string; name: string; status: ComplianceStatus }
+
+/** `customers.view`. The profile's alert banner. */
+export async function fetchCustomerCompliance(customerId: string): Promise<ComplianceEntry[]> {
+  const res = await fetch(`/api/customers/${customerId}/compliance`)
+  if (!res.ok) throw await failure(res, 'Could not load the compliance status')
+  return (await res.json()).templates
+}
+
+/** One client on the "Forms needed" dashboard, with the appointment that put them there. */
+export type FormsNeededEntry = {
+  customer_id: string
+  customer_name: string
+  next_appointment_at: string
+  templates: ComplianceEntry[]
+}
+
+/** `forms.issue`. Clients with a confirmed appointment in the next `days` (≤ 60, default 14)
+ *  who have any non-compliant essential form. */
+export async function fetchFormsNeeded(days = 14): Promise<FormsNeededEntry[]> {
+  const res = await fetch(`/api/forms/compliance?${new URLSearchParams({ days: String(days) })}`)
+  if (!res.ok) throw await failure(res, 'Could not load the forms-needed list')
+  return (await res.json()).clients
+}
+
 // --- availability: the bookable slots -------------------------------------------------------
 
 /** One start that can be booked. Instants in UTC (`...Z`); `staff_ids` is everyone eligible

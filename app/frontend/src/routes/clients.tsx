@@ -11,14 +11,15 @@ import {
   SearchX,
   ShieldCheck,
   ShieldOff,
+  TriangleAlert,
   UserRound,
   Users,
 } from 'lucide-react'
-import { useDeferredValue, useState } from 'react'
+import { useDeferredValue, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
 import { ClassificationBadge } from '@/components/classification-badge'
-import { ClientFormsCard } from '@/components/client-forms'
+import { ClientFormsCard, type ClientFormsCardHandle } from '@/components/client-forms'
 import { EmptyState } from '@/components/empty-state'
 import { Field as FormField, Form, FormError } from '@/components/form'
 import { Badge } from '@/components/ui/badge'
@@ -47,12 +48,14 @@ import {
   ApiError,
   createCustomer,
   fetchAccessLog,
+  fetchCustomerCompliance,
   fetchCustomerProfile,
   fetchCustomers,
   fieldErrors,
   requestErasure,
   updateCustomer,
   type AccessEntry,
+  type ComplianceEntry,
   type Customer,
   type CustomerDetail,
   type Erasure,
@@ -63,7 +66,7 @@ import {
 import { useSession } from '@/lib/auth'
 import { formatPhone } from '@/lib/phone'
 import { invalidateScheduling } from '@/lib/query-client'
-import { CUSTOMER_PROFILE as PROFILE, CUSTOMERS } from '@/lib/query-keys'
+import { COMPLIANCE, CUSTOMER_PROFILE as PROFILE, CUSTOMERS } from '@/lib/query-keys'
 
 const PAGE_SIZE = 50
 
@@ -351,12 +354,20 @@ export function ClientPage() {
     (user?.capabilities.includes('customers.erase') ?? false) && user?.mode === 'admin'
   const [editing, setEditing] = useState(false)
   const [erasing, setErasing] = useState(false)
+  const formsCard = useRef<ClientFormsCardHandle>(null)
   const profile = useQuery({
     queryKey: [...PROFILE, id],
     queryFn: () => fetchCustomerProfile(id),
     staleTime: 5 * 60_000,
     refetchOnWindowFocus: false,
     retry: false,
+  })
+  // Metadata (template names and statuses, no answers) — `customers.view` reads it the same
+  // way it reads the rest of the profile; a suppressed client has nothing to chase.
+  const compliance = useQuery({
+    queryKey: [...COMPLIANCE, id],
+    queryFn: () => fetchCustomerCompliance(id),
+    enabled: profile.isSuccess && !profile.data.customer.suppressed,
   })
 
   return (
@@ -392,6 +403,13 @@ export function ClientPage() {
         <>
           {profile.data.customer.erasure && (
             <ErasureBanner erasure={profile.data.customer.erasure} />
+          )}
+          {compliance.data && compliance.data.length > 0 && (
+            <ComplianceBanner
+              entries={compliance.data}
+              canSend={canSendForms}
+              onSend={(templateId) => formsCard.current?.openSendFor(templateId)}
+            />
           )}
           <Card>
             <CardHeader className="flex-row items-center justify-between">
@@ -553,6 +571,7 @@ export function ClientPage() {
 
           {(canSendForms || canViewForms) && (
             <ClientFormsCard
+              ref={formsCard}
               customerId={id}
               timezone={profile.data.timezone}
               suppressed={profile.data.customer.suppressed}
@@ -747,6 +766,61 @@ function ErasureDialog({
 }
 
 /** After an erasure request: what was kept and why, in the words the client was given. */
+const COMPLIANCE_LABEL: Record<ComplianceEntry['status'], string> = {
+  missing: 'Missing',
+  expired: 'Expired',
+  resign_required: 'Needs a new signature',
+}
+
+/**
+ * Task 8 (#51): the essential forms this client is missing, expired on, or must re-sign —
+ * metadata, not PHI, the same reason opening the profile stays one access-log row. "Send
+ * form" reaches into the Forms card below through a ref so the dialog opens with this one
+ * already chosen, rather than asking the front desk to find it again in a list.
+ */
+function ComplianceBanner({
+  entries,
+  canSend,
+  onSend,
+}: {
+  entries: ComplianceEntry[]
+  canSend: boolean
+  onSend: (templateId: string) => void
+}) {
+  return (
+    <div
+      role="status"
+      aria-label="Essential forms outstanding"
+      className="flex items-start gap-2 rounded-xl border border-warning/30 bg-warning/5 p-4 text-sm"
+    >
+      <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0 text-warning" />
+      <div className="flex-1 space-y-2">
+        <p className="font-medium">
+          {entries.length === 1 ? 'An essential form needs attention' : 'Essential forms need attention'}
+        </p>
+        <ul className="space-y-1.5">
+          {entries.map((entry) => (
+            <li key={entry.template_id} className="flex flex-wrap items-center gap-2">
+              <span>{entry.name}</span>
+              <Badge variant="warning">{COMPLIANCE_LABEL[entry.status]}</Badge>
+              {canSend && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="ml-auto"
+                  onClick={() => onSend(entry.template_id)}
+                >
+                  Send form
+                </Button>
+              )}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  )
+}
+
 function ErasureBanner({ erasure }: { erasure: Erasure }) {
   return (
     <div
