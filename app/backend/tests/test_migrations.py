@@ -279,5 +279,41 @@ async def test_migration_0029_round_trips(database):
             text("SELECT to_regprocedure('public.customer_record_guard()') IS NOT NULL")
         )
 
-    await _upgrade_to("0029")
+    # "head" rather than "0029": a later ticket (0030) adds a migration on top, and leaving
+    # the database at 0029 here would fail the next test to assume it starts at head.
+    await _upgrade_to("head")
     assert await _form_submissions() == (True, True, 2)
+
+
+async def _form_compliance() -> tuple[bool, bool, bool]:
+    """(the two new `form_templates` columns exist, its new CHECK exists, `form_template_services`
+    exists)."""
+    async with session_scope() as db:
+        columns = await db.scalar(
+            text(
+                "SELECT count(*) = 2 FROM information_schema.columns WHERE table_name = "
+                "'form_templates' AND column_name IN ('applies_to_all', 'valid_for_months')"
+            )
+        )
+        check = await db.scalar(
+            text(
+                "SELECT count(*) > 0 FROM pg_constraint WHERE conname = "
+                "'ck_form_templates_valid_for_months'"
+            )
+        )
+        services = await db.scalar(
+            text("SELECT to_regclass('form_template_services') IS NOT NULL")
+        )
+    return bool(columns), bool(check), bool(services)
+
+
+async def test_migration_0030_round_trips(database):
+    """0030 adds `form_templates.applies_to_all`/`valid_for_months` (with its CHECK) and the
+    `form_template_services` mapping table; the downgrade takes all three back out."""
+    assert await _form_compliance() == (True, True, True)
+
+    await _downgrade_to("0029")
+    assert await _form_compliance() == (False, False, False)
+
+    await _upgrade_to("head")
+    assert await _form_compliance() == (True, True, True)

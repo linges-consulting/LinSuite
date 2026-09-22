@@ -20,6 +20,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -41,6 +42,10 @@ class FormTemplate(Base):
         CheckConstraint(
             "kind IN (" + ", ".join(f"'{k}'" for k in KINDS) + ")", name="ck_form_templates_kind"
         ),
+        CheckConstraint(
+            "valid_for_months IS NULL OR valid_for_months BETWEEN 1 AND 120",
+            name="ck_form_templates_valid_for_months",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -55,6 +60,14 @@ class FormTemplate(Base):
     # The next version's flags (owner ruling Q1). Versioned, so they live on the draft too.
     draft_is_health_form: Mapped[bool] = mapped_column(Boolean, server_default=false())
     draft_is_mandatory: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    # --- Task 8 (#51): compliance settings. Template *identity*, not the draft: edited
+    # outside versioning (`PUT /admin/forms/{id}/settings`) because they say *when* a form is
+    # required, not what it says — unlike `is_mandatory`/`is_health_form` above, which are
+    # versioned because a submission's compliance must be judged by what was signed. The
+    # essential-forms checklist itself is driven by the latest published version's
+    # `is_mandatory` (owner ruling, progress.md), not a column here — see `forms/compliance.py`.
+    applies_to_all: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    valid_for_months: Mapped[int | None] = mapped_column(SmallInteger)
     # Hidden from new links; its versions and every submission against them stay.
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -156,3 +169,20 @@ class FormSubmission(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     source_ip: Mapped[str | None] = mapped_column(INET)
+
+
+class FormTemplateService(Base):
+    """Which services make a template apply to a client (Task 8, #51; owner ruling Q6 —
+    services only, staff types dropped). The other half of applicability,
+    `FormTemplate.applies_to_all`, needs no row here. Both FKs cascade: dropping a template or
+    a service drops the mapping, never the other row. No client data — an ordinary app-role
+    table, nothing to guard."""
+
+    __tablename__ = "form_template_services"
+
+    template_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("form_templates.id", ondelete="CASCADE"), primary_key=True
+    )
+    service_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("services.id", ondelete="CASCADE"), primary_key=True
+    )

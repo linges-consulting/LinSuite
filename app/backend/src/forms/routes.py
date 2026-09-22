@@ -33,15 +33,16 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 
 from auth.capabilities import Requires
 from auth.models import User
 from core.audit import record_event
 from core.db import SessionDep
-from forms.models import FormLink, FormTemplate, FormTemplateVersion
+from forms.models import FormLink, FormTemplate, FormTemplateService, FormTemplateVersion
 from forms.schema import FormSchema, kind_problems
 from scheduling._admin_forms import refuse
+from scheduling.models import Service
 
 router = APIRouter(prefix="/admin/forms", tags=["forms"])
 
@@ -69,6 +70,12 @@ class TemplateOut(BaseModel):
     # fields): there is something to publish.
     has_unpublished_changes: bool
     draft: Draft
+    # --- Task 8 (#51): compliance settings, identity-level (edited by `PUT …/settings`) -----
+    applies_to_all: bool
+    valid_for_months: int | None
+    # Populated only where the caller asked for it (`get_template`); empty on the list, which
+    # the settings panel never reads without opening the template first.
+    service_ids: list[str] = []
 
 
 class VersionSummary(BaseModel):
@@ -141,7 +148,11 @@ def _flags(row: FormTemplate | FormTemplateVersion) -> tuple:
     return (row.name, row.kind, row.schema, row.is_health_form, row.is_mandatory)
 
 
-def _out(template: FormTemplate, latest: FormTemplateVersion | None) -> TemplateOut:
+def _out(
+    template: FormTemplate,
+    latest: FormTemplateVersion | None,
+    service_ids: list[str] | None = None,
+) -> TemplateOut:
     if latest is None:
         changed = bool(template.draft_schema["fields"])
     else:
@@ -159,6 +170,9 @@ def _out(template: FormTemplate, latest: FormTemplateVersion | None) -> Template
             is_health_form=template.draft_is_health_form,
             is_mandatory=template.draft_is_mandatory,
         ),
+        applies_to_all=template.applies_to_all,
+        valid_for_months=template.valid_for_months,
+        service_ids=service_ids or [],
     )
 
 
@@ -199,10 +213,13 @@ async def _latest(db: SessionDep, template_id: uuid.UUID) -> FormTemplateVersion
 
 @router.get("")
 async def list_templates(_: FormManager, db: SessionDep) -> dict[str, list[TemplateOut]]:
-    """Active before retired, then by name. One query for the latest version of each."""
-    templates = await db.scalars(
-        select(FormTemplate).order_by(
-            FormTemplate.retired_at.is_not(None), func.lower(FormTemplate.name)
+    """Active before retired, then by name. One query for the latest version of each, one for
+    every template's mapped services (Task 8) — never one query per row."""
+    templates = list(
+        await db.scalars(
+            select(FormTemplate).order_by(
+                FormTemplate.retired_at.is_not(None), func.lower(FormTemplate.name)
+            )
         )
     )
     latest = {
@@ -213,12 +230,34 @@ async def list_templates(_: FormManager, db: SessionDep) -> dict[str, list[Templ
             .order_by(FormTemplateVersion.template_id, FormTemplateVersion.number.desc())
         )
     }
-    return {"templates": [_out(t, latest.get(t.id)) for t in templates]}
+    services: dict[uuid.UUID, list[str]] = {t.id: [] for t in templates}
+    for template_id, service_id in await db.execute(
+        select(FormTemplateService.template_id, FormTemplateService.service_id)
+    ):
+        services.setdefault(template_id, []).append(str(service_id))
+    return {
+        "templates": [_out(t, latest.get(t.id), services[t.id]) for t in templates]
+    }
+
+
+async def _service_ids(db: SessionDep, template_id: uuid.UUID) -> list[str]:
+    return [
+        str(s)
+        for s in await db.scalars(
+            select(FormTemplateService.service_id).where(
+                FormTemplateService.template_id == template_id
+            )
+        )
+    ]
 
 
 @router.get("/{template_id}")
 async def get_template(template_id: uuid.UUID, _: FormManager, db: SessionDep) -> TemplateOut:
-    return _out(await _template(db, template_id), await _latest(db, template_id))
+    return _out(
+        await _template(db, template_id),
+        await _latest(db, template_id),
+        await _service_ids(db, template_id),
+    )
 
 
 @router.get("/{template_id}/versions")
@@ -382,6 +421,56 @@ async def retire(template_id: uuid.UUID, admin: FormManager, db: SessionDep) -> 
         _audit(db, "retired", template, admin, links_revoked=revoked.rowcount)
         await db.commit()
     return _out(template, await _latest(db, template_id))
+
+
+class SettingsIn(BaseModel):
+    """Task 8 (#51): who the checklist expects this form from. `applies_to_all` and specific
+    services are mutually exclusive — "every client, but only for these services" is not a
+    sentence the owner's ruling (Q6) describes."""
+
+    applies_to_all: bool = False
+    valid_for_months: Annotated[int, Field(ge=1, le=120)] | None = None
+    service_ids: list[uuid.UUID] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _shape(self) -> "SettingsIn":
+        if self.applies_to_all and self.service_ids:
+            raise ValueError("Choose either every client or specific services, not both.")
+        return self
+
+
+@router.put("/{template_id}/settings")
+async def save_settings(
+    template_id: uuid.UUID, payload: SettingsIn, admin: FormManager, db: SessionDep
+) -> TemplateOut:
+    template = await _template(db, template_id, lock=True)
+    if template.retired_at is not None:
+        return _retired()
+    if payload.service_ids:
+        known = set(await db.scalars(select(Service.id).where(Service.id.in_(payload.service_ids))))
+        missing = set(payload.service_ids) - known
+        if missing:
+            raise refuse("service_ids", "One of the chosen services no longer exists.")
+
+    template.applies_to_all = payload.applies_to_all
+    template.valid_for_months = payload.valid_for_months
+    template.updated_at = datetime.now(UTC)
+    await db.execute(
+        delete(FormTemplateService).where(FormTemplateService.template_id == template_id)
+    )
+    for service_id in dict.fromkeys(payload.service_ids):  # de-duplicate, keep order
+        db.add(FormTemplateService(template_id=template_id, service_id=service_id))
+    _audit(
+        db,
+        "settings_saved",
+        template,
+        admin,
+        applies_to_all=payload.applies_to_all,
+        valid_for_months=payload.valid_for_months,
+        service_count=len(set(payload.service_ids)),
+    )
+    await db.commit()
+    return _out(template, await _latest(db, template_id), [str(s) for s in payload.service_ids])
 
 
 @router.delete("/{template_id}", status_code=204)

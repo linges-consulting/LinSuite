@@ -33,6 +33,7 @@ from core.redis import get_redis
 from customers.access_report import router as access_report_router
 from customers.erasure import router as erasure_router
 from customers.routes import router as customers_router
+from forms.compliance import router as form_compliance_router
 from forms.links import router as form_links_router
 from forms.public import router as public_forms_router
 from forms.routes import router as forms_router
@@ -257,6 +258,9 @@ api.include_router(forms_router)
 api.include_router(form_links_router)
 # Completed forms, staff side (`forms.view`): the list, and the logged read of one.
 api.include_router(form_submissions_router)
+# Essential forms and compliance (Task 8): the profile banner and the "Forms needed" dashboard.
+# Metadata only — no access-log row.
+api.include_router(form_compliance_router)
 api.include_router(public_forms_router)
 api.include_router(business_router)
 api.include_router(branding_router)
