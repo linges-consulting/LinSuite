@@ -22,6 +22,7 @@ from core.errors import SERVICE_UNAVAILABLE, UPLOAD_ORIGIN_REQUIRED, Forbidden
 from core.logging import configure_logging
 from core.partitions import ensure_on_boot
 from core.redis import get_redis
+from customers.access_report import router as access_report_router
 from customers.routes import router as customers_router
 from scheduling.appointments import router as appointments_router
 from scheduling.closures import router as closures_router
@@ -199,6 +200,8 @@ api.include_router(availability_router)
 # is for. `/staff` is the roster every scheduler reads; `/admin/staff` above is the accounts.
 api.include_router(appointments_router)
 api.include_router(customers_router)
+# Who opened a client's record: administration, not the chart, so under `/admin` and unlogged.
+api.include_router(access_report_router)
 api.include_router(roster_router)
 # The calendar's one read: roster, shifts, absences, closures and bookings together.
 api.include_router(schedule_router)

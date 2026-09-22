@@ -46,7 +46,7 @@ class Capability:
     requires_admin_mode: bool = False
 
 
-# Only capabilities that gate something already built or imminent in M1. A capability with no
+# Only capabilities that gate something already built or imminent. A capability with no
 # route behind it is a promise the server does not keep.
 CAPABILITIES: tuple[Capability, ...] = (
     Capability(
@@ -72,6 +72,14 @@ CAPABILITIES: tuple[Capability, ...] = (
         "catalog.manage",
         "Add and change services, products, prices and the resources they need.",
         "Administration",
+        requires_admin_mode=True,
+    ),
+    Capability(
+        "audit.view",
+        "See who has accessed a client's record.",
+        "Administration",
+        # Who looked at whom is itself sensitive: the report names a client and everybody
+        # who opened their chart, so it sits behind the same short window as the settings.
         requires_admin_mode=True,
     ),
     Capability("schedule.view", "See the appointment calendar.", "Schedule"),
