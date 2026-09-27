@@ -60,6 +60,10 @@ ORIGIN_REQUIRED = "origin_required"
 # (tech-stack §14). The availability cache is the one caller that degrades instead — a miss
 # there is a slower answer, not a weaker one.
 SERVICE_UNAVAILABLE = "service_unavailable"
+# The caller holds the capability, so this isn't a permission gap an administrator can close —
+# they just aren't this appointment's practitioner or this note's author. `capability_required`
+# would send them to ask for a grant that doesn't exist and can't fix it.
+NOT_NOTE_AUTHOR = "not_note_author"
 
 
 class Forbidden(HTTPException):

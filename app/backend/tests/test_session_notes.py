@@ -89,9 +89,53 @@ async def test_practitioner_authors_and_opens_an_appointment_note(client):
     assert opened.status_code == 200, opened.text
     assert opened.json()["answers"] == payload["answers"]
     for actual, expected in zip(opened.json()["annotations"], payload["annotations"], strict=True):
-        assert {k: actual[k] for k in expected} == expected
+        assert {k: actual[k] for k in expected if k != "timestamp"} == {
+            k: expected[k] for k in expected if k != "timestamp"
+        }
+        # The server owns annotation timestamps: a client-supplied stamp (here, a
+        # fixed date in the payload fixture) is never trusted verbatim.
+        assert actual["timestamp"] != expected["timestamp"]
+        assert near_now(actual["timestamp"])
     assert opened.json()["template"]["name"] == "SOAP"
     assert opened.headers["cache-control"] == "no-store"
+
+
+async def test_editing_a_note_keeps_existing_annotation_timestamps_and_stamps_new_ones(client):
+    customer, path, note = await draft(client)
+    original = (await client.get(path)).json()["annotations"]
+    kept_id = original[0]["id"]
+    kept_stamp = original[0]["timestamp"]
+    new_id = str(uuid.uuid4())
+    edited = {
+        "answers": {},
+        "annotations": [
+            {**original[0], "timestamp": "2099-01-01T00:00:00Z"},  # client tries to rewrite it
+            {
+                "id": new_id,
+                "kind": "text",
+                "diagram_id": "body_front",
+                "x": 0.5,
+                "y": 0.5,
+                "colour": "#000000",
+                "text": "New note",
+                "timestamp": "2099-01-01T00:00:00Z",
+            },
+        ],
+    }
+    saved = await client.put(path, json={"revision": 1, **edited})
+    assert saved.status_code == 200, saved.text
+    reopened = (await client.get(path)).json()["annotations"]
+    by_id = {a["id"]: a for a in reopened}
+    assert by_id[kept_id]["timestamp"] == kept_stamp
+    assert by_id[new_id]["timestamp"] != "2099-01-01T00:00:00Z"
+    assert near_now(by_id[new_id]["timestamp"])
+
+
+def near_now(iso_timestamp: str) -> bool:
+    from datetime import UTC, datetime
+
+    stamp = datetime.fromisoformat(iso_timestamp.replace("Z", "+00:00"))
+    return abs((datetime.now(UTC) - stamp).total_seconds()) < 30
 
 
 async def draft(client, *, content=None):
@@ -190,6 +234,39 @@ async def test_note_opens_are_logged_and_entries_extend_the_retention_hold(clien
     ) >= date.today() + timedelta(days=3650)
 
 
+async def test_a_minor_clients_note_holds_on_the_dob_branch_not_last_entry(client):
+    """Task 8's dob + 28y branch, not just `>= today + 10y`: only binding for a young client,
+    where it outlasts last-entry + 10y."""
+    from datetime import UTC, date, datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from customers import retention
+    from tests.test_retention_api import set_dob, switch
+
+    customer, appointment, template = await appointment_and_template(client)
+    dob = date.today() - timedelta(days=5 * 365)
+    await set_dob(client, customer, dob)
+    await switch(client, "regulated_health")
+    zone = (await client.get("/api/admin/business")).json()["timezone"]
+    path = f"/api/customers/{customer}/session-notes"
+    created = await client.post(
+        path,
+        json={
+            "appointment_id": appointment,
+            "template_id": template,
+            "template": SOAP,
+            **contents(),
+        },
+    )
+    assert created.status_code == 201, created.text
+    expected = retention.expiry("regulated_health", dob, datetime.now(UTC), zone)
+    profile = (await client.get(f"/api/customers/{customer}")).json()
+    assert (
+        date.fromisoformat(profile["customer"]["retention"]["expires_on"])
+        == expected.astimezone(ZoneInfo(zone)).date()
+    )
+
+
 async def test_unheld_notes_are_removed_before_their_key_is_shredded(client):
     from core.db import get_purge_engine
     from customers.tasks import _shred
@@ -239,7 +316,9 @@ async def test_only_the_appointment_practitioner_can_author_or_change_a_note(cli
     ):
         response = await client.request(method, url, json=body)
         assert response.status_code == 403, response.text
-        assert response.json()["code"] == "capability_required"
+        # Not `capability_required`: this staff member holds `notes.write`, they just aren't
+        # this appointment's practitioner or this note's author.
+        assert response.json()["code"] == "not_note_author"
     assert (await client.get(f"/api/customers/{customer}/session-note-appointments")).json() == []
     assert (await client.post(TEMPLATES, json=SOAP)).status_code == 403
 
@@ -329,7 +408,10 @@ async def test_erasure_keeps_held_notes_and_refuses_new_entries(client):
         ),
     ):
         response = await client.request(method, url, json=body)
-        assert response.status_code == 409, response.text
+        # Matches the forms module's own suppressed-client convention (#44/#47), not the
+        # generic write-conflict 409.
+        assert response.status_code == 422, response.text
+        assert response.json()["code"] == "customer_suppressed"
 
 
 async def test_changed_template_wording_cannot_receive_answers_to_the_old_wording(client):

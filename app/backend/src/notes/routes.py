@@ -7,6 +7,7 @@ from typing import Annotated
 
 from cryptography.exceptions import InvalidTag
 from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
 from auth.capabilities import Requires
@@ -15,7 +16,7 @@ from core import crypto
 from core.access_log import LogAccess
 from core.audit import record_event
 from core.db import SessionDep
-from core.errors import CAPABILITY_REQUIRED, DocumentIntegrityError, Forbidden
+from core.errors import NOT_NOTE_AUTHOR, DocumentIntegrityError, Forbidden
 from customers import keys, retention
 from customers.models import Customer
 from notes.models import NoteTemplate, SessionNote
@@ -90,13 +91,20 @@ async def create_template(body: TemplateIn, user: Manager, db: SessionDep) -> Te
     return TemplateOut(id=row.id, **body.model_dump())
 
 
-async def entry(db: SessionDep, customer_id: uuid.UUID, now: datetime) -> None:
+async def entry(db: SessionDep, customer_id: uuid.UUID, now: datetime) -> JSONResponse | None:
+    """Stages the chart entry, or hands back the suppressed-client response every caller
+    must return as-is. Matches the forms module's own customer_suppressed shape (#44/#47) —
+    a 422 with a matchable `code`, not a bare 409."""
     try:
         await retention.record_clinical_entry(db, customer_id, now)
     except LookupError:
         raise HTTPException(404, "No such client.") from None
     except retention.CustomerSuppressed:
-        raise HTTPException(409, "This client's record is suppressed.") from None
+        return JSONResponse(
+            {"code": "customer_suppressed", "detail": "This client's record is suppressed."},
+            status_code=422,
+        )
+    return None
 
 
 def associated(note: SessionNote) -> bytes:
@@ -107,6 +115,26 @@ def seal_content(body: ContentIn, note: SessionNote, key: bytes) -> bytes:
     return crypto.seal(
         body.model_dump_json(include={"answers", "annotations"}).encode(), key, associated(note)
     )
+
+
+def stamp_annotations(body: ContentIn, existing: dict[uuid.UUID, datetime], now: datetime) -> None:
+    """The server owns annotation timestamps, never the client: an existing annotation
+    keeps the stamp it was first saved with, and a new one is stamped with `now`.
+    """
+    for annotation in body.annotations:
+        annotation.timestamp = existing.get(annotation.id, now)
+
+
+async def previous_annotation_timestamps(
+    note: SessionNote, key: bytes
+) -> dict[uuid.UUID, datetime]:
+    try:
+        previous = json.loads(crypto.open_sealed(note.content_sealed, key, associated(note)))
+    except (InvalidTag, ValueError):
+        raise DocumentIntegrityError(str(note.id)) from None
+    return {
+        uuid.UUID(a["id"]): datetime.fromisoformat(a["timestamp"]) for a in previous["annotations"]
+    }
 
 
 def check_content(body, snapshot: dict) -> None:
@@ -176,7 +204,8 @@ async def create_note(
 ) -> NoteSummary:
     now = datetime.now(UTC)
     # Customer lock serializes with erasure, and precedes appointment/note locks on every write.
-    await entry(db, customer_id, now)
+    if (suppressed := await entry(db, customer_id, now)) is not None:
+        return suppressed
     appointment = await db.scalar(
         select(Appointment)
         .where(Appointment.id == body.appointment_id)
@@ -187,7 +216,7 @@ async def create_note(
     staff = await db.get(Staff, appointment.staff_id)
     if staff.user_id != user.id:
         raise Forbidden(
-            CAPABILITY_REQUIRED, "Only the appointment's practitioner can author this note."
+            NOT_NOTE_AUTHOR, "Only the appointment's practitioner can author this note."
         )
     if appointment.status not in ("confirmed", "completed"):
         raise HTTPException(409, "A cancelled or missed appointment cannot start a session note.")
@@ -204,6 +233,7 @@ async def create_note(
             "Start a new note with the current wording.",
         )
     check_content(body, snapshot)
+    stamp_annotations(body, existing={}, now=now)
     note = SessionNote(
         id=uuid.uuid4(),
         customer_id=customer_id,
@@ -231,7 +261,7 @@ async def create_note(
 
 @router.get(
     "/customers/{customer_id}/session-notes/{note_id}",
-    dependencies=[Depends(Requires("notes.view")), Depends(LogAccess("session_note", "note_id"))],
+    dependencies=[Depends(LogAccess("session_note", "note_id"))],
 )
 async def get_note(
     customer_id: uuid.UUID, note_id: uuid.UUID, user: Reader, db: SessionDep, response: Response
@@ -258,7 +288,7 @@ async def editable(
         raise HTTPException(404, "No such session note.")
     author = await db.get(Staff, note.author_staff_id)
     if author.user_id != user.id:
-        raise Forbidden(CAPABILITY_REQUIRED, "Only this note's author can change it.")
+        raise Forbidden(NOT_NOTE_AUTHOR, "Only this note's author can change it.")
     if note.locked_at is not None:
         raise HTTPException(409, "This note is locked and cannot be changed.")
     if note.revision != revision:
@@ -271,12 +301,14 @@ async def update_note(
     customer_id: uuid.UUID, note_id: uuid.UUID, body: UpdateIn, user: Writer, db: SessionDep
 ) -> NoteSummary:
     now = datetime.now(UTC)
-    await entry(db, customer_id, now)
+    if (suppressed := await entry(db, customer_id, now)) is not None:
+        return suppressed
     note = await editable(db, customer_id, note_id, user, body.revision)
     check_content(body, note.template_snapshot)
     key = await keys.existing_key(db, customer_id)
     if key is None:
         raise HTTPException(404, "No such session note.")
+    stamp_annotations(body, existing=await previous_annotation_timestamps(note, key), now=now)
     note.content_sealed = seal_content(body, note, key)
     note.revision += 1
     note.updated_at = now
@@ -297,7 +329,8 @@ async def lock_note(
     customer_id: uuid.UUID, note_id: uuid.UUID, body: LockIn, user: Writer, db: SessionDep
 ) -> NoteSummary:
     now = datetime.now(UTC)
-    await entry(db, customer_id, now)
+    if (suppressed := await entry(db, customer_id, now)) is not None:
+        return suppressed
     note = await editable(db, customer_id, note_id, user, body.revision)
     key = await keys.existing_key(db, customer_id)
     if key is None:

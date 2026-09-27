@@ -50,6 +50,14 @@ export function createQueryClient(): QueryClient {
           description: 'Ask an administrator if you need this.',
         })
         return
+      case 'not_note_author':
+        // Distinct from `capability_required`: this staff member has notes.write, they just
+        // aren't the note's author or the appointment's practitioner — no administrator grant
+        // fixes that, so the generic "ask an administrator" copy would mislead.
+        toast.error("This isn't your session note", {
+          description: "Only the appointment's practitioner can write or lock it.",
+        })
+        return
       case 'password_change_required':
       case 'mfa_verification_required':
       case 'mfa_enrolment_required':
