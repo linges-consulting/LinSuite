@@ -14,6 +14,7 @@ would call them for real, don't exist yet); `tests.fake_notifications.RecordingP
 send raise instead of recording.
 """
 
+from notifications import tasks as notification_tasks
 from notifications.providers import PermanentDeliveryError
 from notifications.tasks import send_email, send_sms
 from tests.test_appointments import (  # noqa: F401 — the autouse fixture comes along
@@ -22,6 +23,8 @@ from tests.test_appointments import (  # noqa: F401 — the autouse fixture come
     claimed_instance,
     make_customer,
 )
+from tests.test_form_links import make_email_ready
+from tests.test_notification_triggers import make_sms_ready
 
 PROFILE = CUSTOMERS  # GET /api/customers/{id}
 
@@ -103,6 +106,55 @@ async def test_a_successful_send_records_no_failure(client, fail_next_send, sent
     assert len(sent_emails) == 1
     resp = await client.get(f"{PROFILE}/{customer_id}")
     assert resp.json()["notification_failures"] == []
+
+
+async def test_send_email_looks_up_the_business_row_and_passes_it_to_get_provider(
+    client, sent_emails, monkeypatch
+):
+    """Task 7, #11: before this fix, a queued send always called `get_provider()` with no
+    business row (the settings panel's synchronous test-send action was the only caller that
+    ever reached a tenant's real Resend/SMTP sender) — a real deployment's actual notifications
+    would silently never send for real. Spying on `get_provider` (still delegating to it, so
+    the send itself still goes through `tests/fake_notifications.py`'s recording override, not
+    a real network call) proves the task now fetches and passes the one `businesses` row."""
+    await make_email_ready()
+    seen: list[object] = []
+    real_get_provider = notification_tasks.get_provider
+
+    def spy(business=None):
+        seen.append(business)
+        return real_get_provider(business)
+
+    monkeypatch.setattr(notification_tasks, "get_provider", spy)
+
+    send_email.delay("client@example.com", "subject", "body")
+
+    assert len(seen) == 1
+    assert seen[0] is not None
+    assert seen[0].email_sender == "resend"
+    assert len(sent_emails) == 1
+
+
+async def test_send_sms_looks_up_the_business_row_and_passes_it_to_get_sms_provider(
+    client, sent_sms, monkeypatch
+):
+    """`send_sms`'s counterpart to the `send_email` test above."""
+    await make_sms_ready()
+    seen: list[object] = []
+    real_get_sms_provider = notification_tasks.get_sms_provider
+
+    def spy(business=None):
+        seen.append(business)
+        return real_get_sms_provider(business)
+
+    monkeypatch.setattr(notification_tasks, "get_sms_provider", spy)
+
+    send_sms.delay("+15559876543", "Reminder")
+
+    assert len(seen) == 1
+    assert seen[0] is not None
+    assert seen[0].sms_enabled is True
+    assert len(sent_sms) == 1
 
 
 async def test_a_transient_failure_is_not_recorded_as_permanent(client, fail_next_send):

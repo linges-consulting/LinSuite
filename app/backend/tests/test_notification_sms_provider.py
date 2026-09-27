@@ -176,3 +176,17 @@ def test_get_sms_provider_override_wins_even_over_a_configured_business(database
     )
 
     assert isinstance(get_sms_provider(business), RecordingProvider)
+
+
+def test_get_sms_provider_degrades_to_console_when_not_sms_ready(database, monkeypatch):
+    """Task 7, #11: `notifications/tasks.py::send_sms` now calls this with a business row it
+    fetched itself, and a queued send can run after `sms_enabled`/the Twilio credentials
+    changed — the same "fall back to console rather than hand Twilio empty credentials" rule
+    `get_provider` already applies to a missing/unconfigured business."""
+    from core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "notification_provider", "unused-in-production")
+    not_ready = _business(sms_enabled=False)
+
+    assert isinstance(get_sms_provider(not_ready), ConsoleProvider)
+    assert isinstance(get_sms_provider(None), ConsoleProvider)

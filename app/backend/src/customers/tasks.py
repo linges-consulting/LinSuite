@@ -27,19 +27,15 @@ running any of this twice — after a crash, or after a restore brought wrapped 
 a backup (the runbook's action: run `purge_expired`) — does the remaining work and no more.
 """
 
-import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from core.celery_app import celery_app
-from core.db import get_task_engines
+from core.db import get_task_engines, run_task
 from customers.models import ALWAYS_ERASED, ERASED_NAMES
 
 log = logging.getLogger(__name__)
@@ -86,17 +82,6 @@ def _postgres(error: DBAPIError) -> tuple[str | None, str, str | None]:
         str(cause or ""),
         getattr(cause, "constraint_name", None),
     )
-
-
-def _run(work: Callable[..., Awaitable[Any]], *args: object) -> Any:
-    """`asyncio.run`, from a worker (no loop running) or from an eager call made inside a
-    request handler in the test suite (a loop is running there, so use a thread's own)."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(work(*args))
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, work(*args)).result()
 
 
 async def _shred(purge: AsyncEngine, customer_id: str, request_id: str | None) -> bool:
@@ -246,11 +231,11 @@ async def _purge_expired() -> dict[str, int]:
 def finish_erasure(request_id: str) -> bool:
     """Enqueued by `POST /customers/{id}/erasure` after its commit. A held client is left
     for `purge_expired`; a lost enqueue is picked up by it too."""
-    return _run(_finish_one, request_id)
+    return run_task(_finish_one, request_id)
 
 
 @celery_app.task(name="customers.tasks.purge_expired")
 def purge_expired() -> dict[str, int]:
     """Nightly from beat (`core/celery_app.py`). Safe to run by hand at any time — and it is
     the runbook's step after any database restore."""
-    return _run(_purge_expired)
+    return run_task(_purge_expired)

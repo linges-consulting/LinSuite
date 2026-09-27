@@ -30,12 +30,12 @@ email is tenant-owned config now (Resend/SMTP credentials live on `businesses`),
 deployment-wide env var. `get_provider()` takes the `Business` row for this reason; the
 existing callers that don't pass one (password reset, MFA, ...) are unaffected — with no
 business row, the fallback is still `console`, so an unconfigured deployment can still complete
-a password reset. `notifications/tasks.py::send_email`/`send_sms` still don't fetch and pass
-the business row through Celery's JSON-only arguments — that wiring is still owed (Task 2's
-original note; still true after this fix) and is why a *queued* send is still `console` today
-regardless of a configured sender, even though `get_provider(business)` called directly (Task
-6's settings-panel test-send action) now correctly reaches Resend/SMTP. Left for Task 7's full
-regression pass to close, since it touches the trigger/task wiring, not this module.
+a password reset. **Task 7 closes the queued-send gap this docstring used to note here**:
+`notifications/tasks.py::send_email`/`send_sms` now fetch the one `Business` row themselves
+(a Celery argument still has to be JSON, so the row is looked up inside the task body, not
+passed through `.delay(...)`) and pass it to `get_provider(business)`/`get_sms_provider(business)`
+— a queued send now reaches a tenant's configured Resend/SMTP/Twilio sender exactly like the
+settings panel's synchronous test-send action already did.
 
 `TwilioProvider` (Task 3, #11) is SMS's real sender: Twilio's REST API directly over `httpx`
 (Basic Auth with the account SID/auth token), the same no-SDK shape as `ResendProvider`.
@@ -332,15 +332,22 @@ def get_provider(business: "Business | None" = None) -> NotificationProvider:
     return _tenant_provider(business)
 
 
-def get_sms_provider(business: "Business") -> NotificationProvider:
+def get_sms_provider(business: "Business | None" = None) -> NotificationProvider:
     """`get_provider`'s counterpart for SMS (Task 6, #11's settings-panel test-send action —
-    the first real caller that passes a business through to an SMS send). There is no
-    `business.sms_sender` to switch on the way `email_sender` does: SMS has exactly one real
-    adapter, so `sms_enabled` plus the three `twilio_*` columns are the whole configuration.
-    `NOTIFICATION_PROVIDER=recording` still wins unconditionally, same as `get_provider` — the
-    suite must never dial Twilio for real either."""
+    the first real caller that passes a business through to an SMS send; Task 7 makes
+    `notifications/tasks.py::send_sms` the second, with no `sms_ready` gate of its own to
+    re-check). There is no `business.sms_sender` to switch on the way `email_sender` does:
+    SMS has exactly one real adapter, so `sms_enabled` plus the three `twilio_*` columns are
+    the whole configuration. `NOTIFICATION_PROVIDER=recording` still wins unconditionally,
+    same as `get_provider` — the suite must never dial Twilio for real either. `business` is
+    optional and, like `get_provider`, degrades to `console` when it is missing or not
+    `sms_ready` — `dispatch()` already checked readiness before enqueueing, but a queued send
+    can run after the config changed, and `console` is the same safe fallback `get_provider`
+    uses rather than handing Twilio empty credentials."""
     if get_settings().notification_provider in _OVERRIDE_PROVIDERS:
         return PROVIDERS["recording"]()
+    if business is None or not sms_ready(business):
+        return PROVIDERS["console"]()
     return PROVIDERS["twilio"](
         account_sid=business.twilio_account_sid,
         auth_token=decrypt_credential(business.twilio_auth_token_encrypted or ""),
