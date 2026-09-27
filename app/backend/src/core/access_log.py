@@ -58,6 +58,7 @@ PHI_FIELDS: frozenset[str] = frozenset(
         "held_reason",
         # A completed form's answers — signature included (#47).
         "answers",
+        "annotations",
     }
 )
 

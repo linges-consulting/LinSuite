@@ -32,6 +32,7 @@ recorded â€” one `form.link_opened` audit event with the link id and no actor â€
 opened, and when" is answerable without writing PHI anywhere.
 """
 
+import asyncio
 import hmac
 import logging
 import uuid
@@ -57,7 +58,6 @@ from forms.links import PUBLIC_LOOKUPS_PER_MINUTE, digest
 from forms.models import FormLink, FormSubmission, FormTemplate, FormTemplateVersion
 from forms.schema import FormSchema, kept_answers
 from forms.submissions import answer_errors, seal_answers
-from forms.tasks import render_submission
 from settings.routes import branding_document
 
 log = logging.getLogger(__name__)
@@ -322,7 +322,9 @@ async def submit_form(payload: SubmitIn, request: Request, db: SessionDep):
         return _coded(409, TRY_AGAIN, "That did not go through. Please try again.")
 
     try:
-        render_submission.delay(str(submission_id))
+        from forms.tasks import render_submission
+
+        await asyncio.to_thread(render_submission.delay, str(submission_id))
     except Exception:
         # Committed already; the PDF can be rendered later (Task 5).
         log.exception("render_submission could not be enqueued for %s", submission_id)

@@ -33,6 +33,7 @@ from typing import Any
 
 from cryptography.exceptions import InvalidTag
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse, Response
 from PIL import Image
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -42,7 +43,9 @@ from auth.capabilities import Requires
 from core import crypto
 from core.access_log import LogAccess
 from core.db import SessionDep
+from core.documents import fetch_document
 from core.errors import DocumentIntegrityError
+from core.models import Document
 from customers.keys import existing_key
 from forms.models import FormSubmission, FormTemplateVersion
 from forms.schema import FormSchema, validate_answers
@@ -55,6 +58,15 @@ MAX_SIGNED_NAME = 200
 # "Something was drawn": dark pixels (luminance < 128 on white) that span at least this
 # share of the pad each way — a tap, a dot or a small blob is not a signature — and cover no
 # more than `MAX_INK_RATIO` of it, so a filled or all-black image is not one either.
+#
+# `signature-pad.tsx` mirrors these four numbers (fix round 1, #51). A runtime shared-source
+# file was tried and reverted: the frontend's dev/prod containers only bind-mount
+# `app/frontend` (`infra/compose.yaml`), so a cross-directory import that works when this
+# suite runs against the full checkout on the host 404s inside the real container. Instead
+# `app/shared/signature-ink-constants.json` is the canonical reference value, and
+# `tests/test_signature_ink_constants.py` parses both source files and fails if either drifts
+# from it — the same "shared JSON fixture, not shared runtime code" shape
+# `form-schema-cases.json` already uses for the schema twins.
 MIN_INK_PIXELS = 20
 MIN_INK_WIDTH = 0.05  # 30 px of the 600 px pad
 MIN_INK_HEIGHT = 0.03  # 6 px of the 200 px pad
@@ -161,6 +173,7 @@ class SubmissionSummary(BaseModel):
     version: int
     method: str
     submitted_at: datetime
+    pdf_ready: bool = False
 
 
 class Submissions(BaseModel):
@@ -202,8 +215,58 @@ def _summary(submission: FormSubmission, version: FormTemplateVersion) -> dict[s
 @router.get("/{customer_id}/forms", dependencies=Viewer)
 async def list_submissions(customer_id: uuid.UUID, db: SessionDep) -> Submissions:
     """Metadata only, newest first: no answers, so no access row (pre-flight C5)."""
-    rows = await db.execute(_query(customer_id).order_by(FormSubmission.submitted_at.desc()))
-    return Submissions(submissions=[SubmissionSummary(**_summary(s, v)) for s, v in rows])
+    rows = await db.execute(
+        _query(customer_id)
+        .add_columns(Document.id)
+        .outerjoin(
+            Document,
+            (Document.source_id == FormSubmission.id)
+            & (Document.kind == "form_submission")
+            & (Document.customer_id == customer_id),
+        )
+        .order_by(FormSubmission.submitted_at.desc())
+    )
+    return Submissions(
+        submissions=[
+            SubmissionSummary(**_summary(s, v), pdf_ready=document_id is not None)
+            for s, v, document_id in rows
+        ]
+    )
+
+
+@router.get(
+    "/{customer_id}/forms/{submission_id}/pdf",
+    dependencies=[*Viewer, Depends(LogAccess("form_document", resource_param="submission_id"))],
+)
+async def view_pdf(customer_id: uuid.UUID, submission_id: uuid.UUID, db: SessionDep) -> Response:
+    submission = await db.scalar(
+        select(FormSubmission.id).where(
+            FormSubmission.id == submission_id, FormSubmission.customer_id == customer_id
+        )
+    )
+    key = await existing_key(db, customer_id)
+    if submission is None or key is None:
+        raise HTTPException(status_code=404, detail="No such form.")
+    document_id = await db.scalar(
+        select(Document.id).where(
+            Document.source_id == submission_id,
+            Document.kind == "form_submission",
+            Document.customer_id == customer_id,
+        )
+    )
+    if document_id is None:
+        return JSONResponse(
+            {"status": "rendering"}, status_code=202, headers={"Cache-Control": "no-store"}
+        )
+    content, _ = await fetch_document(db, key=key, customer_id=customer_id, document_id=document_id)
+    return Response(
+        content,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": "inline; filename=form.pdf",
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 @router.get(

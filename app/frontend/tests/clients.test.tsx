@@ -556,3 +556,18 @@ test('in Staff Mode the card asks for Admin Mode instead of requesting a refusal
   expect(screen.getByText(/Switch to Admin Mode/)).toBeInTheDocument()
   expect(reportCalls(calls)).toHaveLength(0)
 })
+
+test('form access history identifies opened PDFs and answers in clinic language', async () => {
+  auditor()
+  const passthrough = vi.mocked(fetch).getMockImplementation()!
+  vi.mocked(fetch).mockImplementation(async (url, init) => String(url).includes('/access-log')
+    ? Response.json({ ...ACCESS_LOG, entries: [
+      { ...ACCESS_LOG.entries[0], resource_type: 'form_document' },
+      { ...ACCESS_LOG.entries[1], resource_type: 'form_submission' },
+    ] })
+    : passthrough(url, init))
+  renderApp('/clients/c1')
+  const table = await screen.findByRole('table', { name: 'Access history' })
+  expect(within(table).getByText('Opened form PDF')).toBeInTheDocument()
+  expect(within(table).getByText('Opened form answers')).toBeInTheDocument()
+})

@@ -64,3 +64,7 @@ export const COMPLIANCE = ['compliance'] as const
 /** The "Forms needed" dashboard (`forms.issue`): clients with an upcoming appointment and a
  *  non-compliant essential form. */
 export const FORMS_NEEDED = ['forms-needed'] as const
+export const NOTE_TEMPLATES = ['note-templates'] as const
+export const SESSION_NOTES = ['session-notes'] as const
+export const SESSION_NOTE = ['session-note'] as const
+export const NOTE_APPOINTMENTS = ['note-appointments'] as const

@@ -111,6 +111,16 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability("forms.issue", "Send forms to clients and take scans.", "Customers"),
     # Reading a completed form is a PHI access (logged per open); the list is metadata (#47).
     Capability("forms.view", "Open clients' completed forms.", "Customers"),
+    Capability("notes.view", "Open clients' session notes and visual markup.", "Customers"),
+    Capability(
+        "notes.write", "Author, edit and lock your own appointment session notes.", "Customers"
+    ),
+    Capability(
+        "notes.manage",
+        "Configure session-note templates.",
+        "Administration",
+        requires_admin_mode=True,
+    ),
 )
 
 BY_KEY: dict[str, Capability] = {c.key: c for c in CAPABILITIES}

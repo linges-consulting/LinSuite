@@ -616,9 +616,23 @@ REWRITES = [
 ]
 
 
-async def submitted(client, **kwargs) -> tuple[str, str]:
-    customer_id, token, version_id, _ = await sent_form(client, **kwargs)
+async def submitted(client, *, method="link", **kwargs) -> tuple[str, str]:
+    customer_id, token, version_id, template = await sent_form(client, **kwargs)
     submission_id = str(uuid.uuid4())
+    if method == "scan":
+        from tests.test_form_scans import page
+
+        resp = await client.post(
+            f"/api/customers/{customer_id}/forms/scans",
+            json={
+                "submission_id": submission_id,
+                "template_id": template["id"],
+                "version_number": 1,
+                "pages": [page()],
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        return customer_id, submission_id
     resp = await submit(client, token, version_id, answers(), submission_id)
     assert resp.status_code == 200, resp.text
     return customer_id, submission_id
@@ -633,9 +647,12 @@ async def set_hold(customer_id: str, expires: str | None) -> None:
     )
 
 
+@pytest.mark.parametrize("method", ["link", "scan"])
 @pytest.mark.parametrize("statement", REWRITES)
-async def test_the_app_role_holds_no_grant_to_rewrite_or_delete_a_submission(client, statement):
-    customer_id, submission_id = await submitted(client)
+async def test_the_app_role_holds_no_grant_to_rewrite_or_delete_a_submission(
+    client, statement, method
+):
+    customer_id, submission_id = await submitted(client, method=method)
 
     async with session_scope() as db:
         with pytest.raises(DBAPIError) as refused:
@@ -646,9 +663,12 @@ async def test_the_app_role_holds_no_grant_to_rewrite_or_delete_a_submission(cli
     assert len(await rows(customer_id)) == 1
 
 
+@pytest.mark.parametrize("method", ["link", "scan"])
 @pytest.mark.parametrize("statement", REWRITES)
-async def test_the_guard_refuses_the_app_role_even_with_the_grant_restored(client, statement):
-    customer_id, submission_id = await submitted(client)
+async def test_the_guard_refuses_the_app_role_even_with_the_grant_restored(
+    client, statement, method
+):
+    customer_id, submission_id = await submitted(client, method=method)
 
     owner = create_async_engine(get_settings().database_url_migrate)
     try:
@@ -740,7 +760,8 @@ async def test_shredding_a_held_client_deletes_nothing(client):
     assert await tasks._shred(get_purge_engine(), customer_id, None) is False
 
     assert len(await rows(customer_id)) == 1
-    assert await document_rows(customer_id) == 1
+    # The eagerly generated archive and the additional fixture document are both held.
+    assert await document_rows(customer_id) == 2
     assert await key_rows(customer_id) == 1
     assert await key_destroyed_events(customer_id) == 0
 

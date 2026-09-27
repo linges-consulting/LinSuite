@@ -1,5 +1,41 @@
 import type { Answers, FieldType, FormSchema } from '@/lib/forms'
 
+export type DiagramId = 'body_front' | 'body_back' | 'layout'
+export type NoteTemplateDraft = {
+  name: string
+  fields: { key: string; label: string; required: boolean }[]
+  diagram_ids: DiagramId[]
+  active: boolean
+}
+export type NoteTemplate = NoteTemplateDraft & { id: string }
+export type NoteAnnotation = {
+  id: string; kind: 'pin' | 'zone' | 'text'; diagram_id: DiagramId
+  x: number; y: number; colour: string; timestamp: string; text: string
+  width?: number | null; height?: number | null
+}
+export type NoteContent = { answers: Record<string, string>; annotations: NoteAnnotation[] }
+export type SessionNote = {
+  id: string; template_id: string; appointment_id: string; author_staff_id: string; author_name: string
+  template: NoteTemplateDraft; revision: number; created_at: string; updated_at: string
+  locked_at: string | null; can_edit: boolean
+}
+export type NoteAppointment = { id: string; starts_at: string; service_name: string }
+
+async function noteRequest<T>(url: string, method = 'GET', body?: unknown): Promise<T> {
+  const res = method === 'GET' ? await fetch(url, { cache: 'no-store' }) : await send(method, url, body)
+  if (!res.ok) throw await failure(res, 'Could not update the session record')
+  return res.json()
+}
+export const fetchNoteTemplates = (admin = false) => noteRequest<NoteTemplate[]>(admin ? '/api/admin/note-templates' : '/api/note-templates')
+export const saveNoteTemplate = (body: NoteTemplateDraft, id?: string) => noteRequest<NoteTemplate>(`/api/note-templates${id ? `/${id}` : ''}`, id ? 'PUT' : 'POST', body)
+const notePath = (customerId: string, id?: string) => `/api/customers/${customerId}/session-notes${id ? `/${id}` : ''}`
+export const fetchSessionNotes = (customerId: string) => noteRequest<SessionNote[]>(notePath(customerId))
+export const fetchSessionNote = (customerId: string, id: string) => noteRequest<SessionNote & NoteContent>(notePath(customerId, id))
+export const fetchNoteAppointments = (customerId: string) => noteRequest<NoteAppointment[]>(`/api/customers/${customerId}/session-note-appointments`)
+export const createSessionNote = (customerId: string, body: NoteContent & { appointment_id: string; template_id: string; template: NoteTemplateDraft }) => noteRequest<SessionNote>(notePath(customerId), 'POST', body)
+export const updateSessionNote = (customerId: string, id: string, body: NoteContent & { revision: number }) => noteRequest<SessionNote>(notePath(customerId, id), 'PUT', body)
+export const lockSessionNote = (customerId: string, id: string, revision: number) => noteRequest<SessionNote>(`${notePath(customerId, id)}/lock`, 'POST', { revision })
+
 /** FastAPI's 422 says which field it is unhappy about in `loc`; put the message under it.
  *  Shared by every edit form that shows a server error inline rather than as a toast.
  *
@@ -1238,6 +1274,32 @@ export type FormSubmissionSummary = {
   version: number
   method: 'link' | 'scan'
   submitted_at: string
+  pdf_ready: boolean
+}
+
+export async function fetchFormPdf(customerId: string, id: string): Promise<Blob> {
+  const res = await fetch(`/api/customers/${customerId}/forms/${id}/pdf`, { cache: 'no-store' })
+  if (!res.ok || res.status === 202) throw await failure(res, 'The PDF is still rendering. Try again shortly.')
+  return res.blob()
+}
+
+export async function fetchPaperVersions(templateId: string): Promise<FormVersionSummary[]> {
+  const res = await fetch(`/api/forms/templates/${templateId}/versions`)
+  if (!res.ok) throw await failure(res, 'Could not load published versions')
+  return (await res.json()).versions
+}
+
+export async function fetchBlankForm(templateId: string, version: number): Promise<string> {
+  const res = await fetch(`/api/admin/forms/${templateId}/versions/${version}/print`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not print the form')
+  return res.text()
+}
+
+export async function uploadFormScan(customerId: string, payload: {
+  submission_id: string; template_id: string; version_number: number; pages: string[]
+}): Promise<void> {
+  const res = await send('POST', `/api/customers/${customerId}/forms/scans`, payload)
+  if (!res.ok) throw await failure(res, 'Could not save the scan')
 }
 
 /** One completed form opened (`forms.view`; logged): its own version's fields, and answers. */

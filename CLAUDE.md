@@ -65,7 +65,7 @@ Constraints any implementation must honor:
 
 - **Modular monolith**, one deployable app, strict domain boundaries: `auth`, `customers`, `scheduling`, `inventory`, `forms`, `billing`, `notifications`. Decoupled enough to extract later, but shipped as one app.
 - **Single-tenant**: each business gets its own VM/server + database stack. No shared multi-tenant database — never design cross-tenant data access. On-prem is a supported target, so nothing may depend on a cloud-provider-specific service.
-- **Celery workers** for notification delivery (exponential backoff retry), PDF generation, and exports. These must not run inline in request handlers.
+- **Celery workers** for notification delivery (exponential backoff retry), rendered PDF generation, and exports. These must not run inline in request handlers. The approved M2 Task 7 exception is the bounded JPEG/PNG scan wrapper: Pillow assembles at most eight browser-downsampled pages under the 2 MiB body cap in a thread, then submission, encrypted document and retention hold commit together.
 - **JWT sessions, two policies**: Staff Mode is a fixed long-lived session token (`STAFF_SESSION_HOURS`); Admin Mode is a short (15–30 min) sliding idle window with a hard limit, held server-side against the session, requiring re-auth once it lapses. Dual-role users explicitly switch modes — never a merged permission set.
 - **RBAC is capability-scoped**, not role-name based.
 - **Secure form links**: short-lived, single-use, high-entropy (UUIDv4/HMAC-signed, 24–48h expiry).

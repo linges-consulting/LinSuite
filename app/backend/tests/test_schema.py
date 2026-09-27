@@ -42,6 +42,7 @@ APP_ROLE, PURGE_ROLE = "linsuite_app", "linsuite_purge"
 APP_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE")
 # Per-table departures from the default. Extend this, never bypass the test.
 APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
+    "session_notes": ("SELECT", "INSERT", "UPDATE"),
     "audit_events": ("SELECT", "INSERT"),
     "audit_access_log": ("SELECT", "INSERT"),
     # A key is written once and never rewritten; only the purge role destroys one (0024).
@@ -65,6 +66,8 @@ PURGE_EXCEPTIONS: dict[str, tuple[str, ...]] = {
 }
 # (table, trigger) pairs that must be attached and firing.
 TRIGGERS = (
+    ("session_notes", "session_notes_guard"),
+    ("session_notes", "session_notes_delete_guard"),
     ("appointments", "tg_appointments_staff_concurrency"),
     ("audit_events", "audit_events_no_rewrite"),
     ("audit_access_log", "audit_access_log_no_rewrite"),

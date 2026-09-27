@@ -16,6 +16,7 @@ What these pin down:
 - the 12-month window is computed in the business timezone, across a DST boundary.
 """
 
+import uuid
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
@@ -24,7 +25,7 @@ from sqlalchemy import event, text
 from sqlalchemy.engine import Engine
 
 from core.db import session_scope
-from forms.compliance import add_months, status_for, valid_until
+from forms.compliance import add_months, start_of_local_day, status_for, valid_until
 from tests.test_appointments import (  # noqa: F401 — the autouse fixture comes along
     at,
     book,
@@ -34,9 +35,9 @@ from tests.test_appointments import (  # noqa: F401 — the autouse fixture come
     me_staff_id,
     put_hours,
 )
-from tests.test_form_links import as_owner, forms_wiped, issue, token_of  # noqa: F401
+from tests.test_form_links import BASE, as_owner, forms_wiped, issue, token_of  # noqa: F401
 from tests.test_form_submissions import SIGNED, pinned_version, submit
-from tests.test_forms import as_admin, make, publish, save
+from tests.test_forms import as_admin, audit, make, publish, save
 
 COMPLIANCE = "/api/customers/{}/compliance"
 DASHBOARD = "/api/forms/compliance"
@@ -75,40 +76,54 @@ def test_valid_until_refuses_a_naive_instant():
         valid_until(datetime(2026, 9, 1), 3, TORONTO)
 
 
+def test_start_of_local_day_is_local_midnight_not_now():
+    # 02:30 UTC on 22 Sep is 22:30 the *previous* local evening in Toronto (UTC-4 in Sep) —
+    # "today" by the wall clock a receptionist reads, not by the UTC calendar date.
+    now = datetime(2026, 9, 22, 2, 30, tzinfo=UTC)
+    start = start_of_local_day(now, TORONTO)
+    assert start.astimezone(ZoneInfo(TORONTO)) == datetime(
+        2026, 9, 21, 0, 0, tzinfo=ZoneInfo(TORONTO)
+    )
+
+
+def test_start_of_local_day_refuses_a_naive_instant():
+    with pytest.raises(ValueError):
+        start_of_local_day(datetime(2026, 9, 22), TORONTO)
+
+
 def test_status_for_missing_when_there_is_no_submission():
     now = datetime(2026, 9, 22, tzinfo=UTC)
     assert (
-        status_for(now=now, zone=TORONTO, valid_for_months=None, submission=None, resign_after=None)
+        status_for(
+            now=now, zone=TORONTO, valid_for_months=None, has_submission=False, qualifying=None
+        )
         == "missing"
     )
 
 
-def test_status_for_ok_when_nothing_disqualifies_it():
+def test_status_for_ok_when_a_qualifying_submission_exists():
     now = datetime(2026, 9, 22, tzinfo=UTC)
-    submission = (1, now)
     assert (
         status_for(
-            now=now, zone=TORONTO, valid_for_months=None, submission=submission, resign_after=None
+            now=now,
+            zone=TORONTO,
+            valid_for_months=None,
+            has_submission=True,
+            qualifying=(1, now),
         )
         is None
     )
 
 
-def test_status_for_resign_required_when_a_later_version_demands_it():
+def test_status_for_resign_required_when_nothing_on_file_qualifies():
     now = datetime(2026, 9, 22, tzinfo=UTC)
-    submission = (1, now)
+    # Submissions exist (has_submission=True) but none clears the version bar — the caller
+    # (`_latest_qualifying_submissions`) already filtered those out, so `qualifying` is None.
     assert (
         status_for(
-            now=now, zone=TORONTO, valid_for_months=None, submission=submission, resign_after=2
+            now=now, zone=TORONTO, valid_for_months=None, has_submission=True, qualifying=None
         )
         == "resign_required"
-    )
-    # Signed the version that demands it: compliant again.
-    assert (
-        status_for(
-            now=now, zone=TORONTO, valid_for_months=None, submission=(2, now), resign_after=2
-        )
-        is None
     )
 
 
@@ -118,13 +133,17 @@ def test_status_for_expired_after_the_window_lapses():
     recent = datetime(2026, 9, 1, tzinfo=UTC)
     assert (
         status_for(
-            now=now, zone=TORONTO, valid_for_months=12, submission=(1, old), resign_after=None
+            now=now, zone=TORONTO, valid_for_months=12, has_submission=True, qualifying=(1, old)
         )
         == "expired"
     )
     assert (
         status_for(
-            now=now, zone=TORONTO, valid_for_months=12, submission=(1, recent), resign_after=None
+            now=now,
+            zone=TORONTO,
+            valid_for_months=12,
+            has_submission=True,
+            qualifying=(1, recent),
         )
         is None
     )
@@ -209,6 +228,120 @@ async def test_a_lapsed_validity_window_is_expired(client):
         c=customer_id,
     )
     assert await statuses(client, customer_id) == {template["id"]: "expired"}
+
+
+async def _submission_id(customer_id: str, template_id: str, *, number: int) -> str:
+    async with session_scope() as db:
+        row = await db.execute(
+            text(
+                "SELECT s.id FROM form_submissions s "
+                "JOIN form_template_versions v ON v.id = s.version_id "
+                "WHERE s.customer_id = :c AND s.template_id = :t AND v.number = :n"
+            ),
+            {"c": customer_id, "t": template_id, "n": number},
+        )
+        return str(row.scalar_one())
+
+
+async def test_an_older_submission_filed_later_does_not_undo_a_qualifying_newer_one(client):
+    """Fix round 1's probe. A client can end up with a qualifying v2 signature on file *and*
+    a v1 submission whose row is more recent than the v2 one — (b) below closes the public
+    path (publishing with re-signature revokes the older open link), but the read model has
+    to be correct regardless of how that table state came to exist, so this drives it
+    directly rather than depending on (b) staying the only way in."""
+    await as_admin(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me, [(0, 540, 1080)])
+    service_id = await make_service(client, [me])
+    template = await _essential_template(client, service_id)
+    customer_id = await make_customer(client)
+    booked = await book(client, service_id, me, at("10:00"), customer_id=customer_id)
+    assert booked.status_code == 201, booked.text
+
+    await _sign_v1(client, customer_id, template["id"])
+    v1_submission_id = await _submission_id(customer_id, template["id"], number=1)
+
+    await save(client, template, is_mandatory=True, schema=_schema("v2"))
+    v2 = await publish(client, template["id"], requires_resignature=True)
+    assert v2.status_code == 201, v2.text
+    assert await statuses(client, customer_id) == {template["id"]: "resign_required"}
+
+    token2 = token_of((await issue(client, customer_id, template["id"])).json()["url"])
+    version2_id = await pinned_version(token2)
+    resp2 = await submit(client, token2, version2_id, {_SIG_KEY: SIGNED})
+    assert resp2.json()["status"] == "received", resp2.text
+    assert await statuses(client, customer_id) == {}  # ok: the v2 signature qualifies
+
+    # The exact probe shape: the *older* (v1) submission's row becomes more recent than the
+    # qualifying v2 one — the old "most recent submission" rule would have regressed this
+    # client back to resign_required.
+    await as_owner(
+        "UPDATE form_submissions SET submitted_at = now() + interval '1 hour' WHERE id = :id",
+        id=v1_submission_id,
+    )
+    assert await statuses(client, customer_id) == {}
+
+
+async def test_publishing_with_requires_resignature_revokes_older_open_links(client):
+    await as_admin(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me, [(0, 540, 1080)])
+    service_id = await make_service(client, [me])
+    template = await _essential_template(client, service_id)
+    customer_id = await make_customer(client)
+
+    issued = await issue(client, customer_id, template["id"])
+    assert issued.status_code == 201, issued.text
+    token = token_of(issued.json()["url"])
+
+    await save(client, template, is_mandatory=True, schema=_schema("v2"))
+    v2 = await publish(client, template["id"], requires_resignature=True)
+    assert v2.status_code == 201, v2.text
+
+    # The old, never-used v1 link is dead now — the same uniform 404 every dead link answers.
+    lookup = await client.post(
+        "/api/public/forms/lookup", json={"token": token}, headers={"Origin": BASE}
+    )
+    assert lookup.status_code == 404, lookup.text
+    assert lookup.json()["code"] == "link_invalid"
+
+    published = [row for row in await audit() if row[0] == "form_template.published"]
+    assert published[-1] == (
+        "form_template.published",
+        template["id"],
+        {"number": 2, "links_revoked": 1},
+    )
+
+
+async def test_an_appointment_already_in_progress_still_applies(client):
+    """`_applicable_services` reads "from today onward" as the business's local midnight, not
+    `now()` (fix round 1) — a client already in the chair for an appointment that started a
+    few minutes ago must still show up, not quietly drop off because the instant has passed."""
+    await as_admin(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me, [(0, 540, 1080)])
+    service_id = await make_service(client, [me])
+    template = await _essential_template(client, service_id)
+    customer_id = await make_customer(client)
+    booked = await book(client, service_id, me, at("10:00"), customer_id=customer_id)
+    assert booked.status_code == 201, booked.text
+    await as_owner(
+        "UPDATE appointments SET starts_at = now() - interval '5 minutes', "
+        "ends_at = now() + interval '55 minutes' WHERE id = :id",
+        id=booked.json()["id"],
+    )
+    assert await statuses(client, customer_id) == {template["id"]: "missing"}
+
+
+async def test_compliance_404s_for_an_unknown_or_suppressed_customer(client):
+    await as_admin(client)
+    unknown = await client.get(COMPLIANCE.format(str(uuid.uuid4())))
+    assert unknown.status_code == 404, unknown.text
+
+    customer_id = await make_customer(client)
+    await as_owner("UPDATE customers SET suppressed_at = now() WHERE id = :c", c=customer_id)
+    suppressed = await client.get(COMPLIANCE.format(customer_id))
+    assert suppressed.status_code == 404, suppressed.text
 
 
 async def test_applicability_service_mapping_retirement_and_cancellation(client):
@@ -356,3 +489,18 @@ async def test_the_dashboard_writes_no_access_log_row_and_does_not_scale_with_cl
     # bulk reads in `forms.compliance._compliance` are the same handful either way. A little
     # slack for the surrounding request's own bookkeeping (session, auth), none for a loop.
     assert counted_5.count <= counted_1.count + 2, (counted_1.count, counted_5.count)
+
+
+async def test_changing_only_template_flags_publishes_a_new_frozen_version(client):
+    await as_admin(client)
+    template = await make(client)
+    await save(client, template, is_mandatory=False, is_health_form=False, schema=_schema())
+    assert (await publish(client, template["id"])).status_code == 201
+    await save(client, template, is_mandatory=True, is_health_form=True, schema=_schema())
+    result = await publish(client, template["id"])
+    assert result.status_code == 201, result.text
+    versions = (await client.get(f"/api/admin/forms/{template['id']}/versions")).json()["versions"]
+    assert [(v["number"], v["is_mandatory"], v["is_health_form"]) for v in versions] == [
+        (2, True, True),
+        (1, False, False),
+    ]

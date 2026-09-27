@@ -49,6 +49,7 @@ Decisions are final unless a documented trigger says otherwise. Each entry recor
 ## 4. Background Workers & Task Processing: **Celery (Python)**
 
 * **Why:** Runs the notification retry queue (email/SMS with exponential backoff), PDF generation, and compliance exports without blocking API threads.
+* **M2 scan exception:** The approved intake-forms Task 7 wraps at most eight downsampled JPEG/PNG pages into a PDF with Pillow in a request-side thread, bounded by the 2 MiB JSON body cap. This preserves one transaction for the encrypted scan, immutable submission and clinical hold. Rendered digital forms use Celery; beat reconciles committed submissions missing an archive every five minutes to recover the commit/enqueue gap.
 * **Note:** The archive-tiering worker described in the original PRD is no longer needed — partitioning replaces it.
 
 ## 5. Document Generation: **WeasyPrint or ReportLab (Python)**
@@ -89,7 +90,7 @@ Cancelled invoices are retained rather than deleted: CRA requires business recor
 * **Traefik or Nginx:** Reverse proxy handling SSL/TLS 1.3 termination (Let's Encrypt), routing, and security headers.
 * **DigitalOcean:** Standard hosting target, Canadian regions (Toronto/Montreal) for data residency.
 * **On-prem:** Supported as a first-class deployment target. The same Compose stack runs on a customer's own server; only volume paths and TLS certificate issuance differ.
-* **Form links are `/f/#<token>`:** the token is the URL fragment, which a browser never sends to a server, so no static host, proxy or Traefik access log can record it; the page reads it, keeps it in memory and clears it from the address bar and history. A path form (`/f/<token>`) is never looked up. **TODO (production frontend):** the static server that replaces the Vite dev server should still send `Referrer-Policy: no-referrer` and `Cache-Control: no-store` on `/f/*` as defence in depth; `index.html` already sets `<meta name="referrer" content="no-referrer">`.
+* **Form links are `/f/#<token>`:** the token is the URL fragment, which a browser never sends to a server, so no static host, proxy or Traefik access log can record it; the page reads it and clears it from the address bar and history. An IndexedDB draft cache retains the pinned form, answers and token for offline retries; session storage holds the active token for reload recovery. Success or terminal refusal removes the draft, and expired drafts are purged on the next form-page load. A path form (`/f/<token>`) is never looked up. **TODO (production frontend):** the static server that replaces the Vite dev server should still send `Referrer-Policy: no-referrer` and `Cache-Control: no-store` on `/f/*` as defence in depth; `index.html` already sets `<meta name="referrer" content="no-referrer">`.
 
 ### Provisioning: manual runbook, not infrastructure-as-code
 

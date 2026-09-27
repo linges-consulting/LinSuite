@@ -193,6 +193,28 @@ test('revoking an open link removes it from the list', async () => {
   expect(await screen.findByText('No forms waiting to be filled in.')).toBeInTheDocument()
 })
 
+test('staff can enlarge the QR code for a separate unsigned tablet', async () => {
+  staffDesk()
+  const passthrough = vi.mocked(fetch).getMockImplementation()!
+  vi.mocked(fetch).mockImplementation(async (url, init) => {
+    if (url === '/api/customers/c1/form-links' && init?.method === 'POST')
+      return Response.json({ id: 'l1', url: URL_, expires_at: '2099-09-24T12:00:00Z', emailed_to: null })
+    return passthrough(url, init)
+  })
+  const user = userEvent.setup()
+  renderApp('/clients/c1')
+  await user.click(await screen.findByRole('button', { name: 'Send form' }))
+  const dialog = await screen.findByRole('dialog', { name: 'Send a form' })
+  await user.click(within(dialog).getByRole('combobox', { name: 'Form' }))
+  await user.click(await screen.findByRole('option', { name: 'Prenatal intake' }))
+  await user.click(within(dialog).getByRole('button', { name: 'Create link' }))
+  await user.click(await screen.findByRole('button', { name: 'Show tablet QR' }))
+  const tablet = await screen.findByRole('dialog', { name: 'Fill in the clinic' })
+  expect(within(tablet).getByRole('img', { name: 'Tablet QR code for the form link' })).toBeInTheDocument()
+  expect(within(tablet).getByText(/tablet that is signed out/)).toBeInTheDocument()
+  expect(vi.mocked(fetch).mock.calls.some(([url]) => url === '/api/auth/logout')).toBe(false)
+})
+
 // --- /f/#<token> ------------------------------------------------------------------------------
 
 /** Open the page the way a browser does: the real address bar carries the fragment too, so

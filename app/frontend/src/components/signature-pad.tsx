@@ -14,9 +14,12 @@ const PAPER = '#ffffff'
 const INK = '#111827'
 
 // Mirrors `forms/submissions.py`'s `_has_ink` — same bounding-box and ink-ratio thresholds,
-// so a signature this pad accepts, the server accepts too (fix: a trivial stroke used to
-// pass here and only fail once it reached the server). Python and TypeScript share no code
-// in this repo, so these are duplicated by value; keep them in step with the server's.
+// so a signature this pad accepts, the server accepts too. `app/shared/signature-ink-
+// constants.json` is the canonical reference for these four numbers and
+// `tests/test_signature_ink_constants.py` (backend) fails if this file or the server's drifts
+// from it — a runtime shared import was tried and reverted, because the frontend's dev/prod
+// containers only bind-mount `app/frontend` (`infra/compose.yaml`), so a cross-directory
+// import 404s inside the real container even though it resolves fine on the host.
 const MIN_INK_PIXELS = 20
 const MIN_INK_WIDTH = 0.05
 const MIN_INK_HEIGHT = 0.03

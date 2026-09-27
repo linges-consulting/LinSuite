@@ -378,9 +378,10 @@ async def publish(
     if latest is not None and _flags(latest) == _flags(template):
         return _coded(409, "draft_unchanged", f"Nothing has changed since version {latest.number}.")
 
+    number = (latest.number if latest else 0) + 1
     version = FormTemplateVersion(
         template_id=template.id,
-        number=(latest.number if latest else 0) + 1,
+        number=number,
         name=template.name,
         kind=template.kind,
         schema=template.draft_schema,
@@ -390,7 +391,28 @@ async def publish(
         published_by_user_id=admin.id,
     )
     db.add(version)
-    _audit(db, "published", template, admin, number=version.number)
+    if payload.requires_resignature:
+        # The old wording is no longer acceptable to sign (fix round 1, #51): every link still
+        # open for an *older* version of this template dies with this publish, the same way
+        # retiring already kills every open link outright. A version holding a submission
+        # already on file is untouched — only links nobody has used yet.
+        revoked = await db.execute(
+            update(FormLink)
+            .where(
+                FormLink.version_id.in_(
+                    select(FormTemplateVersion.id).where(
+                        FormTemplateVersion.template_id == template.id,
+                        FormTemplateVersion.number < number,
+                    )
+                ),
+                FormLink.revoked_at.is_(None),
+                FormLink.consumed_at.is_(None),
+            )
+            .values(revoked_at=func.now())
+        )
+        _audit(db, "published", template, admin, number=number, links_revoked=revoked.rowcount)
+    else:
+        _audit(db, "published", template, admin, number=number)
     await db.commit()
     await db.refresh(version)
     return _version_out(version)
@@ -445,7 +467,15 @@ async def save_settings(
     if template.retired_at is not None:
         return _retired()
     if payload.service_ids:
-        known = set(await db.scalars(select(Service.id).where(Service.id.in_(payload.service_ids))))
+        # Active only (fix round 1, #51): an inactive service is off every picker already —
+        # mapping a template to one it no longer offers would apply a form nobody can trigger.
+        known = set(
+            await db.scalars(
+                select(Service.id).where(
+                    Service.id.in_(payload.service_ids), Service.active.is_(True)
+                )
+            )
+        )
         missing = set(payload.service_ids) - known
         if missing:
             raise refuse("service_ids", "One of the chosen services no longer exists.")

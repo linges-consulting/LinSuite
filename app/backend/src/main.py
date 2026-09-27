@@ -37,7 +37,9 @@ from forms.compliance import router as form_compliance_router
 from forms.links import router as form_links_router
 from forms.public import router as public_forms_router
 from forms.routes import router as forms_router
+from forms.scans import router as form_scans_router
 from forms.submissions import router as form_submissions_router
+from notes.routes import router as notes_router
 from scheduling.appointments import router as appointments_router
 from scheduling.closures import router as closures_router
 from scheduling.hours import router as hours_router
@@ -258,6 +260,8 @@ api.include_router(forms_router)
 api.include_router(form_links_router)
 # Completed forms, staff side (`forms.view`): the list, and the logged read of one.
 api.include_router(form_submissions_router)
+api.include_router(notes_router)
+api.include_router(form_scans_router)
 # Essential forms and compliance (Task 8): the profile banner and the "Forms needed" dashboard.
 # Metadata only — no access-log row.
 api.include_router(form_compliance_router)

@@ -58,11 +58,13 @@ TRIGGER = "audit_access_log_no_rewrite"
 
 # The routes that return PHI today. A new one is a conscious edit here (rule b).
 LOGGED = {
+    ("GET", "/api/customers/{customer_id}/session-notes/{note_id}"),
     ("GET", "/api/customers/{customer_id}"),
     # Its answer names the day the hold ends, which discloses the DOB (Task 7).
     ("POST", "/api/customers/{customer_id}/erasure"),
     # A completed form's answers, signature included (#47). Its list is metadata: not here.
     ("GET", "/api/customers/{customer_id}/forms/{submission_id}"),
+    ("GET", "/api/customers/{customer_id}/forms/{submission_id}/pdf"),
 }
 # Customer-scoped GETs that deliberately do not log. Empty: nothing under a customer's path
 # is metadata yet (the access report itself will live under `/api/admin/...`).
@@ -345,7 +347,10 @@ def unmodelled_routes(app, allowed=UNMODELLED) -> set[tuple[str, str]]:
     return {
         (method, r.path)
         for r in mounted_routes(app)
-        if r.customer_scoped and not declares_a_model(r.response_model) and r.status_code != 204
+        if r.customer_scoped
+        and not declares_a_model(r.response_model)
+        and r.status_code != 204
+        and r.phi_resource is None
         for method in r.methods
         if (method, r.path) not in allowed
     }
@@ -461,6 +466,15 @@ def test_an_unmodelled_route_named_with_a_reason_passes_rule_c(probe):
 
     allowed = {("GET", PROBE): "A probe: returns only {'ok': true}."}
     assert ("GET", PROBE) not in unmodelled_routes(app, allowed)
+
+
+def test_a_logged_binary_response_is_not_an_unmodelled_blind_spot(probe):
+    from auth.capabilities import Requires
+    from core.access_log import LogAccess
+    from main import app
+
+    probe([Depends(Requires("forms.view")), Depends(LogAccess("form_document"))])
+    assert ("GET", PROBE) not in unmodelled_routes(app)
 
 
 def _local_app(endpoint, **route):

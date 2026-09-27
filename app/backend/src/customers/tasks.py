@@ -51,14 +51,20 @@ PURGE_AUTHORITY = "linsuite_purge"
 # grant gone missing — is a real fault and must not be mistaken for "held" night after night.
 _GUARD_REFUSALS = tuple(
     f"{table}: DELETE is not permitted for "
-    for table in ("customer_document_keys", "documents", "form_submissions")
+    for table in ("customer_document_keys", "documents", "form_submissions", "session_notes")
 )
 _FOREIGN_KEY_VIOLATION = "23503"
 # Every foreign key to `customer_document_keys` — the rows sealed under a client's key. The key
 # DELETE failing on one of these, and only these, means a sealed row committed mid-purge
 # (ADR-0001 rule 7). `test_the_shred_hook_knows_every_foreign_key_to_the_key_row` keeps the
 # set equal to the database's. Any other FK violation is a real fault and raises.
-KEY_REFERENCES = frozenset({"documents_customer_id_fkey", "form_submissions_customer_id_fkey"})
+KEY_REFERENCES = frozenset(
+    {
+        "documents_customer_id_fkey",
+        "form_submissions_customer_id_fkey",
+        "session_notes_customer_id_fkey",
+    }
+)
 # The trigger's predicate, verbatim: not held = no hold, or a hold that has passed.
 _NOT_HELD = "(retention_expires_at IS NULL OR retention_expires_at < now())"
 
@@ -109,7 +115,7 @@ async def _shred(purge: AsyncEngine, customer_id: str, request_id: str | None) -
             # The client's sealed rows, after the audit row and before the key they are
             # sealed under (ADR-0001 rule 8) — their FK to the key row forces this order.
             # Every table in `KEY_REFERENCES` is deleted from here.
-            for table in ("documents", "form_submissions"):
+            for table in ("documents", "form_submissions", "session_notes"):
                 await conn.execute(
                     text(f"DELETE FROM {table} WHERE customer_id = :c"), {"c": customer_id}
                 )

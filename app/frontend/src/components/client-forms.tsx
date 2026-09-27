@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Copy, Send } from 'lucide-react'
-import { forwardRef, useImperativeHandle, useState } from 'react'
+import { forwardRef, useImperativeHandle, useState, useRef } from 'react'
 import { toast } from 'sonner'
 import { Form } from '@/components/form'
 import { QrCode } from '@/components/qr-code'
+import { PaperFormDialog } from '@/components/paper-form-dialog'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import {
@@ -27,6 +28,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import {
   fetchClientSubmissions,
+  fetchFormPdf,
   fetchFormSubmission,
   fetchOpenFormLinks,
   fetchSendableForms,
@@ -69,6 +71,7 @@ export const ClientFormsCard = forwardRef<
   const [sending, setSending] = useState(false)
   const [presetTemplateId, setPresetTemplateId] = useState<string | undefined>()
   const [opening, setOpening] = useState<string | null>(null)
+  const [paper, setPaper] = useState<'print' | 'scan' | null>(null)
   useImperativeHandle(ref, () => ({
     openSendFor: (templateId: string) => {
       setPresetTemplateId(templateId)
@@ -76,6 +79,7 @@ export const ClientFormsCard = forwardRef<
     },
   }))
   const queryClient = useQueryClient()
+  const pollingUntil = useRef<number | null>(null)
   const links = useQuery({
     queryKey: [...FORM_LINKS, props.customerId],
     queryFn: () => fetchOpenFormLinks(props.customerId),
@@ -85,7 +89,28 @@ export const ClientFormsCard = forwardRef<
     queryKey: [...FORM_SUBMISSIONS, props.customerId],
     queryFn: () => fetchClientSubmissions(props.customerId),
     enabled: props.canView,
+    refetchInterval: (query) => {
+      if (!query.state.data?.some((s) => !s.pdf_ready)) { pollingUntil.current = null; return false }
+      pollingUntil.current ??= Date.now() + 60_000
+      return Date.now() < pollingUntil.current ? 3000 : false
+    },
   })
+  const pdf = useMutation({
+    mutationFn: ({ id }: { id: string; preview: Window }) => fetchFormPdf(props.customerId, id),
+    onSuccess: (blob, { preview }) => {
+      const url = URL.createObjectURL(blob)
+      preview.location.replace(url)
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+    },
+    onError: (error, { preview }) => { preview.close(); toast.error(error.message) },
+  })
+  const openPdf = (id: string) => {
+    // Open during the user gesture; Safari blocks a new window after an awaited fetch.
+    const preview = window.open('', '_blank')
+    if (!preview) { toast.error('Allow pop-ups to open the form.'); return }
+    preview.opener = null
+    pdf.mutate({ id, preview })
+  }
   const revoke = useMutation({
     mutationFn: (linkId: string) => revokeFormLink(props.customerId, linkId),
     onSuccess: () => {
@@ -108,10 +133,14 @@ export const ClientFormsCard = forwardRef<
           <h2>Forms</h2>
         </CardTitle>
         {props.canSend && !props.suppressed && (
+          <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="outline" onClick={() => setPaper('print')}>Print blank form</Button>
+          <Button size="sm" variant="outline" onClick={() => setPaper('scan')}>Upload scan</Button>
           <Button size="sm" variant="outline" onClick={() => setSending(true)}>
             <Send aria-hidden />
             Send form
           </Button>
+          </div>
         )}
       </CardHeader>
       <CardContent className="flex flex-col gap-6">
@@ -144,6 +173,15 @@ export const ClientFormsCard = forwardRef<
                       <TableCell>{when(s.submitted_at)}</TableCell>
                       <TableCell className="text-right">
                         <Button
+                          size="sm" variant="ghost"
+                          disabled={!s.pdf_ready || pdf.isPending}
+                          onClick={() => openPdf(s.id)}
+                          aria-label={s.pdf_ready ? `View PDF for ${s.template_name}` : `Rendering PDF for ${s.template_name}`}
+                        >
+                          {s.pdf_ready ? 'View PDF' : 'Rendering…'}
+                        </Button>
+                        {s.method === 'link' && (
+                        <Button
                           size="sm"
                           variant="ghost"
                           onClick={() => setOpening(s.id)}
@@ -151,6 +189,7 @@ export const ClientFormsCard = forwardRef<
                         >
                           Open
                         </Button>
+                        )}
                       </TableCell>
                     </TableRow>
                   ))}
@@ -206,6 +245,7 @@ export const ClientFormsCard = forwardRef<
           </section>
         )}
       </CardContent>
+      {paper && <PaperFormDialog customerId={props.customerId} mode={paper} onClose={() => setPaper(null)} />}
       {opening && (
         <SubmissionDialog
           customerId={props.customerId}
@@ -301,6 +341,7 @@ function SendFormDialog(props: {
 
 function IssuedLink(props: { link: IssuedFormLink; when: (instant: string) => string; onDone: () => void }) {
   const { link } = props
+  const [confirming, setConfirming] = useState(false)
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(link.url)
@@ -331,10 +372,27 @@ function IssuedLink(props: { link: IssuedFormLink; when: (instant: string) => st
         client abandons, so it cannot be opened later.
       </p>
       <DialogFooter>
+        <Button type="button" variant="outline" onClick={() => setConfirming(true)}>
+          Show tablet QR
+        </Button>
         <Button type="button" onClick={props.onDone}>
           Done
         </Button>
       </DialogFooter>
+      <Dialog open={confirming} onOpenChange={setConfirming}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Fill in the clinic</DialogTitle>
+            <DialogDescription>Scan this code using the clinic tablet that is signed out of staff accounts, then hand the tablet to the client.</DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-center">
+            <QrCode value={link.url} label="Tablet QR code for the form link" className="size-72 max-w-full" />
+          </div>
+          <DialogFooter>
+            <Button type="button" onClick={() => setConfirming(false)}>Done</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

@@ -74,9 +74,9 @@ export function FormFieldInput(props: {
 
   switch (field.type) {
     case 'heading':
-      return <h4 className="text-base font-semibold">{field.label}</h4>
+      return <div className="flex flex-col gap-2"><h4 className="text-base font-semibold">{field.label}</h4>{help}</div>
     case 'paragraph':
-      return <p className="text-sm whitespace-pre-wrap">{field.label}</p>
+      return <div className="flex flex-col gap-2"><p className="text-sm whitespace-pre-wrap">{field.label}</p>{help}</div>
     case 'yes_no':
       return choices('radio', YES_NO, (o) => (o === 'yes' ? 'Yes' : 'No'))
     case 'single_choice':
@@ -98,6 +98,7 @@ export function FormFieldInput(props: {
               {label}
             </Label>
           </div>
+          {help}
           {problem}
         </div>
       )

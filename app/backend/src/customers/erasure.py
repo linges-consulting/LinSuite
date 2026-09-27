@@ -51,7 +51,7 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 
-RETAINED_WHEN_HELD = ("Name", "Date of birth", "Visit history")
+RETAINED_WHEN_HELD = ("Name", "Date of birth", "Visit history", "Session notes")
 
 
 def is_held(expires_at: datetime | None, now: datetime) -> bool:

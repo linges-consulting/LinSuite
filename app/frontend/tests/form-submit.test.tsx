@@ -252,7 +252,7 @@ const CUSTOMER = {
   erasure: null,
 }
 
-function reader(capabilities: string[]) {
+function reader(capabilities: string[], ready: () => boolean = () => true) {
   return stubApi({
     signedIn: true,
     dualRole: false,
@@ -293,6 +293,7 @@ function reader(capabilities: string[]) {
               version: 1,
               method: 'link',
               submitted_at: '2026-09-22T14:00:00Z',
+              pdf_ready: ready(),
             },
           ],
         })
@@ -347,6 +348,29 @@ test('without forms.view the card shows no completed forms', async () => {
   expect(await within(card).findByRole('button', { name: 'Send form' })).toBeInTheDocument()
   expect(within(card).queryByRole('table', { name: 'Completed forms' })).not.toBeInTheDocument()
   expect(calls.some((c) => c.url.endsWith('/c1/forms'))).toBe(false)
+})
+
+test('an archived PDF is unavailable while rendering and opens an authenticated blob once ready', async () => {
+  let ready = false
+  reader(['customers.view', 'forms.view'], () => ready)
+  const preview = { opener: {}, location: { replace: vi.fn() }, close: vi.fn() }
+  const opened = vi.spyOn(window, 'open').mockReturnValue(preview as unknown as Window)
+  const create = vi.fn(() => 'blob:archived-form')
+  vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: create, revokeObjectURL: vi.fn() }))
+  const passthrough = vi.mocked(fetch).getMockImplementation()!
+  vi.mocked(fetch).mockImplementation(async (url, init) => {
+    if (!String(url).endsWith('/s1/pdf')) return passthrough(url, init)
+    expect(opened).toHaveBeenCalledWith('', '_blank')
+    expect(preview.opener).toBeNull()
+    return new Response(new Blob(['archive'], { type: 'application/pdf' }), { headers: { 'Content-Type': 'application/pdf' } })
+  })
+  const user = userEvent.setup()
+  renderApp('/clients/c1')
+  expect(await screen.findByRole('button', { name: /Rendering/ })).toBeDisabled()
+  ready = true
+  const view = await screen.findByRole('button', { name: 'View PDF for Prenatal intake' }, { timeout: 5500 })
+  await user.click(view)
+  await waitFor(() => expect(preview.location.replace).toHaveBeenCalledWith('blob:archived-form'))
 })
 
 // --- the pad repaints what it holds ---------------------------------------------------------
