@@ -57,6 +57,9 @@ def database(tmp_path_factory, redis_server) -> Iterator[dict[str, str]]:
             # The master key every client's document key is wrapped under. Fixed and distinct
             # from the MFA key, so a test that unwraps under the wrong one fails for real.
             "DOCUMENT_MASTER_KEY": "22" * 32,
+            # The Resend/SMTP credential key on `businesses` (Phase 12 Task 2). Fixed and
+            # distinct from the two above, for the same reason.
+            "NOTIFICATION_CREDENTIAL_KEY": "33" * 32,
             # The ASGI harness speaks http://, and a `Secure` cookie is never sent over it.
             # Production leaves this on; `test_the_session_cookie_is_secure_when_configured`
             # is what proves the flag is wired up.

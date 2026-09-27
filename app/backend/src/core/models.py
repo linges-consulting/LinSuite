@@ -74,6 +74,10 @@ class Business(Base):
             "retention_profile IN ('regulated_health', 'general_business')",
             name="ck_businesses_retention_profile",
         ),
+        CheckConstraint(
+            "email_sender IS NULL OR email_sender IN ('resend', 'smtp')",
+            name="ck_businesses_email_sender",
+        ),
     )
 
     id: Mapped[int] = mapped_column(
@@ -147,6 +151,29 @@ class Business(Base):
     retention_profile_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # --- notification email sender (Phase 12 Task 2, #11; `notifications/providers.py`,
+    # `notifications/credentials.py`) --------------------------------------------------------
+    # Which provider a real send uses. NULL means unconfigured — Task 6's settings panel shows
+    # a banner until one is chosen and a test send succeeds. The two `*_encrypted` columns are
+    # direct AES-256-GCM field encryption under `NOTIFICATION_CREDENTIAL_KEY`
+    # (`notifications/credentials.py`), the same shape `mfa_encryption_key` already uses for
+    # TOTP secrets — one business row, no per-record wrapped-key scheme.
+    email_sender: Mapped[str | None] = mapped_column(String(16))
+    resend_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    resend_from_address: Mapped[str | None] = mapped_column(String(320))
+    # Set only by a successful Resend test send (Task 6, not built here). NULL gates Task 5's
+    # trigger functions from ever attempting a real Resend send — "email features remain
+    # disabled behind a banner until a test send succeeds" (#11 acceptance criterion).
+    resend_domain_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    smtp_host: Mapped[str | None] = mapped_column(String(255))
+    smtp_port: Mapped[int | None] = mapped_column(Integer)
+    smtp_username: Mapped[str | None] = mapped_column(String(255))
+    smtp_password_encrypted: Mapped[str | None] = mapped_column(Text)
+    smtp_from_address: Mapped[str | None] = mapped_column(String(320))
+    # SMTP's equivalent of `resend_domain_verified_at`: SMTP has no domain to verify, only a
+    # test send that succeeded, so it is named for what it actually records.
+    smtp_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AuditEvent(Base):
