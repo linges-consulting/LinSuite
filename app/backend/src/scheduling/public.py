@@ -1,7 +1,8 @@
-"""`GET /api/public/booking/availability` and `POST /api/public/booking` (Phase 6 Tasks 1-2,
-#10): the client-facing counterpart to `scheduling/slots.py`'s `GET /availability` and
-`scheduling/appointments.py`'s `POST /api/appointments`, over the client's own unauthenticated
-request.
+"""`GET /api/public/booking/availability`, `POST /api/public/booking`, and the
+booking-management trio `POST /manage`, `.../manage/cancel`, `.../manage/reschedule`
+(Phase 6 Tasks 1-3, #10): the client-facing counterpart to `scheduling/slots.py`'s
+`GET /availability` and `scheduling/appointments.py`'s `POST /api/appointments`, over the
+client's own unauthenticated request.
 
 No capability, no session — mounted under `/public/booking` (`main.py`'s `/api/public/`
 prefix), which inherits Traefik's `public`/`public-ratelimit` middleware and `main.py`'s
@@ -52,9 +53,11 @@ already committed by the time it runs, so nothing here needs its own try/except 
 missing sender from failing the request."""
 
 import hashlib
+import hmac
+import secrets
 import uuid
+from datetime import UTC, datetime, timedelta
 from datetime import date as Date
-from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
@@ -67,23 +70,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.requests import Request
 
 from core.audit import record_event
+from core.config import get_settings
 from core.db import SessionDep
 from core.redis import get_redis
 from customers.models import Customer
 from customers.routes import CustomerIn, create_customer
-from notifications.triggers import notify_booking_confirmed
+from notifications.triggers import (
+    load_business,
+    notify_booking_cancelled,
+    notify_booking_confirmed,
+    notify_booking_modified,
+)
 from scheduling import cache
 from scheduling._admin_forms import refuse
 from scheduling.appointments import (
+    _cancel,
     _is_slot_taken,
     _load,
+    _lock,
     assign_resources,
     customer_suppressed,
     not_offered,
     offered_slot,
     slot_taken,
 )
-from scheduling.models import Appointment, AppointmentResource, Staff
+from scheduling.models import Appointment, AppointmentResource, BookingManagementLink, Staff
 from scheduling.services import catalog_entry
 from scheduling.slots import AvailabilityOut, check_range, resolve_availability, unbookable, utc
 
@@ -143,15 +154,16 @@ class PublicBookingIn(BaseModel):
 
 
 class PublicBookingOut(BaseModel):
-    """What the confirmation screen needs. Task 3 (the booking-management link) extends this
-    same shape with a `management_link` field, per that task's own scope note in m3.md — this
-    response is otherwise final."""
+    """What the confirmation screen needs. `management_link` (Task 3, #10) is shown on-screen
+    immediately, independent of whether a confirmation email or SMS actually sends — it is
+    the only recovery path when no notification channel is configured at all."""
 
     appointment_id: str
     starts_at: str
     ends_at: str
     service_name: str
     staff_name: str
+    management_link: str
 
 
 def _digest(value: str) -> str:
@@ -302,10 +314,243 @@ async def book_public(payload: PublicBookingIn, request: Request, db: SessionDep
     loaded = await _load(db, appointment.id)
     await notify_booking_confirmed(db, loaded)
 
+    # The management link (Task 3, #10): right after the appointment itself has committed,
+    # its own insert and commit — never folded into the booking's own transaction, so a
+    # problem minting the link can never be mistaken for the booking itself having failed.
+    management_link = await _issue_management_link(db, loaded.id)
+    await db.commit()
+
     return PublicBookingOut(
         appointment_id=str(loaded.id),
         starts_at=utc(loaded.starts_at),
         ends_at=utc(loaded.ends_at),
         service_name=loaded.service.name,
         staff_name=loaded.staff.display_name,
+        management_link=management_link,
     )
+
+
+# --- booking-management link (Task 3, #10) -----------------------------------------------------
+#
+# `POST /manage`, `.../cancel`, `.../reschedule`: the client's own way back into an appointment
+# they booked online, mirroring `forms/links.py`/`forms/public.py`'s shape exactly — the token
+# is `secrets.token_urlsafe(32)`, only its SHA-256 is ever stored, and the URL carries it in the
+# fragment (`_management_url`), never a path segment or query param, so it never reaches a
+# server log. **Not single-use** (m3.md's owner ruling): a client reopens the same link to view,
+# then maybe reschedule, then maybe cancel. There is no stored `expires_at` at all — the link is
+# only ever as good as the appointment it points at (`_live_management_link`'s one `WHERE`),
+# which is what "valid until the appointment's start" means in practice: once cancelled,
+# completed, no-showed or simply past, the link answers exactly like an unknown token, the same
+# 404 `link_invalid` discipline `forms/public.py` already established.
+#
+# Cancelling and rescheduling share one gate, checked at the API and nowhere else (#10's own
+# acceptance criterion — "disabling online cancellation removes the capability at the API, not
+# only in the UI"): `businesses.online_cancellation_enabled` and `cancellation_cutoff_hours`.
+# Reschedule reruns the exact same `offered_slot`/`assign_resources` primitives Task 2 used —
+# no `override`, nothing relaxed, the same discipline `book_public` follows above.
+
+
+def _link_digest(token: str) -> bytes:
+    return hashlib.sha256(token.encode()).digest()
+
+
+def _management_url(token: str) -> str:
+    """`…/manage-booking/#<token>` — the fragment, which a browser never sends to any server
+    (`forms/links.py::url_of`'s pattern, mirrored exactly)."""
+    return f"{get_settings().app_base_url.rstrip('/')}/manage-booking/#{token}"
+
+
+async def _issue_management_link(db: AsyncSession, appointment_id: uuid.UUID) -> str:
+    token = secrets.token_urlsafe(32)
+    db.add(BookingManagementLink(appointment_id=appointment_id, token_sha256=_link_digest(token)))
+    return _management_url(token)
+
+
+def _link_invalid() -> JSONResponse:
+    return JSONResponse(
+        status_code=404, content={"detail": "This link is no longer valid.", "code": "link_invalid"}
+    )
+
+
+async def _live_management_link(db: AsyncSession, token: str) -> Appointment | None:
+    """The appointment a still-good management link points at, or `None` for every dead-link
+    reason — unknown token, already cancelled/completed/no-show, or its start has already
+    passed. Every condition is in the one `WHERE` (`forms/public.py::_live_link`'s discipline),
+    so a dead link and an unknown token take the same path and there is no second query whose
+    timing could tell them apart."""
+    if len(token) > 128:  # longer than any token this app mints
+        return None
+    wanted = _link_digest(token)
+    row = (
+        await db.execute(
+            select(BookingManagementLink, Appointment)
+            .join(Appointment, Appointment.id == BookingManagementLink.appointment_id)
+            .where(
+                BookingManagementLink.token_sha256 == wanted,
+                Appointment.status == "confirmed",
+                Appointment.starts_at > func.now(),
+            )
+        )
+    ).first()
+    if row is None or not hmac.compare_digest(bytes(row[0].token_sha256), wanted):
+        return None
+    return row[1]
+
+
+class ManageBookingIn(BaseModel):
+    token: str
+
+
+class ManageBookingOut(BaseModel):
+    """What the booking-management page shows. `cancellable` gates both the cancel and the
+    reschedule action — one shared toggle for both, per m3.md's own Task 3 scope ("same
+    cutoff/toggle checks as cancel")."""
+
+    appointment_id: str
+    status: str
+    starts_at: str
+    ends_at: str
+    service_name: str
+    staff_name: str
+    cancellable: bool
+
+
+def _out_manage(appointment: Appointment, cancellable: bool) -> ManageBookingOut:
+    return ManageBookingOut(
+        appointment_id=str(appointment.id),
+        status=appointment.status,
+        starts_at=utc(appointment.starts_at),
+        ends_at=utc(appointment.ends_at),
+        service_name=appointment.service.name,
+        staff_name=appointment.staff.display_name,
+        cancellable=cancellable,
+    )
+
+
+async def _online_change_allowed(db: AsyncSession, appointment: Appointment) -> bool:
+    business = await load_business(db)
+    if not business.online_cancellation_enabled:
+        return False
+    cutoff = timedelta(hours=business.cancellation_cutoff_hours)
+    return datetime.now(UTC) <= appointment.starts_at - cutoff
+
+
+def _online_change_refused(action: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": f"Online {action} is no longer available for this booking. "
+            "Please contact us directly.",
+            "code": "online_change_not_allowed",
+        },
+    )
+
+
+@router.post("/manage", response_model=ManageBookingOut)
+async def manage_booking(payload: ManageBookingIn, db: SessionDep):
+    appointment = await _live_management_link(db, payload.token)
+    if appointment is None:
+        return _link_invalid()
+    return _out_manage(appointment, await _online_change_allowed(db, appointment))
+
+
+@router.post("/manage/cancel", response_model=ManageBookingOut)
+async def manage_cancel(payload: ManageBookingIn, db: SessionDep):
+    appointment = await _live_management_link(db, payload.token)
+    if appointment is None:
+        return _link_invalid()
+    # Re-locked, re-checked: the same discipline `cancel_appointment` uses, since a link is
+    # long-lived enough for staff to have already acted on this appointment in between.
+    locked = await _lock(db, appointment.id)
+    if locked is None or locked.status != "confirmed":
+        return _link_invalid()
+    if not await _online_change_allowed(db, locked):
+        return _online_change_refused("cancellation")
+
+    # No actor at all — the same rule `book_public` follows for `appointment.booked`.
+    _cancel(db, locked, None, "Cancelled online by the client.")
+    await db.commit()
+    await cache.bump()
+
+    reloaded = await _load(db, locked.id)
+    await notify_booking_cancelled(db, reloaded)
+    return _out_manage(reloaded, cancellable=False)
+
+
+class RescheduleIn(BaseModel):
+    token: str
+    starts_at: AwareDatetime
+
+
+@router.post("/manage/reschedule", response_model=ManageBookingOut)
+async def manage_reschedule(payload: RescheduleIn, db: SessionDep):
+    appointment = await _live_management_link(db, payload.token)
+    if appointment is None:
+        return _link_invalid()
+    locked = await _lock(db, appointment.id)
+    if locked is None or locked.status != "confirmed":
+        return _link_invalid()
+    if not await _online_change_allowed(db, locked):
+        return _online_change_refused("rescheduling")
+
+    # The catalog's live view for the requirements and eligibility; the appointment's own
+    # snapshot for the numbers the engine slides across the day — `change_appointment`'s own
+    # pattern (`scheduling/appointments.py`), minus the resize/override half it also has.
+    catalog = await catalog_entry(db, locked.service_id, include_inactive=True)
+    service = catalog.model_copy(
+        update={
+            "duration_minutes": locked.duration_minutes,
+            "buffer_before_minutes": locked.buffer_before_minutes,
+            "buffer_after_minutes": locked.buffer_after_minutes,
+        }
+    )
+    before, after = locked.buffer_before_minutes, locked.buffer_after_minutes
+    # No `relax_advisory` reaches this call either — `offered_slot`'s default, never overridden.
+    computed, slot = await offered_slot(
+        db, service, [locked.staff_id], payload.starts_at, excluding=locked.id
+    )
+    if slot is None:
+        return not_offered()
+
+    span = (slot.starts_at - timedelta(minutes=before), slot.ends_at + timedelta(minutes=after))
+    held = {r.resource_id for r in locked.resources}
+    claimed = assign_resources(
+        service.requirements,
+        sorted(computed.resources, key=lambda r: r.id not in held),
+        computed.resource_busy,
+        span,
+    )
+    if claimed is None:
+        return not_offered()
+
+    old_start = locked.starts_at
+    locked.starts_at = slot.starts_at
+    locked.ends_at = slot.ends_at
+    locked.resources = [
+        AppointmentResource(
+            resource_id=r.id, kind=r.kind, period=Range(span[0], span[1], bounds="[)")
+        )
+        for r in claimed
+    ]
+    try:
+        await db.flush()
+    except DBAPIError as error:
+        await db.rollback()
+        if not _is_slot_taken(error):
+            raise
+        return slot_taken()
+
+    record_event(
+        db,
+        "appointment.rescheduled",
+        target_type="appointment",
+        target_id=str(locked.id),
+        actor_user_id=None,
+        metadata={"from": utc(old_start), "to": utc(slot.starts_at), "source": "public_booking"},
+    )
+    await db.commit()
+    await cache.bump()
+
+    reloaded = await _load(db, locked.id)
+    await notify_booking_modified(db, reloaded)
+    return _out_manage(reloaded, await _online_change_allowed(db, reloaded))

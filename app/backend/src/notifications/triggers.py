@@ -20,11 +20,13 @@ module: `notifications/reminders.py`'s scheduler is not a sixth *event* (a remin
 a moment nothing observes, not raised by one), so it calls this same dispatch surface directly
 rather than this file growing a `notify_reminder` that pretends otherwise.
 
-**Nothing calls the booking triggers yet** except this task's own wiring. Booking Portal
-(Phase 6, not built) is what raises a booking confirmed/modified/cancelled event — the staff
-booking endpoint (`scheduling/appointments.py`) is explicitly not gaining a new notification
-side effect here; see that module's own docstring warning. `notify_form_link_issued` **is**
-wired now — `forms/links.py`'s issue endpoint is on `main`, so there is a real caller today.
+**The booking triggers' real callers are all in `scheduling/public.py`** (Phase 6, Tasks 2-3,
+#10): `notify_booking_confirmed` from `book_public`, `notify_booking_modified` from
+`manage_reschedule`, `notify_booking_cancelled` from `manage_cancel` — the client-facing
+booking portal, never the staff booking endpoint (`scheduling/appointments.py` is explicitly
+not gaining a new notification side effect here; see that module's own docstring warning).
+`notify_form_link_issued` **is** wired too — `forms/links.py`'s issue endpoint is on `main`,
+so there is a real caller today.
 `notify_package_notice` has no caller anywhere in this codebase (packages/billing is M4); it
 exists and is tested in isolation so that milestone has a function to call rather than a stub
 to write around.

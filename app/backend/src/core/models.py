@@ -78,6 +78,9 @@ class Business(Base):
             "email_sender IS NULL OR email_sender IN ('resend', 'smtp')",
             name="ck_businesses_email_sender",
         ),
+        CheckConstraint(
+            "cancellation_cutoff_hours >= 0", name="ck_businesses_cancellation_cutoff_hours"
+        ),
     )
 
     id: Mapped[int] = mapped_column(
@@ -197,6 +200,19 @@ class Business(Base):
     reminder_intervals_hours: Mapped[list[int]] = mapped_column(
         JSONB, server_default=text("'[24, 2]'::jsonb")
     )
+
+    # --- booking-portal policy (Phase 6 Task 3, #10; `scheduling/public.py`) ----------------
+    # Both read at the API, in `scheduling/public.py`'s cancel/reschedule handlers — never
+    # only hidden behind a UI toggle (#10's own acceptance criterion: "disabling online
+    # cancellation removes the capability at the API"). Task 4 builds the settings-panel
+    # toggle that edits these; this task only needed somewhere for that toggle to write to,
+    # so the column exists now with a sensible default rather than waiting on that UI.
+    online_cancellation_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    # Hours before `starts_at` a client may still cancel or reschedule online, reckoned
+    # against the plain instant (unlike `reminder_intervals_hours`, this is not a wall-clock
+    # recurrence rule — "24 hours before this exact appointment" means the same thing across
+    # a DST boundary that a weekly shift pattern would not).
+    cancellation_cutoff_hours: Mapped[int] = mapped_column(Integer, server_default=text("24"))
 
 
 class AuditEvent(Base):

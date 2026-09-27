@@ -1108,9 +1108,15 @@ class CancelIn(BaseModel):
         return blank_to_none(value)
 
 
-def _cancel(db: AsyncSession, appointment: Appointment, actor: User, reason: str | None) -> None:
+def _cancel(
+    db: AsyncSession, appointment: Appointment, actor: User | None, reason: str | None
+) -> None:
     """The one cancellation code path — a single member and every member of a group both
-    call this, so "cancelled" means the same three things everywhere it happens."""
+    call this, so "cancelled" means the same three things everywhere it happens.
+
+    `actor` is `None` for a client's own cancellation through the booking-management link
+    (`scheduling/public.py`, Phase 6 Task 3) — the audit row's `actor_user_id` is then `None`
+    too, the same discipline `book_public`'s own `appointment.booked` event already uses."""
     appointment.status = "cancelled"
     appointment.cancelled_at = datetime.now(UTC)
     appointment.cancel_reason = reason
@@ -1120,7 +1126,7 @@ def _cancel(db: AsyncSession, appointment: Appointment, actor: User, reason: str
         "appointment.cancelled",
         target_type="appointment",
         target_id=str(appointment.id),
-        actor_user_id=actor.id,
+        actor_user_id=actor.id if actor else None,
         metadata={"reason": reason},
     )
 

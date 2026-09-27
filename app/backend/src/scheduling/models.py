@@ -31,6 +31,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -593,3 +594,38 @@ class AppointmentResource(Base):
     period: Mapped[Range[datetime]] = mapped_column(TSTZRANGE)
 
     resource: Mapped["Resource"] = relationship(lazy="joined")
+
+
+class BookingManagementLink(Base):
+    """A client's own way back to one appointment they booked online (Phase 6 Task 3, #10):
+    mirrors `forms.models.FormLink`'s shape — `secrets.token_urlsafe(32)`, only the SHA-256
+    ever stored (`scheduling/public.py`) — except **not single-use**: a client reopens the
+    same link to view, then maybe reschedule, then maybe cancel (m3.md's owner ruling).
+
+    No `expires_at` of its own. The appointment it points at *is* the expiry:
+    `scheduling/public.py`'s lookup treats the link as dead once that appointment is no
+    longer `confirmed` or has already started, so a reschedule (which moves `starts_at`)
+    never needs to touch a second, independent clock here — there is only ever one.
+
+    `ON DELETE CASCADE` for the same reason `AppointmentResource` has one: a link is nothing
+    without the appointment it manages, never history to be kept once that row is truly gone
+    (the wipe fixtures' raw `DELETE FROM appointments` in the test suite relies on this, the
+    same as it already relies on `appointment_resources`'s)."""
+
+    __tablename__ = "booking_management_links"
+    __table_args__ = (
+        CheckConstraint(
+            "octet_length(token_sha256) = 32", name="ck_booking_management_links_sha256"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    token_sha256: Mapped[bytes] = mapped_column(LargeBinary, unique=True)
+    # One link per appointment: `book_public` issues exactly one, and nothing else ever mints
+    # a second for the same row.
+    appointment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("appointments.id", ondelete="CASCADE"), unique=True
+    )
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
