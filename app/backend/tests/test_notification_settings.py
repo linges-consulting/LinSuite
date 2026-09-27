@@ -108,6 +108,8 @@ async def test_an_unconfigured_business_says_so_plainly(client):
     assert body["cancellation_cutoff_hours"] == 24
     assert body["booking_daily_cap_per_ip"] == 20
     assert body["booking_daily_cap_per_email"] == 5
+    # Walk-in queue (Phase 7 Task 1, #12) — off by default, the migration's own default.
+    assert body["enable_walk_in_queue"] is False
 
 
 async def test_the_templates_list_has_all_twelve_seeded_rows_with_their_merge_fields(client):
@@ -395,6 +397,38 @@ async def test_a_test_sms_is_refused_while_sms_is_disabled(client):
     resp = await client.post(f"{NOTIFICATIONS}/test-sms", json={"to": "+15559876543"})
 
     assert resp.status_code == 400, resp.text
+
+
+# --- walk-in queue toggle (Phase 7 Task 1, #12) ----------------------------------------------
+#
+# Only the toggle's own GET/PATCH round trip: there is no queue CRUD, nav entry or display
+# screen yet (Tasks 2/8) for this flag to gate, so there is nothing else to test here.
+
+
+async def test_the_walk_in_queue_toggle_round_trips(client):
+    await as_admin(client)
+
+    resp = await client.patch(NOTIFICATIONS, json={"enable_walk_in_queue": True})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["enable_walk_in_queue"] is True
+
+    events = await audit("business.notification_settings_updated")
+    assert events[-1] == {"changed": ["enable_walk_in_queue"]}
+
+    # And it persists across a fresh GET, not just echoed back on the PATCH response.
+    again = await client.get(NOTIFICATIONS)
+    assert again.json()["enable_walk_in_queue"] is True
+
+
+async def test_the_walk_in_queue_toggle_is_left_alone_by_an_unrelated_patch(client):
+    await as_admin(client)
+    await client.patch(NOTIFICATIONS, json={"enable_walk_in_queue": True})
+
+    resp = await client.patch(NOTIFICATIONS, json={"sms_enabled": True})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["enable_walk_in_queue"] is True
 
 
 # --- templates: their own sub-resource, audited by field name only --------------------------

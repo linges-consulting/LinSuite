@@ -629,3 +629,64 @@ class BookingManagementLink(Base):
         ForeignKey("appointments.id", ondelete="CASCADE"), unique=True
     )
     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# "Take a number", never "fit me in" (CLAUDE.md's own warning: two different things are called
+# "walk-in", and the always-on "next available" search shortcut — Phase 7 Task 3 — is the other
+# one and touches nothing here). A string with a CHECK, like `APPOINTMENT_STATUSES` above.
+QUEUE_ENTRY_STATUSES = ("waiting", "in_service", "done", "abandoned")
+
+
+class QueueEntry(Base):
+    """One walk-in waiting to be seen (Phase 7 Task 1, #12). Only ever populated when a
+    business has opted in via `businesses.enable_walk_in_queue` (default off) — with it off,
+    nothing reads or writes this table (Tasks 2/8 gate the CRUD routes and the display screen
+    on that same column; this table existing is not itself a queue surface).
+
+    **A waiting client has no time range** (tech-stack §22), which is what makes this a
+    separate table rather than an `Appointment` with `starts_at = now()`: every scheduling
+    mechanism this application has — the exclusion constraint, the availability engine, the
+    staff-concurrency trigger — assumes a span exists, and continuously rewriting one as the
+    queue shifts would mean fighting those constraints on every tick instead of using them.
+    **A queue entry converts into a real `Appointment` the moment service starts** (Task 5) —
+    once genuinely in service it *is* an appointment, so treatment receipts, package
+    redemption, commission attribution and session notes all work unchanged, because every one
+    of them only ever looks at `Appointment`.
+
+    **Exactly one of `customer_id`/`bare_name`.** A walk-in may be a known returning client
+    (matched the same way the booking dialog's "existing" path already does) or a name-only
+    quick-entry — "a barbershop cannot collect a full profile at the door" (tech-stack §22) —
+    never both, never neither. `num_nonnulls(customer_id, bare_name) = 1` says exactly that in
+    one call, the plain Postgres idiom for the invariant rather than a hand-rolled pair of
+    `IS NULL`/`IS NOT NULL` checks XORed together.
+
+    **No cascade on any of the three FKs** — the same as `Appointment.customer_id`/`staff_id`/
+    `service_id` immediately above. A customer, a staff member and a service are each never
+    hard-deleted (every one of those modules' own "no hard delete" rule: deactivated, not
+    dropped), so there is nothing here a cascade would ever actually need to reach; matching
+    the sibling table's FK shape to the same three targets is one fewer inconsistency to carry.
+
+    No relationships declared yet — nothing reads a joined row here until Task 2's list/detail
+    endpoints exist and know what shape they actually need.
+    """
+
+    __tablename__ = "queue_entries"
+    __table_args__ = (
+        CheckConstraint(
+            "num_nonnulls(customer_id, bare_name) = 1", name="ck_queue_entries_identity"
+        ),
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{s}'" for s in QUEUE_ENTRY_STATUSES) + ")",
+            name="ck_queue_entries_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("customers.id"))
+    bare_name: Mapped[str | None] = mapped_column(String(200))
+    requested_service_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("services.id"))
+    preferred_staff_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("staff.id"))
+    arrived_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    status: Mapped[str] = mapped_column(String(16), server_default=text("'waiting'"))

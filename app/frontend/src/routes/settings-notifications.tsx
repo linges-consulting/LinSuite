@@ -54,6 +54,9 @@ type Draft = {
   cancellation_cutoff_hours: string
   booking_daily_cap_per_ip: string
   booking_daily_cap_per_email: string
+  /** Walk-in queue (Phase 7 Task 1, #12) — "take a number", not the always-on "fit me in"
+   *  search shortcut (CLAUDE.md). Its own small section below, same form. */
+  enable_walk_in_queue: boolean
 }
 
 function draftFrom(data: NotificationSettings): Draft {
@@ -76,6 +79,7 @@ function draftFrom(data: NotificationSettings): Draft {
     cancellation_cutoff_hours: String(data.cancellation_cutoff_hours),
     booking_daily_cap_per_ip: String(data.booking_daily_cap_per_ip),
     booking_daily_cap_per_email: String(data.booking_daily_cap_per_email),
+    enable_walk_in_queue: data.enable_walk_in_queue,
   }
 }
 
@@ -102,6 +106,7 @@ function toChange(draft: Draft): NotificationSettingsChange {
     cancellation_cutoff_hours: Number(draft.cancellation_cutoff_hours),
     booking_daily_cap_per_ip: Number(draft.booking_daily_cap_per_ip),
     booking_daily_cap_per_email: Number(draft.booking_daily_cap_per_email),
+    enable_walk_in_queue: draft.enable_walk_in_queue,
   }
   if (draft.resend_api_key) change.resend_api_key = draft.resend_api_key
   if (draft.smtp_password) change.smtp_password = draft.smtp_password
@@ -121,8 +126,10 @@ function toChange(draft: Draft): NotificationSettingsChange {
  *
  * **Booking Portal's policy toggles (Phase 6 Task 4) are their own `<section>` below** —
  * `BookingPolicySection`, appended after the reminder section, same panel, same form, same
- * Save button. Walk-in Queue (Phase 7) still reserves the layout for its own toggle after
- * that, in this same component, not a second settings surface (m3.md).
+ * Save button. **Walk-in Queue's `enable_walk_in_queue` toggle (Phase 7 Task 1) is its own
+ * small `<section>` after that** — `WalkInQueueSection` — same panel, not a second settings
+ * surface (m3.md's own ruling). There is no queue CRUD or display screen to gate on it yet
+ * (Tasks 2/8); this section only makes the toggle itself exist and be honest.
  *
  * **`EmbedSection` (Phase 6 Task 5) sits after the form, its own read-only display** — it has
  * no field to save, just a snippet built from the browser's own origin, so it is not part of
@@ -170,9 +177,7 @@ export function NotificationsPanel() {
         <SmsSection data={settings.data} form={form} set={set} errors={errors} />
         <ReminderSection form={form} set={set} error={errors.reminder_intervals_hours} />
         <BookingPolicySection form={form} set={set} errors={errors} />
-
-        {/* Phase 7's walk-in-queue toggle appends its own <section> here, inside this same
-            form. */}
+        <WalkInQueueSection form={form} set={set} />
 
         <div className="flex gap-2 border-t pt-6">
           <Button type="submit" disabled={save.isPending || draft === null}>
@@ -607,6 +612,39 @@ function BookingPolicySection(props: {
           onChange={(e) => set({ cancellation_cutoff_hours: e.target.value })}
         />
       </Field>
+    </section>
+  )
+}
+
+/**
+ * Walk-in queue toggle (Phase 7 Task 1, #12). "Take a number", not "fit me in" — CLAUDE.md's
+ * own distinction between the two things called "walk-in": the always-on "next available"
+ * search shortcut lives in the ordinary booking flow and needs no toggle at all; this is the
+ * opt-in queue for a business where service starts when a chair frees, not by appointment
+ * time. Off by default. There is no queue screen or nav entry to gate on this yet (Tasks
+ * 2/8) — this section only saves the flag.
+ */
+function WalkInQueueSection(props: { form: Draft; set: (patch: Partial<Draft>) => void }) {
+  const { form, set } = props
+  return (
+    <section className="flex flex-col gap-4 border-t pt-6">
+      <h2 className="text-base font-medium">Walk-in queue</h2>
+      <div className="flex gap-3">
+        <Checkbox
+          id="enable-walk-in-queue"
+          className="mt-0.5"
+          checked={form.enable_walk_in_queue}
+          onCheckedChange={(checked) => set({ enable_walk_in_queue: checked === true })}
+        />
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="enable-walk-in-queue">Enable the walk-in queue ("take a number")</Label>
+          <p className="text-xs text-muted-foreground">
+            For a business where service starts as soon as a chair frees, not at a booked
+            time. Off by default. Separate from finding the next available appointment slot,
+            which is always available in the booking flow regardless of this setting.
+          </p>
+        </div>
+      </div>
     </section>
   )
 }

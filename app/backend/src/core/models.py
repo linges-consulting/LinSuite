@@ -229,6 +229,15 @@ class Business(Base):
     booking_daily_cap_per_ip: Mapped[int] = mapped_column(Integer, server_default=text("20"))
     booking_daily_cap_per_email: Mapped[int] = mapped_column(Integer, server_default=text("5"))
 
+    # --- walk-in queue toggle (Phase 7 Task 1, #12; `scheduling/models.py::QueueEntry`) ------
+    # Off by default. CLAUDE.md's own distinction: "fit me in" (an always-on "next available"
+    # search shortcut in the ordinary booking flow, Phase 7 Task 3) is not this. This is "take
+    # a number" — a business opts in because service there starts when a chair frees, not by
+    # appointment time. With it off, no queue surface exists anywhere in the product (#12's own
+    # acceptance criterion) — Tasks 2/8 gate the CRUD routes, the nav entry and the frontend
+    # route on this same column; this task only makes the toggle itself exist and be honest.
+    enable_walk_in_queue: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+
 
 class AuditEvent(Base):
     """Append-only: who did what, and when (ADR-0002).

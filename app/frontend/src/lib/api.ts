@@ -978,6 +978,9 @@ export type NotificationSettings = {
   cancellation_cutoff_hours: number
   booking_daily_cap_per_ip: number
   booking_daily_cap_per_email: number
+
+  // --- walk-in queue toggle (Phase 7 Task 1, #12) — "take a number", not "fit me in" ---
+  enable_walk_in_queue: boolean
 }
 
 /** A field left out is left alone — the three secrets included, so rotating one credential
@@ -1002,6 +1005,7 @@ export type NotificationSettingsChange = Partial<{
   cancellation_cutoff_hours: number
   booking_daily_cap_per_ip: number
   booking_daily_cap_per_email: number
+  enable_walk_in_queue: boolean
 }>
 
 export async function fetchNotificationSettings(): Promise<NotificationSettings> {

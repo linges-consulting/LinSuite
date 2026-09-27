@@ -32,6 +32,9 @@ async def claimed_instance(client):
     await wipe_document_keys()
     async with session_scope() as db:
         for table in (
+            # A leftover queue entry (Phase 7 Task 1, #12) FKs to customers/staff with no
+            # cascade — deleted first, same reason appointments precedes customers below.
+            "queue_entries",
             "appointment_resources",
             "appointments",
             "customers",

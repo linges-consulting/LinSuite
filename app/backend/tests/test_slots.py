@@ -49,6 +49,9 @@ async def claimed_instance(client):
         await purge.execute(text("DELETE FROM audit_events"))
     async with session_scope() as db:
         for table in (
+            # A leftover queue entry (Phase 7 Task 1, #12) FKs to services/staff with no
+            # cascade — deleted first.
+            "queue_entries",
             "service_requirements",
             "service_staff",
             "services",

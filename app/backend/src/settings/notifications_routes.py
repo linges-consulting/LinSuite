@@ -66,6 +66,13 @@ because no admin endpoint existed yet. All five are read at the API layer in
 criterion) — this endpoint only writes the value; `scheduling/public.py` is where each one is
 actually enforced. Same PATCH shape as everything else here: omitted means untouched, and a
 real change is diffed into the one `record_event` call the endpoint already makes.
+
+**`enable_walk_in_queue` (Phase 7 Task 1, #12) — one more field in this same panel**, per the
+layout Task 4 above already reserved for it. Unlike the booking-portal fields, there is no
+enforcement anywhere yet to wire this into: Tasks 2/8 (queue CRUD, the nav entry, the display
+screen) haven't been built, so this PATCH only makes the toggle itself exist and be readable —
+"with the queue disabled, no queue surface exists anywhere in the product" holds trivially
+right now, since no surface exists yet regardless of this flag's value.
 """
 
 import uuid
@@ -221,6 +228,9 @@ class NotificationSettingsOut(BaseModel):
     booking_daily_cap_per_ip: int
     booking_daily_cap_per_email: int
 
+    # --- walk-in queue toggle (Phase 7 Task 1, #12) -------------------------------------
+    enable_walk_in_queue: bool
+
 
 class NotificationSettingsChange(BaseModel):
     """A field left out (or sent `null`) is left alone — the Security panel's own rule, applied
@@ -249,6 +259,9 @@ class NotificationSettingsChange(BaseModel):
     cancellation_cutoff_hours: CancellationCutoffHours | None = None
     booking_daily_cap_per_ip: DailyCap | None = None
     booking_daily_cap_per_email: DailyCap | None = None
+
+    # --- walk-in queue toggle (Phase 7 Task 1, #12) -------------------------------------
+    enable_walk_in_queue: bool | None = None
 
 
 class TestEmailRequest(BaseModel):
@@ -321,6 +334,7 @@ def _settings_out(
         cancellation_cutoff_hours=business.cancellation_cutoff_hours,
         booking_daily_cap_per_ip=business.booking_daily_cap_per_ip,
         booking_daily_cap_per_email=business.booking_daily_cap_per_email,
+        enable_walk_in_queue=business.enable_walk_in_queue,
     )
 
 
@@ -375,6 +389,8 @@ async def update_notification_settings(
         candidates["booking_daily_cap_per_ip"] = payload.booking_daily_cap_per_ip
     if payload.booking_daily_cap_per_email is not None:
         candidates["booking_daily_cap_per_email"] = payload.booking_daily_cap_per_email
+    if payload.enable_walk_in_queue is not None:
+        candidates["enable_walk_in_queue"] = payload.enable_walk_in_queue
 
     changed = [field for field, value in candidates.items() if getattr(business, field) != value]
     for field in changed:
