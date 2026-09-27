@@ -971,6 +971,13 @@ export type NotificationSettings = {
   twilio_auth_token_set: boolean
   reminder_intervals_hours: number[]
   templates: NotificationTemplate[]
+
+  // --- booking-portal policy (Phase 6 Task 4, #10) — read at the API, not just this panel ---
+  online_booking_enabled: boolean
+  online_cancellation_enabled: boolean
+  cancellation_cutoff_hours: number
+  booking_daily_cap_per_ip: number
+  booking_daily_cap_per_email: number
 }
 
 /** A field left out is left alone — the three secrets included, so rotating one credential
@@ -990,6 +997,11 @@ export type NotificationSettingsChange = Partial<{
   twilio_auth_token: string
   twilio_from_number: string | null
   reminder_intervals_hours: number[]
+  online_booking_enabled: boolean
+  online_cancellation_enabled: boolean
+  cancellation_cutoff_hours: number
+  booking_daily_cap_per_ip: number
+  booking_daily_cap_per_email: number
 }>
 
 export async function fetchNotificationSettings(): Promise<NotificationSettings> {

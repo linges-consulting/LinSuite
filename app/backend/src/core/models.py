@@ -81,6 +81,12 @@ class Business(Base):
         CheckConstraint(
             "cancellation_cutoff_hours >= 0", name="ck_businesses_cancellation_cutoff_hours"
         ),
+        CheckConstraint(
+            "booking_daily_cap_per_ip >= 1", name="ck_businesses_booking_daily_cap_per_ip"
+        ),
+        CheckConstraint(
+            "booking_daily_cap_per_email >= 1", name="ck_businesses_booking_daily_cap_per_email"
+        ),
     )
 
     id: Mapped[int] = mapped_column(
@@ -201,18 +207,27 @@ class Business(Base):
         JSONB, server_default=text("'[24, 2]'::jsonb")
     )
 
-    # --- booking-portal policy (Phase 6 Task 3, #10; `scheduling/public.py`) ----------------
-    # Both read at the API, in `scheduling/public.py`'s cancel/reschedule handlers — never
-    # only hidden behind a UI toggle (#10's own acceptance criterion: "disabling online
-    # cancellation removes the capability at the API"). Task 4 builds the settings-panel
-    # toggle that edits these; this task only needed somewhere for that toggle to write to,
-    # so the column exists now with a sensible default rather than waiting on that UI.
+    # --- booking-portal policy (Phase 6 Tasks 3-4, #10; `scheduling/public.py`,
+    # `settings/notifications_routes.py`) ----------------------------------------------------
+    # All four read at the API — never only hidden behind a UI toggle (#10's own acceptance
+    # criterion: "disabling online cancellation removes the capability at the API"). Editable
+    # through the same notification/portal settings panel (Task 4).
     online_cancellation_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     # Hours before `starts_at` a client may still cancel or reschedule online, reckoned
     # against the plain instant (unlike `reminder_intervals_hours`, this is not a wall-clock
     # recurrence rule — "24 hours before this exact appointment" means the same thing across
     # a DST boundary that a weekly shift pattern would not).
     cancellation_cutoff_hours: Mapped[int] = mapped_column(Integer, server_default=text("24"))
+    # The whole-portal switch (Task 4): `scheduling/public.py`'s availability and booking
+    # routes both 404 the same way an unknown/not-`bookable_online` service already does, once
+    # this is off — distinct from `bookable_online`, which is per-service. Defaulted on so an
+    # upgrade through this migration changes nothing until an administrator turns it off.
+    online_booking_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    # Admin-configurable counterparts of what were `scheduling/public.py`'s fixed
+    # `_DAILY_CAP_PER_IP`/`_DAILY_CAP_PER_EMAIL` constants (Task 2) — same defaults, now a
+    # setting rather than a number only a code change could move.
+    booking_daily_cap_per_ip: Mapped[int] = mapped_column(Integer, server_default=text("20"))
+    booking_daily_cap_per_email: Mapped[int] = mapped_column(Integer, server_default=text("5"))
 
 
 class AuditEvent(Base):

@@ -25,8 +25,11 @@ already stored since M1/M2). A service an administrator has not opted into onlin
 a 404 here — the same generic "No such service." `catalog_entry` already gives an unknown or
 inactive one, since there is no reason a client should be able to tell "exists but is
 in-person-only" apart from "does not exist". The separate, *business-wide*
-`online_booking_enabled` toggle (Phase 6 Task 4) is a later gate on the whole portal; this
-route does not check it, per this task's own scope note in `m3.md`.
+`online_booking_enabled` toggle (Phase 6 Task 4, `settings/notifications_routes.py`) is a
+second gate on the whole portal, checked first in both `public_availability` and
+`book_public` — off, and every request gets the identical 404, before a service is even
+looked up (there is nothing to distinguish "this service is in-person-only" from "the whole
+portal is off" either).
 
 **Booking is one atomic request against the same `offered_slot`/`assign_resources` primitives
 staff booking uses** (`scheduling/appointments.py::book_appointment`) — immediately
@@ -38,13 +41,15 @@ for deciding whether this is the same person) — otherwise `create_customer` in
 function staff booking already calls, with no actor at all (migration 0037 made
 `appointments.created_by_user_id` and `create_customer`'s `actor_id` both accept `None`).
 
-**Abuse controls** (#10's own acceptance criteria), checked in this order, before anything
-touches the database: the honeypot first (`PublicBookingIn.website` must arrive empty, or the
-request is silently accepted and thrown away — a 200 indistinguishable from a real booking's),
-then the per-IP and per-email **daily** caps (`_daily_cap_exceeded`, a day window, Redis
-`incr`+`expire(86400)` keyed on the digest of the address/email — `auth/throttle.py`'s
-digest-keying style, not `forms/public.py`'s 60-second one). `online_booking_enabled` is
-Task 4's gate, not built yet — treated as always on for now, per this task's own scope note.
+**Abuse controls** (#10's own acceptance criteria), checked in this order: the whole-portal
+`online_booking_enabled` gate first (module docstring — a 404 before anything else runs, the
+same as an unknown service), then the honeypot (`PublicBookingIn.website` must arrive empty,
+or the request is silently accepted and thrown away — a 200 indistinguishable from a real
+booking's), then the per-IP and per-email **daily** caps (`_daily_cap_exceeded`, a day window,
+Redis `incr`+`expire(86400)` keyed on the digest of the address/email — `auth/throttle.py`'s
+digest-keying style, not `forms/public.py`'s 60-second one). The two cap numbers are read off
+the business row (`booking_daily_cap_per_ip`/`booking_daily_cap_per_email`, Task 4) — no
+longer the fixed constants Task 2 shipped this file with.
 
 **Notification**: `notify_booking_confirmed` (Phase 12 Task 5) is called on success, over the
 freshly committed, freshly reloaded appointment. `dispatch` (`notifications/triggers.py`)
@@ -114,6 +119,9 @@ async def public_availability(
     eligible staff member", exactly as it does there (`CatalogServiceOut.staff_ids`, the
     engine's own "any available" mode — not reinvented here)."""
     check_range(from_, to)
+    business = await load_business(db)
+    if not business.online_booking_enabled:
+        raise HTTPException(status_code=404, detail="No such service.")
     service = await catalog_entry(db, service_id)
     if not service.bookable_online:
         raise HTTPException(status_code=404, detail="No such service.")
@@ -121,13 +129,6 @@ async def public_availability(
 
 
 # --- booking (Task 2) -----------------------------------------------------------------------
-
-
-# ponytail: fixed constants for now. m3.md's own Phase 6 Task 4 makes these admin-configurable
-# (extending the notification settings panel); nothing here should grow a placeholder setting
-# ahead of that task.
-_DAILY_CAP_PER_IP = 20
-_DAILY_CAP_PER_EMAIL = 5
 
 
 class PublicBookingIn(BaseModel):
@@ -211,18 +212,22 @@ async def _match_existing_customer(db: AsyncSession, identity: CustomerIn) -> Cu
 async def book_public(payload: PublicBookingIn, request: Request, db: SessionDep):
     """The client-facing booking creation route (module docstring). No capability, no
     session — the request itself is the only thing that has to be trusted, which is exactly
-    why the abuse controls run first, before the honeypot's own answer or a cap refusal ever
-    touches the database."""
+    why the whole-portal gate and the abuse controls all run first, before the honeypot's own
+    answer or a cap refusal ever touches anything else."""
+    business = await load_business(db)
+    if not business.online_booking_enabled:
+        raise HTTPException(status_code=404, detail="No such service.")
+
     if payload.website:
         # Tripped: silently accepted, nothing created. The same 200 shape a real booking's
         # caller could not tell apart from success by status code alone.
         return JSONResponse(status_code=200, content={"status": "received"})
 
     address = request.client.host if request.client else "unknown"
-    if await _daily_cap_exceeded("ip", address, _DAILY_CAP_PER_IP):
+    if await _daily_cap_exceeded("ip", address, business.booking_daily_cap_per_ip):
         raise _too_many_bookings()
     if payload.customer.email and await _daily_cap_exceeded(
-        "email", payload.customer.email, _DAILY_CAP_PER_EMAIL
+        "email", payload.customer.email, business.booking_daily_cap_per_email
     ):
         raise _too_many_bookings()
 

@@ -48,6 +48,12 @@ type Draft = {
   /** Edited as one comma-separated field — "24, 2" — and split on save; this is the only
    *  field of the twelve here that isn't a 1:1 mirror of a server column. */
   reminder_intervals_hours: string
+  /** Booking-portal policy (Phase 6 Task 4, #10) — a new section below, same panel. */
+  online_booking_enabled: boolean
+  online_cancellation_enabled: boolean
+  cancellation_cutoff_hours: string
+  booking_daily_cap_per_ip: string
+  booking_daily_cap_per_email: string
 }
 
 function draftFrom(data: NotificationSettings): Draft {
@@ -65,6 +71,11 @@ function draftFrom(data: NotificationSettings): Draft {
     twilio_auth_token: '',
     twilio_from_number: data.twilio_from_number ?? '',
     reminder_intervals_hours: data.reminder_intervals_hours.join(', '),
+    online_booking_enabled: data.online_booking_enabled,
+    online_cancellation_enabled: data.online_cancellation_enabled,
+    cancellation_cutoff_hours: String(data.cancellation_cutoff_hours),
+    booking_daily_cap_per_ip: String(data.booking_daily_cap_per_ip),
+    booking_daily_cap_per_email: String(data.booking_daily_cap_per_email),
   }
 }
 
@@ -86,6 +97,11 @@ function toChange(draft: Draft): NotificationSettingsChange {
       .map((piece) => piece.trim())
       .filter(Boolean)
       .map(Number),
+    online_booking_enabled: draft.online_booking_enabled,
+    online_cancellation_enabled: draft.online_cancellation_enabled,
+    cancellation_cutoff_hours: Number(draft.cancellation_cutoff_hours),
+    booking_daily_cap_per_ip: Number(draft.booking_daily_cap_per_ip),
+    booking_daily_cap_per_email: Number(draft.booking_daily_cap_per_email),
   }
   if (draft.resend_api_key) change.resend_api_key = draft.resend_api_key
   if (draft.smtp_password) change.smtp_password = draft.smtp_password
@@ -103,9 +119,10 @@ function toChange(draft: Draft): NotificationSettingsChange {
  * its own id, so "save this template" and "save the sender" are different actions even though
  * they live on the same screen.
  *
- * **This panel also reserves the layout for what Booking Portal (Phase 6) and Walk-in Queue
- * (Phase 7) add next** — their own toggles are new `<section>`s appended below the reminder
- * section, in this same component, not a second settings surface (m3.md).
+ * **Booking Portal's policy toggles (Phase 6 Task 4) are their own `<section>` below** —
+ * `BookingPolicySection`, appended after the reminder section, same panel, same form, same
+ * Save button. Walk-in Queue (Phase 7) still reserves the layout for its own toggle after
+ * that, in this same component, not a second settings surface (m3.md).
  */
 export function NotificationsPanel() {
   const queryClient = useQueryClient()
@@ -148,9 +165,10 @@ export function NotificationsPanel() {
         <EmailSection data={settings.data} form={form} set={set} errors={errors} />
         <SmsSection data={settings.data} form={form} set={set} errors={errors} />
         <ReminderSection form={form} set={set} error={errors.reminder_intervals_hours} />
+        <BookingPolicySection form={form} set={set} errors={errors} />
 
-        {/* Phase 6's booking-policy toggles and Phase 7's walk-in-queue toggle append their
-            own <section> here, inside this same form. */}
+        {/* Phase 7's walk-in-queue toggle appends its own <section> here, inside this same
+            form. */}
 
         <div className="flex gap-2 border-t pt-6">
           <Button type="submit" disabled={save.isPending || draft === null}>
@@ -481,6 +499,106 @@ function ReminderSection(props: {
           className="max-w-xs"
           value={props.form.reminder_intervals_hours}
           onChange={(e) => props.set({ reminder_intervals_hours: e.target.value })}
+        />
+      </Field>
+    </section>
+  )
+}
+
+/**
+ * Booking-portal policy (Phase 6 Task 4, #10) — the section Task 6 reserved layout for.
+ * Every one of these toggles is enforced at the API in `scheduling/public.py`; this screen
+ * only writes the value, so hiding a disabled action here is cosmetic, never the enforcement.
+ */
+function BookingPolicySection(props: {
+  form: Draft
+  set: (patch: Partial<Draft>) => void
+  errors: Record<string, string>
+}) {
+  const { form, set, errors } = props
+  return (
+    <section className="flex flex-col gap-4 border-t pt-6">
+      <h2 className="text-base font-medium">Online booking</h2>
+
+      <div className="flex gap-3">
+        <Checkbox
+          id="online-booking-enabled"
+          className="mt-0.5"
+          checked={form.online_booking_enabled}
+          onCheckedChange={(checked) => set({ online_booking_enabled: checked === true })}
+        />
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="online-booking-enabled">Allow clients to book online</Label>
+          <p className="text-xs text-muted-foreground">
+            Off refuses every request to the public booking page, even for a service marked
+            bookable online — the same as if the page didn't exist.
+          </p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <Field
+          label="Per-IP daily booking limit"
+          htmlFor="cap-per-ip"
+          error={errors.booking_daily_cap_per_ip}
+        >
+          <Input
+            id="cap-per-ip"
+            type="number"
+            min={1}
+            max={1000}
+            value={form.booking_daily_cap_per_ip}
+            onChange={(e) => set({ booking_daily_cap_per_ip: e.target.value })}
+          />
+        </Field>
+        <Field
+          label="Per-email daily booking limit"
+          htmlFor="cap-per-email"
+          error={errors.booking_daily_cap_per_email}
+        >
+          <Input
+            id="cap-per-email"
+            type="number"
+            min={1}
+            max={1000}
+            value={form.booking_daily_cap_per_email}
+            onChange={(e) => set({ booking_daily_cap_per_email: e.target.value })}
+          />
+        </Field>
+      </div>
+
+      <div className="flex gap-3 border-t pt-4">
+        <Checkbox
+          id="online-cancellation-enabled"
+          className="mt-0.5"
+          checked={form.online_cancellation_enabled}
+          onCheckedChange={(checked) => set({ online_cancellation_enabled: checked === true })}
+        />
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="online-cancellation-enabled">
+            Allow clients to cancel or reschedule online
+          </Label>
+          <p className="text-xs text-muted-foreground">
+            Off refuses a cancel or reschedule request through the management link, whatever
+            the cutoff below says — clients still need to contact you directly.
+          </p>
+        </div>
+      </div>
+
+      <Field
+        label="Cancellation cutoff (hours before the appointment)"
+        htmlFor="cancellation-cutoff"
+        error={errors.cancellation_cutoff_hours}
+        hint="Inside this window, an online cancel or reschedule is refused."
+      >
+        <Input
+          id="cancellation-cutoff"
+          type="number"
+          className="max-w-xs"
+          min={0}
+          max={8760}
+          value={form.cancellation_cutoff_hours}
+          onChange={(e) => set({ cancellation_cutoff_hours: e.target.value })}
         />
       </Field>
     </section>

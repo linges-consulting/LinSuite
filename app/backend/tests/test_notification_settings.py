@@ -101,6 +101,13 @@ async def test_an_unconfigured_business_says_so_plainly(client):
     assert body["sms_ready"] is False
     assert body["twilio_auth_token_set"] is False
     assert body["reminder_intervals_hours"] == [24, 2]
+    # Booking-portal policy (Phase 6 Task 4, #10) — the migration's own defaults, unchanged
+    # until an administrator edits them here.
+    assert body["online_booking_enabled"] is True
+    assert body["online_cancellation_enabled"] is True
+    assert body["cancellation_cutoff_hours"] == 24
+    assert body["booking_daily_cap_per_ip"] == 20
+    assert body["booking_daily_cap_per_email"] == 5
 
 
 async def test_the_templates_list_has_all_twelve_seeded_rows_with_their_merge_fields(client):

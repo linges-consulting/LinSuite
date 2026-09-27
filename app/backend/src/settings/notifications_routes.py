@@ -55,6 +55,17 @@ seeded bodies, not invented), each with its own id, so each is edited with its o
 `PUT .../templates/{id}` rather than folded into the one big PATCH above. The settings screen's
 single Save button still reads as one action to an administrator; it is free to issue several
 requests to get there.
+
+**Booking-portal policy (Phase 6 Task 4, #10) — a new section in this same panel, not a
+second one** (m3.md's owner ruling: portal policy and notifications share one settings
+surface). `online_booking_enabled` and the two daily-cap numbers are new columns (migration
+0039); `online_cancellation_enabled`/`cancellation_cutoff_hours` are Task 3's existing columns,
+made editable here for the first time — Task 3 could only flip them with a raw `UPDATE`
+because no admin endpoint existed yet. All five are read at the API layer in
+`scheduling/public.py`, not merely hidden in the frontend when off (#10's own acceptance
+criterion) — this endpoint only writes the value; `scheduling/public.py` is where each one is
+actually enforced. Same PATCH shape as everything else here: omitted means untouched, and a
+real change is diffed into the one `record_event` call the endpoint already makes.
 """
 
 import uuid
@@ -110,6 +121,22 @@ def _valid_intervals(value: list[int]) -> list[int]:
 
 
 ReminderIntervals = Annotated[list[int], AfterValidator(_valid_intervals)]
+
+
+def _sane_cutoff_hours(value: int) -> int:
+    # Same sanity-ceiling reasoning as `_valid_intervals`'s 720-hour cap, scaled to a
+    # cancellation policy: a year's notice is already far past what any real policy needs,
+    # and the DB's own CHECK (migration 0038) only rules out negative numbers.
+    if value > 8760:
+        raise ValueError("A cancellation cutoff of more than 365 days (8760 hours) is not allowed.")
+    return value
+
+
+CancellationCutoffHours = Annotated[int, Field(ge=0), AfterValidator(_sane_cutoff_hours)]
+# Same defaults as the `_DAILY_CAP_PER_IP`/`_DAILY_CAP_PER_EMAIL` constants these columns
+# replace (`scheduling/public.py`); the upper bound is a sanity ceiling against a typo, not a
+# policy limit — 1000 bookings a day from one address or one email is already implausible.
+DailyCap = Annotated[int, Field(ge=1, le=1000)]
 
 # The merge fields each notification type's seeded body (migration 0032) actually uses — shown
 # beside that type's templates so an administrator editing them knows what `$identifier`s
@@ -187,6 +214,13 @@ class NotificationSettingsOut(BaseModel):
     reminder_intervals_hours: list[int]
     templates: list[NotificationTemplateOut]
 
+    # --- booking-portal policy (Phase 6 Task 4, #10) ------------------------------------
+    online_booking_enabled: bool
+    online_cancellation_enabled: bool
+    cancellation_cutoff_hours: int
+    booking_daily_cap_per_ip: int
+    booking_daily_cap_per_email: int
+
 
 class NotificationSettingsChange(BaseModel):
     """A field left out (or sent `null`) is left alone — the Security panel's own rule, applied
@@ -208,6 +242,13 @@ class NotificationSettingsChange(BaseModel):
     twilio_auth_token: str | None = None
     twilio_from_number: OptionalText = None
     reminder_intervals_hours: ReminderIntervals | None = None
+
+    # --- booking-portal policy (Phase 6 Task 4, #10) ------------------------------------
+    online_booking_enabled: bool | None = None
+    online_cancellation_enabled: bool | None = None
+    cancellation_cutoff_hours: CancellationCutoffHours | None = None
+    booking_daily_cap_per_ip: DailyCap | None = None
+    booking_daily_cap_per_email: DailyCap | None = None
 
 
 class TestEmailRequest(BaseModel):
@@ -275,6 +316,11 @@ def _settings_out(
         twilio_auth_token_set=bool(business.twilio_auth_token_encrypted),
         reminder_intervals_hours=business.reminder_intervals_hours,
         templates=[_template_out(t) for t in templates],
+        online_booking_enabled=business.online_booking_enabled,
+        online_cancellation_enabled=business.online_cancellation_enabled,
+        cancellation_cutoff_hours=business.cancellation_cutoff_hours,
+        booking_daily_cap_per_ip=business.booking_daily_cap_per_ip,
+        booking_daily_cap_per_email=business.booking_daily_cap_per_email,
     )
 
 
@@ -319,6 +365,16 @@ async def update_notification_settings(
         candidates["twilio_from_number"] = payload.twilio_from_number
     if payload.reminder_intervals_hours is not None:
         candidates["reminder_intervals_hours"] = payload.reminder_intervals_hours
+    if payload.online_booking_enabled is not None:
+        candidates["online_booking_enabled"] = payload.online_booking_enabled
+    if payload.online_cancellation_enabled is not None:
+        candidates["online_cancellation_enabled"] = payload.online_cancellation_enabled
+    if payload.cancellation_cutoff_hours is not None:
+        candidates["cancellation_cutoff_hours"] = payload.cancellation_cutoff_hours
+    if payload.booking_daily_cap_per_ip is not None:
+        candidates["booking_daily_cap_per_ip"] = payload.booking_daily_cap_per_ip
+    if payload.booking_daily_cap_per_email is not None:
+        candidates["booking_daily_cap_per_email"] = payload.booking_daily_cap_per_email
 
     changed = [field for field, value in candidates.items() if getattr(business, field) != value]
     for field in changed:

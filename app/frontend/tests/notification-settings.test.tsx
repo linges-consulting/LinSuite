@@ -46,6 +46,11 @@ type Settings = {
   twilio_auth_token_set: boolean
   reminder_intervals_hours: number[]
   templates: Template[]
+  online_booking_enabled: boolean
+  online_cancellation_enabled: boolean
+  cancellation_cutoff_hours: number
+  booking_daily_cap_per_ip: number
+  booking_daily_cap_per_email: number
 }
 
 const TEMPLATES: Template[] = [
@@ -89,6 +94,11 @@ function fakeNotifications(initial: Partial<Settings> = {}) {
     twilio_auth_token_set: false,
     reminder_intervals_hours: [24, 2],
     templates: TEMPLATES,
+    online_booking_enabled: true,
+    online_cancellation_enabled: true,
+    cancellation_cutoff_hours: 24,
+    booking_daily_cap_per_ip: 20,
+    booking_daily_cap_per_email: 5,
     ...initial,
   }
   const fake = stubApi({
@@ -242,6 +252,11 @@ test('a reminder-interval validation error surfaces under the field', async () =
     twilio_auth_token_set: false,
     reminder_intervals_hours: [24, 2],
     templates: TEMPLATES,
+    online_booking_enabled: true,
+    online_cancellation_enabled: true,
+    cancellation_cutoff_hours: 24,
+    booking_daily_cap_per_ip: 20,
+    booking_daily_cap_per_email: 5,
   }
   const { calls } = stubApi({
     ...ADMIN,
@@ -294,3 +309,51 @@ test('a template saves on its own, independently of the sender form', async () =
   // The sender form was never touched or submitted by saving a template.
   expect(patches(calls)).toHaveLength(0)
 });
+
+// --- booking-portal policy (Phase 6 Task 4, #10) --------------------------------------------
+
+test('turning off online booking is sent on save', async () => {
+  const { calls } = fakeNotifications()
+  const user = await openNotifications()
+
+  await user.click(await screen.findByRole('checkbox', { name: 'Allow clients to book online' }))
+  await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+  await waitFor(() => expect(patches(calls)).toHaveLength(1))
+  const body = patches(calls)[0].body as Record<string, unknown>
+  expect(body.online_booking_enabled).toBe(false)
+})
+
+test('editing the daily caps and cancellation cutoff sends numbers, not strings', async () => {
+  const { calls } = fakeNotifications()
+  const user = await openNotifications()
+
+  const perIp = await screen.findByLabelText('Per-IP daily booking limit')
+  await user.clear(perIp)
+  await user.type(perIp, '50')
+  const cutoff = screen.getByLabelText(/Cancellation cutoff/)
+  await user.clear(cutoff)
+  await user.type(cutoff, '48')
+  await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+  await waitFor(() => expect(patches(calls)).toHaveLength(1))
+  const body = patches(calls)[0].body as Record<string, unknown>
+  expect(body.booking_daily_cap_per_ip).toBe(50)
+  expect(body.cancellation_cutoff_hours).toBe(48)
+})
+
+test('turning off online cancellation is sent on save', async () => {
+  const { calls } = fakeNotifications()
+  const user = await openNotifications()
+
+  await user.click(
+    await screen.findByRole('checkbox', {
+      name: 'Allow clients to cancel or reschedule online',
+    }),
+  )
+  await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+  await waitFor(() => expect(patches(calls)).toHaveLength(1))
+  const body = patches(calls)[0].body as Record<string, unknown>
+  expect(body.online_cancellation_enabled).toBe(false)
+})
