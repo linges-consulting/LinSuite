@@ -100,7 +100,12 @@ function staffDesk() {
       const path = new URL(url, 'http://test').pathname
       if (url === '/api/auth/me') return Response.json(DESK)
       if (path === '/api/customers/c1') {
-        return Response.json({ customer: CUSTOMER, timezone: 'America/Toronto', appointments: [] })
+        return Response.json({
+          customer: CUSTOMER,
+          timezone: 'America/Toronto',
+          appointments: [],
+          notification_failures: [],
+        })
       }
       if (path === '/api/forms/templates') {
         return Response.json({

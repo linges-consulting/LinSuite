@@ -50,6 +50,7 @@ const PRIYA_DETAIL = {
 const PROFILE = {
   customer: PRIYA_DETAIL,
   timezone: 'America/Toronto',
+  notification_failures: [],
   appointments: [
     {
       id: 'a1',
@@ -163,6 +164,7 @@ function fake({ canEdit = false }: { canEdit?: boolean } = {}) {
           },
           timezone: 'America/Toronto',
           appointments: [],
+          notification_failures: [],
         })
       }
       return undefined
