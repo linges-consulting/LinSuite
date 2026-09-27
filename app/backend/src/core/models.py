@@ -175,6 +175,17 @@ class Business(Base):
     # test send that succeeded, so it is named for what it actually records.
     smtp_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # --- notification SMS sender (Phase 12 Task 3, #11; `notifications/providers.py`) -------
+    # Off by default: unlike email (which degrades to `console`), SMS is opt-in per tenant —
+    # tech-stack §6 treats it as an adapter nobody gets until they ask and supply credentials.
+    # `twilio_auth_token_encrypted` is direct AES-256-GCM field encryption under the same
+    # `NOTIFICATION_CREDENTIAL_KEY` the Resend/SMTP columns above use — one key, reused, not a
+    # second one (still one business row, no crypto-shred requirement).
+    sms_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    twilio_account_sid: Mapped[str | None] = mapped_column(String(64))
+    twilio_auth_token_encrypted: Mapped[str | None] = mapped_column(Text)
+    twilio_from_number: Mapped[str | None] = mapped_column(String(32))
+
 
 class AuditEvent(Base):
     """Append-only: who did what, and when (ADR-0002).

@@ -24,9 +24,17 @@ is also what happens for a business that hasn't configured a sender yet, so an u
 deployment can still complete a password reset. Task 5's trigger functions are what fetch the
 business row and pass it through; wiring that up is their job, not this module's.
 
-SMS is deliberately absent. tech-stack §6 treats it as an adapter that stays unimplemented
-until a tenant asks and supplies credentials; adding a `send_sms` nobody implements would
-put a method on every provider that can only raise.
+`TwilioProvider` (Task 3, #11) is SMS's real sender: Twilio's REST API directly over `httpx`
+(Basic Auth with the account SID/auth token), the same no-SDK shape as `ResendProvider`.
+`ConsoleProvider`/`RecordingProvider` grow a working `send_sms` alongside it — the same "no
+method that only raises" objection that used to keep SMS off the Protocol now cuts the other
+way, since a real sender exists. `ResendProvider`/`SmtpProvider` stay email-only: they are
+adapters for a specific email transport, not general-purpose senders, so giving them a
+`send_sms` would mean either delegating to Twilio credentials that have nothing to do with an
+email account (mixing two unrelated tenant configs into one object) or a permanent stub — the
+same bad shape this docstring used to warn about, just moved. SMS provider selection
+(`business.sms_enabled` + Twilio credentials, mirroring `_tenant_provider`) is Task 4/5's job;
+this module only adds the adapter and the pure `sms_ready(business)` check they call first.
 """
 
 import logging
@@ -46,6 +54,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _RESEND_ENDPOINT = "https://api.resend.com/emails"
+_TWILIO_ENDPOINT = "https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
 _HTTP_TIMEOUT = 10.0
 _SMTP_TIMEOUT = 10
 _DEFAULT_SMTP_PORT = 587
@@ -59,12 +68,18 @@ class NotificationProvider(Protocol):
     def send_email(self, to: str, subject: str, text: str, html: str | None = None) -> None:
         """Deliver, or raise. Retries are the caller's business (`notifications/tasks.py`)."""
 
+    def send_sms(self, to: str, text: str) -> None:
+        """Deliver, or raise. Retries are the caller's business (`notifications/tasks.py`)."""
+
 
 class ConsoleProvider:
     def send_email(self, to: str, subject: str, text: str, html: str | None = None) -> None:
         # The body is logged in full and on purpose: an unconfigured deployment still has to
         # be able to complete a password reset, and the link is the only way to do that.
         log.info("notifications: email to %s — %s\n%s", to, subject, text)
+
+    def send_sms(self, to: str, text: str) -> None:
+        log.info("notifications: sms to %s — %s", to, text)
 
 
 class ResendProvider:
@@ -142,6 +157,39 @@ class SmtpProvider:
             smtp.send_message(message)
 
 
+class TwilioProvider:
+    """Twilio's REST API directly over `httpx` (owner decision, m3.md) — one endpoint, HTTP
+    Basic Auth with the account SID as username and the auth token as password, no SDK, the
+    same no-SDK precedent `ResendProvider` set in Task 2.
+
+    `client` is for tests only, the same injectable-transport shape `ResendProvider` uses.
+    """
+
+    def __init__(
+        self,
+        account_sid: str,
+        auth_token: str,
+        from_number: str,
+        *,
+        client: httpx.Client | None = None,
+    ) -> None:
+        self._account_sid = account_sid
+        self._auth_token = auth_token
+        self._from_number = from_number
+        self._client = client
+
+    def send_sms(self, to: str, text: str) -> None:
+        url = _TWILIO_ENDPOINT.format(sid=self._account_sid)
+        data = {"From": self._from_number, "To": to, "Body": text}
+        auth = (self._account_sid, self._auth_token)
+        if self._client is not None:
+            response = self._client.post(url, data=data, auth=auth)
+        else:
+            with httpx.Client(timeout=_HTTP_TIMEOUT) as owned:
+                response = owned.post(url, data=data, auth=auth)
+        response.raise_for_status()
+
+
 # Name -> factory. `console` (and `recording`, registered by `tests/fake_notifications.py`)
 # take no arguments and are selected by `NOTIFICATION_PROVIDER`; `resend`/`smtp` take the
 # tenant's own credentials and are only ever constructed by `_tenant_provider` below, off
@@ -150,6 +198,7 @@ PROVIDERS: dict[str, Callable[..., NotificationProvider]] = {
     "console": ConsoleProvider,
     "resend": ResendProvider,
     "smtp": SmtpProvider,
+    "twilio": TwilioProvider,
 }
 
 
@@ -167,6 +216,19 @@ def email_ready(business: "Business") -> bool:
     if business.email_sender == "smtp":
         return bool(business.smtp_host and business.smtp_from_address and business.smtp_verified_at)
     return False
+
+
+def sms_ready(business: "Business") -> bool:
+    """True once a real SMS send should be attempted for this business — mirrors
+    `email_ready`. Task 5's trigger layer calls this (and `business.sms_enabled`) before ever
+    constructing an SMS send; "disabling SMS leaves no code path attempting to send it" (#11
+    acceptance criterion) is that call site's job, not this pure check's."""
+    return bool(
+        business.sms_enabled
+        and business.twilio_account_sid
+        and business.twilio_auth_token_encrypted
+        and business.twilio_from_number
+    )
 
 
 def _tenant_provider(business: "Business") -> NotificationProvider:
