@@ -357,3 +357,28 @@ test('turning off online cancellation is sent on save', async () => {
   const body = patches(calls)[0].body as Record<string, unknown>
   expect(body.online_cancellation_enabled).toBe(false)
 })
+
+// --- embed snippet (Phase 6 Task 5, #10) ----------------------------------------------------
+
+test('the embed snippet points at this browser origin, with ?embed=1', async () => {
+  fakeNotifications()
+  await openNotifications()
+
+  const code = (await screen.findByLabelText('Embed code')) as HTMLInputElement
+  expect(code.value).toBe(
+    `<iframe src="${window.location.origin}/book?embed=1" style="width: 100%; height: 600px; border: 0"></iframe>`,
+  )
+  expect(code).toHaveAttribute('readonly')
+})
+
+test('the copy button copies the embed snippet to the clipboard', async () => {
+  const writeText = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue(undefined)
+  fakeNotifications()
+  const user = await openNotifications()
+
+  const code = (await screen.findByLabelText('Embed code')) as HTMLInputElement
+  await user.click(screen.getByRole('button', { name: 'Copy' }))
+
+  expect(writeText).toHaveBeenCalledWith(code.value)
+  expect(await screen.findByText('Embed code copied')).toBeInTheDocument()
+})

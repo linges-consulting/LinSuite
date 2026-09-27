@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { TriangleAlert } from 'lucide-react'
+import { Copy, TriangleAlert } from 'lucide-react'
 import { toast } from 'sonner'
 import { Field, Form } from '@/components/form'
 import { Badge } from '@/components/ui/badge'
@@ -123,6 +123,10 @@ function toChange(draft: Draft): NotificationSettingsChange {
  * `BookingPolicySection`, appended after the reminder section, same panel, same form, same
  * Save button. Walk-in Queue (Phase 7) still reserves the layout for its own toggle after
  * that, in this same component, not a second settings surface (m3.md).
+ *
+ * **`EmbedSection` (Phase 6 Task 5) sits after the form, its own read-only display** — it has
+ * no field to save, just a snippet built from the browser's own origin, so it is not part of
+ * the Save-button form above.
  */
 export function NotificationsPanel() {
   const queryClient = useQueryClient()
@@ -188,6 +192,8 @@ export function NotificationsPanel() {
           )}
         </div>
       </Form>
+
+      <EmbedSection />
 
       <TemplatesSection templates={settings.data.templates} />
     </div>
@@ -601,6 +607,51 @@ function BookingPolicySection(props: {
           onChange={(e) => set({ cancellation_cutoff_hours: e.target.value })}
         />
       </Field>
+    </section>
+  )
+}
+
+/**
+ * "Copy embed code" (Phase 6 Task 5, #10) — no new endpoint: the snippet is a static string
+ * built from this browser's own origin, the same origin `/book` (Task 6) is served from in
+ * this single-tenant deployment (the app and the API sit behind the same Traefik host, per
+ * `CLAUDE.md`) plus `?embed=1` (`lib/embed.ts`). Read-only text + copy button, the same shape
+ * `client-forms.tsx`'s issued-form-link dialog already uses for its link.
+ */
+function EmbedSection() {
+  const src = `${window.location.origin}/book?embed=1`
+  const snippet = `<iframe src="${src}" style="width: 100%; height: 600px; border: 0"></iframe>`
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(snippet)
+      toast.success('Embed code copied')
+    } catch {
+      toast.error('Could not copy. Select the code and copy it instead.')
+    }
+  }
+
+  return (
+    <section className="flex flex-col gap-4 border-t pt-6">
+      <h2 className="text-base font-medium">Embed the booking page</h2>
+      <p className="text-xs text-muted-foreground">
+        Paste this into your own website to show the booking page inline. The page reports its
+        own height to the parent page as it changes, so the iframe grows and shrinks with it —
+        the height below is only a starting size.
+      </p>
+      <div className="flex gap-2">
+        <Input
+          readOnly
+          aria-label="Embed code"
+          value={snippet}
+          onFocus={(e) => e.target.select()}
+          className="font-mono text-xs"
+        />
+        <Button type="button" variant="outline" onClick={copy}>
+          <Copy aria-hidden />
+          Copy
+        </Button>
+      </div>
     </section>
   )
 }

@@ -48,6 +48,10 @@ export default function App() {
       {/* `/f/#<token>`: the token is the fragment, which never reaches a server. Anything else
           under `/f` — the old `/f/<token>` shape included — is a dead link, never a lookup. */}
       <Route path="/f/*" element={<PublicFormPage />} />
+      {/* `/book` (Phase 6 Task 6, #10) mounts here too, same pattern: outside every gate and
+          the `<AppShell />` below, so there is no nav/header to hide for `?embed=1`. Embed mode
+          there (`lib/embed.ts::useEmbedMode`) only hides page-owned chrome the page adds on top
+          — see that file's docstring. */}
       <Route path="*" element={<AppRoutes />} />
     </Routes>
   )
