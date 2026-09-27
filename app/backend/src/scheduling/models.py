@@ -686,7 +686,20 @@ class QueueEntry(Base):
     )
     customer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("customers.id"))
     bare_name: Mapped[str | None] = mapped_column(String(200))
+    # Phase 7 Task 2, #12 (migration 0041): only ever alongside `bare_name` — a walk-in's own
+    # phone, never a substitute for `customers.phone` on a matched customer. Enforced at the
+    # API layer (`scheduling/queue.py`), not a CHECK, the same way `PublicBookingIn`'s "an
+    # email or a phone" is an API-layer rule, not a database one.
+    bare_phone: Mapped[str | None] = mapped_column(String(32))
     requested_service_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("services.id"))
     preferred_staff_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("staff.id"))
     arrived_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     status: Mapped[str] = mapped_column(String(16), server_default=text("'waiting'"))
+
+    # Phase 7 Task 2: joined so the list/add/abandon endpoints read one row, not N+1 — the
+    # same `lazy="joined"` shape `Appointment.customer`/`staff`/`service` already use just
+    # above. Each FK targets a table this row references exactly once, so SQLAlchemy infers
+    # the join column without an explicit `foreign_keys=`.
+    customer: Mapped["Customer | None"] = relationship(lazy="joined")
+    requested_service: Mapped["Service"] = relationship(lazy="joined")
+    preferred_staff: Mapped["Staff | None"] = relationship(lazy="joined")

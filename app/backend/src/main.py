@@ -44,6 +44,7 @@ from scheduling.appointments import router as appointments_router
 from scheduling.closures import router as closures_router
 from scheduling.hours import router as hours_router
 from scheduling.public import router as public_booking_router
+from scheduling.queue import router as queue_router
 from scheduling.resources import router as resources_router
 from scheduling.schedule import router as schedule_router
 from scheduling.services import public as catalog_router
@@ -248,6 +249,7 @@ api.include_router(availability_router)
 # The tracer bullet: what the slots above become once somebody picks one, and the people it
 # is for. `/staff` is the roster every scheduler reads; `/admin/staff` above is the accounts.
 api.include_router(appointments_router)
+api.include_router(queue_router)
 api.include_router(customers_router)
 api.include_router(erasure_router)
 # Who opened a client's record: administration, not the chart, so under `/admin` and unlogged.
