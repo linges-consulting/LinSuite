@@ -17,7 +17,14 @@ from core.config import get_settings
 from core.logging import configure_logging
 
 celery_app = Celery(
-    "linsuite", include=["core.tasks", "customers.tasks", "forms.tasks", "notifications.tasks"]
+    "linsuite",
+    include=[
+        "core.tasks",
+        "customers.tasks",
+        "forms.tasks",
+        "notifications.tasks",
+        "notifications.reminders",
+    ],
 )
 
 
@@ -47,6 +54,14 @@ def _configure(sender: Celery, **_: object) -> None:
         "purge-expired": {
             "task": "customers.tasks.purge_expired",
             "schedule": crontab(hour=3, minute=30),
+        },
+        # Every 15 minutes: fine enough granularity for the shortest default reminder interval
+        # (two hours before) without scanning the appointments table continuously. Idempotent
+        # (`appointment_reminders`' unique constraint) — a run that overlaps the previous one,
+        # or that catches up after a missed one, sends each interval at most once.
+        "send-appointment-reminders": {
+            "task": "notifications.send_appointment_reminders",
+            "schedule": crontab(minute="*/15"),
         },
     }
 

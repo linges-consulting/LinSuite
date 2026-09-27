@@ -13,7 +13,16 @@ something coherent for every type/channel pair before anybody has opened the set
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Text, UniqueConstraint, func, text
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
@@ -98,3 +107,33 @@ class NotificationFailure(Base):
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class AppointmentReminder(Base):
+    """The reminder scheduler's (`notifications/reminders.py`) only guard against sending the
+    same interval twice for the same appointment (Task 5, #11): the unique constraint below
+    is the actual teeth, not an in-process check. `send_due_reminders` claims a
+    `(appointment_id, offset_hours)` pair with `INSERT ... ON CONFLICT DO NOTHING RETURNING`;
+    only the run that gets a row back goes on to dispatch (CLAUDE.md "Concurrency — enforce
+    in the DB, not in app locks").
+
+    Cascades with the appointment it describes — there is nothing durable here on its own,
+    unlike `notification_failures`, which outlives the send it describes on the client
+    profile. This table is purely an idempotency marker.
+    """
+
+    __tablename__ = "appointment_reminders"
+    __table_args__ = (
+        UniqueConstraint(
+            "appointment_id", "offset_hours", name="uq_appointment_reminders_appointment_offset"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    appointment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("appointments.id", ondelete="CASCADE"), index=True
+    )
+    offset_hours: Mapped[int] = mapped_column(Integer)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

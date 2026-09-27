@@ -186,6 +186,18 @@ class Business(Base):
     twilio_auth_token_encrypted: Mapped[str | None] = mapped_column(Text)
     twilio_from_number: Mapped[str | None] = mapped_column(String(32))
 
+    # --- reminder scheduler (Phase 12 Task 5, #11; `notifications/reminders.py`) ------------
+    # Hours-before-appointment offsets a reminder fires at, reckoned against this business's
+    # own local wall clock (see that module's docstring for why a raw instant-minus-`timedelta`
+    # is wrong across a DST boundary). JSONB, like `AuditEvent.event_metadata` and
+    # `Appointment.overridden_rules` — a plain list of small integers doesn't need a real
+    # array type, and this keeps the same column shape the rest of the app already uses for
+    # "a list, stored". Task 6's settings panel is what will let an administrator edit this;
+    # until then every deployment gets the same default, a day before and two hours before.
+    reminder_intervals_hours: Mapped[list[int]] = mapped_column(
+        JSONB, server_default=text("'[24, 2]'::jsonb")
+    )
+
 
 class AuditEvent(Base):
     """Append-only: who did what, and when (ADR-0002).

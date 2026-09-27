@@ -360,8 +360,28 @@ async def test_public_lookups_are_rate_limited_per_address(client):
 # --- S3: delivery -----------------------------------------------------------------------------
 
 
+async def make_email_ready() -> None:
+    """`notify_form_link_issued` (Phase 12 Task 5) is gated by `email_ready(business)`, the
+    same as every other trigger-driven send — a deliberate change from the pre-Task-5
+    behaviour of sending unconditionally through whatever `NOTIFICATION_PROVIDER` was set to.
+    The real send still goes through `tests/fake_notifications.py`'s recording override
+    (`get_provider` picks that before ever looking at these columns), so the credential value
+    itself is never decrypted; only `email_ready`'s own field checks need to pass."""
+    async with session_scope() as db:
+        await db.execute(
+            text(
+                "UPDATE businesses SET email_sender = 'resend', "
+                "resend_from_address = 'hello@cedar.example', "
+                "resend_api_key_encrypted = 'unused-in-recording-mode', "
+                "resend_domain_verified_at = now()"
+            )
+        )
+        await db.commit()
+
+
 async def test_the_link_is_emailed_when_the_client_has_an_address(client, sent_emails):
     await as_admin(client)
+    await make_email_ready()
     template = await published_template(client)
     with_email = (
         await client.post(
