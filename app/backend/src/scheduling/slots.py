@@ -450,23 +450,29 @@ def check_range(from_: Date, to: Date) -> None:
         raise refuse("to", f"Ask for at most {MAX_RANGE_DAYS} days at a time.", where="query")
 
 
-@router.get("", response_model=AvailabilityOut)
-async def availability(
-    _: Viewer,
+async def resolve_availability(
     db: SessionDep,
-    service_id: uuid.UUID,
-    from_: Annotated[Date, Query(alias="from")],
+    service: CatalogServiceOut,
+    from_: Date,
     to: Date,
-    staff_id: uuid.UUID | None = None,
-):
-    """Bookable slots for `service_id` on each business-local date from `from` to `to`
-    inclusive (at most 31 days). Days after `horizon_ends_on` — today plus the business's
-    `booking_horizon_days`, inclusive — are answered with no slots.
+    staff_id: uuid.UUID | None,
+) -> AvailabilityOut | JSONResponse:
+    """The bookable-slots answer for one already-fetched, already-admitted `service` —
+    shared by the staff route below and the public one (`scheduling/public.py`), so "is this
+    start offered" has exactly one computation and one cache key regardless of who is
+    asking. Whatever admission check gates `service` for the caller (nothing extra for staff;
+    `bookable_online` for the public route) has already run before this is reached — this
+    only ever enforces what the engine itself needs, a named `staff_id` must be one of the
+    service's eligible staff, and always calls `compute()` with `relax_advisory` left at its
+    default `False`: there is no parameter here to pass anything else. The client-facing
+    portal (M3) must never be given that switch (`scheduling/availability.py`'s and
+    `scheduling/appointments.py`'s docstrings) — this function's signature is how that holds
+    structurally, not just by convention.
 
-    The documented body is `AvailabilityOut`; the 409 below is a `JSONResponse` because
-    `HTTPException` carries one `detail` and this refusal has a list beside it."""
-    check_range(from_, to)
-    service = await catalog_entry(db, service_id)
+    Only this — the engine's own answer — is cached (tech-stack §19). The catalog and
+    eligibility checks the caller ran always run fresh; they are cheap single-row reads, and
+    a cache hit here already reflects the latest generation, which any change to either one
+    bumps (`scheduling/cache.py`)."""
     if not service.bookable:
         return unbookable(service)
     staff_ids = [uuid.UUID(s) for s in service.staff_ids]
@@ -477,10 +483,6 @@ async def availability(
             )
         staff_ids = [staff_id]
 
-    # Only this — the engine's own answer — is cached (tech-stack §19). The catalog and
-    # eligibility checks above always run fresh; they are cheap single-row reads, and a
-    # cache hit here already reflects the latest generation, which any change to either one
-    # bumps (`scheduling/cache.py`).
     async def _compute() -> dict:
         computed = await compute(db, service, staff_ids, from_, to)
         return AvailabilityOut(
@@ -511,6 +513,28 @@ async def availability(
         "to": to.isoformat(),
     }
     return AvailabilityOut.model_validate(await cache.cached("avail", parts, _compute))
+
+
+@router.get("", response_model=AvailabilityOut)
+async def availability(
+    _: Viewer,
+    db: SessionDep,
+    service_id: uuid.UUID,
+    from_: Annotated[Date, Query(alias="from")],
+    to: Date,
+    staff_id: uuid.UUID | None = None,
+):
+    """Bookable slots for `service_id` on each business-local date from `from` to `to`
+    inclusive (at most 31 days). Days after `horizon_ends_on` — today plus the business's
+    `booking_horizon_days`, inclusive — are answered with no slots.
+
+    The documented body is `AvailabilityOut`; the 409 below is a `JSONResponse` because
+    `HTTPException` carries one `detail` and this refusal has a list beside it. The engine
+    call itself is `resolve_availability`, shared with the public booking route
+    (`scheduling/public.py`)."""
+    check_range(from_, to)
+    service = await catalog_entry(db, service_id)
+    return await resolve_availability(db, service, from_, to, staff_id)
 
 
 def unbookable(service: CatalogServiceOut, link_index: int | None = None) -> JSONResponse:

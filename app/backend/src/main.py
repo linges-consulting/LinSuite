@@ -43,6 +43,7 @@ from notes.routes import router as notes_router
 from scheduling.appointments import router as appointments_router
 from scheduling.closures import router as closures_router
 from scheduling.hours import router as hours_router
+from scheduling.public import router as public_booking_router
 from scheduling.resources import router as resources_router
 from scheduling.schedule import router as schedule_router
 from scheduling.services import public as catalog_router
@@ -267,6 +268,9 @@ api.include_router(form_scans_router)
 # Metadata only — no access-log row.
 api.include_router(form_compliance_router)
 api.include_router(public_forms_router)
+# The client-facing booking portal's first route (Phase 6 Task 1): the same engine
+# `availability_router` above reads, over an unauthenticated request (`scheduling/public.py`).
+api.include_router(public_booking_router)
 api.include_router(business_router)
 api.include_router(notification_settings_router)
 api.include_router(branding_router)
