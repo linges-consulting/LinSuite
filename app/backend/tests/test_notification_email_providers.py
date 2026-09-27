@@ -9,6 +9,7 @@ fake SMTP class below is the same idea for `smtplib.SMTP`'s constructor/context-
 """
 
 import json
+import smtplib
 from datetime import UTC, datetime
 
 import httpx
@@ -18,10 +19,13 @@ from core.models import Business
 from notifications.credentials import encrypt_credential
 from notifications.providers import (
     ConsoleProvider,
+    PermanentDeliveryError,
     ResendProvider,
     SmtpProvider,
     email_ready,
     get_provider,
+    is_permanent_smtp_error,
+    is_permanent_status,
 )
 
 
@@ -76,9 +80,28 @@ def test_resend_omits_html_when_none():
     assert "html" not in json.loads(seen[0].content)
 
 
-def test_resend_raises_on_an_error_response():
+def test_resend_raises_permanently_on_a_4xx_response():
+    # Task 4, #11: a 4xx (a bad address, a rejected payload) is the caller's own fault —
+    # retrying the identical request changes nothing, so this is no longer a bare
+    # `httpx.HTTPStatusError` (this test's premise before Task 4) but the distinct error
+    # `notifications/tasks.py` catches to stop retrying immediately.
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(422, json={"message": "invalid from"})
+
+    provider = ResendProvider(
+        api_key="k",
+        from_address="a@b.example",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(PermanentDeliveryError):
+        provider.send_email(to="c@d.example", subject="s", text="t")
+
+
+def test_resend_raises_transiently_on_a_5xx_response():
+    # A 5xx is Resend's own fault, and worth another try — still a bare `HTTPStatusError`,
+    # which `autoretry_for=(Exception,)` catches for a retry, unchanged from before Task 4.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"message": "upstream unavailable"})
 
     provider = ResendProvider(
         api_key="k",
@@ -165,6 +188,57 @@ def test_smtp_skips_login_without_a_username():
     smtp = _FakeSMTP.instances[0]
     assert smtp.port == 587  # the default, since none was configured
     assert smtp.login_call is None
+
+
+def test_smtp_raises_permanently_when_the_login_is_rejected():
+    class _RejectsLogin(_FakeSMTP):
+        def login(self, username: str, password: str | None) -> None:
+            raise smtplib.SMTPAuthenticationError(535, b"bad credentials")
+
+    provider = SmtpProvider(
+        host="h",
+        port=25,
+        username="user",
+        password="wrong",
+        from_address="a@b.example",
+        smtp_cls=_RejectsLogin,
+    )
+    with pytest.raises(PermanentDeliveryError):
+        provider.send_email(to="c@d.example", subject="s", text="t")
+
+
+def test_smtp_raises_permanently_when_every_recipient_is_refused():
+    class _RefusesRecipient(_FakeSMTP):
+        def send_message(self, message) -> None:
+            raise smtplib.SMTPRecipientsRefused({"c@d.example": (550, b"no such user")})
+
+    provider = SmtpProvider(
+        host="h",
+        port=25,
+        username=None,
+        password=None,
+        from_address="a@b.example",
+        smtp_cls=_RefusesRecipient,
+    )
+    with pytest.raises(PermanentDeliveryError):
+        provider.send_email(to="c@d.example", subject="s", text="t")
+
+
+def test_smtp_raises_transiently_on_a_dropped_connection():
+    class _Disconnects(_FakeSMTP):
+        def send_message(self, message) -> None:
+            raise smtplib.SMTPServerDisconnected("connection lost")
+
+    provider = SmtpProvider(
+        host="h",
+        port=25,
+        username=None,
+        password=None,
+        from_address="a@b.example",
+        smtp_cls=_Disconnects,
+    )
+    with pytest.raises(smtplib.SMTPServerDisconnected):
+        provider.send_email(to="c@d.example", subject="s", text="t")
 
 
 def test_smtp_attaches_an_html_alternative_when_given():
@@ -297,3 +371,27 @@ def test_email_ready_for_smtp_requires_the_verified_timestamp():
         smtp_verified_at=None,
     )
     assert email_ready(unverified) is False
+
+
+# --- is_permanent_status / is_permanent_smtp_error (S2, pure — Task 4, #11) -------------------
+
+
+@pytest.mark.parametrize("status_code", [400, 401, 404, 422, 429, 499])
+def test_is_permanent_status_is_true_for_every_4xx(status_code):
+    assert is_permanent_status(status_code) is True
+
+
+@pytest.mark.parametrize("status_code", [200, 301, 500, 502, 503])
+def test_is_permanent_status_is_false_outside_4xx(status_code):
+    assert is_permanent_status(status_code) is False
+
+
+def test_is_permanent_smtp_error_is_true_for_auth_and_refusal_errors():
+    assert is_permanent_smtp_error(smtplib.SMTPAuthenticationError(535, b"no")) is True
+    assert is_permanent_smtp_error(smtplib.SMTPRecipientsRefused({})) is True
+    assert is_permanent_smtp_error(smtplib.SMTPSenderRefused(550, b"no", "a@b.example")) is True
+
+
+def test_is_permanent_smtp_error_is_false_for_a_dropped_connection():
+    assert is_permanent_smtp_error(smtplib.SMTPServerDisconnected("gone")) is False
+    assert is_permanent_smtp_error(TimeoutError("timed out")) is False

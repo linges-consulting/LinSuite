@@ -35,6 +35,12 @@ email account (mixing two unrelated tenant configs into one object) or a permane
 same bad shape this docstring used to warn about, just moved. SMS provider selection
 (`business.sms_enabled` + Twilio credentials, mirroring `_tenant_provider`) is Task 4/5's job;
 this module only adds the adapter and the pure `sms_ready(business)` check they call first.
+
+**`PermanentDeliveryError` (Task 4, #11)** is how a provider tells `notifications/tasks.py`
+that retrying is pointless: a 4xx from Resend/Twilio (bad address/number, revoked credentials)
+or an SMTP auth/recipient-refused error, versus a plain `Exception` for anything worth another
+try (network failure, a 5xx). `is_permanent_status`/`is_permanent_smtp_error` are the pure
+classifiers underneath — S2-testable on their own, no `httpx`/`smtplib` involved.
 """
 
 import logging
@@ -62,6 +68,47 @@ _DEFAULT_SMTP_PORT = 587
 # The dev/test override values of `NOTIFICATION_PROVIDER` — picked unconditionally, regardless
 # of anything a business row holds. Everything else reads `business.email_sender`.
 _OVERRIDE_PROVIDERS = frozenset({"console", "recording"})
+
+
+class PermanentDeliveryError(Exception):
+    """A delivery attempt failed for a reason retrying will not fix. Raised in place of the
+    provider's own exception (chained via `from`); `notifications/tasks.py` catches this
+    distinctly from a plain `Exception` and writes a `notification_failures` row instead of
+    retrying."""
+
+
+def is_permanent_status(status_code: int) -> bool:
+    """A 4xx is the caller's own fault (bad number/address, bad/expired auth) — retrying the
+    identical request changes nothing. A 5xx is the provider's, and worth another try. Pure,
+    so it is tested on its own (S2), with no `httpx` request involved."""
+    return 400 <= status_code < 500
+
+
+# SMTP replies with its own 4xx (temporary)/5xx (permanent) reply codes, opposite of HTTP's
+# convention — but these three `smtplib` exceptions are already unambiguous on their own:
+# a login rejected, or every recipient/the sender refused, is never fixed by retrying the same
+# message. A dropped connection or a timeout is not one of these and stays a plain `Exception`.
+_PERMANENT_SMTP_ERRORS = (
+    smtplib.SMTPAuthenticationError,
+    smtplib.SMTPRecipientsRefused,
+    smtplib.SMTPSenderRefused,
+)
+
+
+def is_permanent_smtp_error(error: Exception) -> bool:
+    """Pure — S2-testable without ever opening a socket."""
+    return isinstance(error, _PERMANENT_SMTP_ERRORS)
+
+
+def _raise_for_delivery(response: httpx.Response) -> None:
+    """Shared by `ResendProvider`/`TwilioProvider`: both are a bare `httpx` POST with no
+    payload-specific error handling of their own."""
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as error:
+        if is_permanent_status(response.status_code):
+            raise PermanentDeliveryError(str(error)) from error
+        raise
 
 
 class NotificationProvider(Protocol):
@@ -113,7 +160,7 @@ class ResendProvider:
         else:
             with httpx.Client(timeout=_HTTP_TIMEOUT) as owned:
                 response = owned.post(_RESEND_ENDPOINT, json=payload, headers=headers)
-        response.raise_for_status()
+        _raise_for_delivery(response)
 
 
 class SmtpProvider:
@@ -150,11 +197,16 @@ class SmtpProvider:
             message.add_alternative(html, subtype="html")
 
         smtp_cls = self._smtp_cls or smtplib.SMTP
-        with smtp_cls(self._host, self._port, timeout=_SMTP_TIMEOUT) as smtp:
-            smtp.starttls()
-            if self._username:
-                smtp.login(self._username, self._password)
-            smtp.send_message(message)
+        try:
+            with smtp_cls(self._host, self._port, timeout=_SMTP_TIMEOUT) as smtp:
+                smtp.starttls()
+                if self._username:
+                    smtp.login(self._username, self._password)
+                smtp.send_message(message)
+        except Exception as error:
+            if is_permanent_smtp_error(error):
+                raise PermanentDeliveryError(str(error)) from error
+            raise
 
 
 class TwilioProvider:
@@ -187,7 +239,7 @@ class TwilioProvider:
         else:
             with httpx.Client(timeout=_HTTP_TIMEOUT) as owned:
                 response = owned.post(url, data=data, auth=auth)
-        response.raise_for_status()
+        _raise_for_delivery(response)
 
 
 # Name -> factory. `console` (and `recording`, registered by `tests/fake_notifications.py`)

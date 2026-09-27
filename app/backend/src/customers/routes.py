@@ -47,6 +47,7 @@ from customers import keys, retention
 from customers.classification import Classification, classify
 from customers.erasure import ErasureOut, erasure_out, is_held
 from customers.models import Customer, ErasureRequest
+from notifications.models import NotificationFailure
 from scheduling.models import Appointment
 
 router = APIRouter(prefix="/customers", tags=["customers"])
@@ -422,12 +423,30 @@ def customer_detail_out(
     )
 
 
+class NotificationFailureOut(BaseModel):
+    """A terminal delivery failure (Task 4, #11 — `notifications.failures`). Newest first,
+    capped: this is a "something needs attention" indicator, not a delivery log."""
+
+    id: str
+    channel: Literal["email", "sms"]
+    notification_type: str
+    recipient: str
+    reason: str
+    occurred_at: datetime
+
+
+# The most recent failures shown on a profile — enough to notice a pattern, not a full log.
+_MAX_FAILURES_SHOWN = 20
+
+
 class CustomerProfileOut(BaseModel):
     customer: CustomerDetailOut
     # The business's zone, so a screen can print the day each visit was on.
     timezone: str
     # Newest first, upcoming included, cancelled and no-shows too: this is the history.
     appointments: list[VisitOut]
+    # Newest first. Empty for the common case — nothing has ever permanently failed to send.
+    notification_failures: list[NotificationFailureOut]
 
 
 @router.get(
@@ -458,9 +477,28 @@ async def read_customer(customer_id: uuid.UUID, db: SessionDep) -> CustomerProfi
         .order_by(ErasureRequest.requested_at.desc())
         .limit(1)
     )
+    failures = list(
+        await db.scalars(
+            select(NotificationFailure)
+            .where(NotificationFailure.customer_id == customer_id)
+            .order_by(NotificationFailure.occurred_at.desc())
+            .limit(_MAX_FAILURES_SHOWN)
+        )
+    )
     return CustomerProfileOut(
         customer=customer_detail_out(customer, classification, timezone, request),
         timezone=timezone,
+        notification_failures=[
+            NotificationFailureOut(
+                id=str(f.id),
+                channel=f.channel,
+                notification_type=f.notification_type,
+                recipient=f.recipient,
+                reason=f.reason,
+                occurred_at=f.occurred_at,
+            )
+            for f in failures
+        ],
         appointments=[
             VisitOut(
                 id=str(a.id),

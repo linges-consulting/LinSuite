@@ -13,7 +13,12 @@ import httpx
 import pytest
 
 from core.models import Business
-from notifications.providers import ConsoleProvider, TwilioProvider, sms_ready
+from notifications.providers import (
+    ConsoleProvider,
+    PermanentDeliveryError,
+    TwilioProvider,
+    sms_ready,
+)
 
 
 def _business(**overrides) -> Business:
@@ -51,9 +56,27 @@ def test_twilio_posts_a_basic_authenticated_form_body():
     }
 
 
-def test_twilio_raises_on_an_error_response():
+def test_twilio_raises_permanently_on_a_4xx_response():
+    # Task 4, #11: a 4xx (invalid number) is the caller's own fault — retrying changes
+    # nothing, so this is no longer a bare `httpx.HTTPStatusError` (this test's premise
+    # before Task 4) but the distinct error `notifications/tasks.py` catches to stop
+    # retrying immediately.
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, json={"message": "invalid number"})
+
+    provider = TwilioProvider(
+        account_sid="ACtest",
+        auth_token="secrettoken",
+        from_number="+15551234567",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(PermanentDeliveryError):
+        provider.send_sms(to="+15559876543", text="hi")
+
+
+def test_twilio_raises_transiently_on_a_5xx_response():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"message": "upstream unavailable"})
 
     provider = TwilioProvider(
         account_sid="ACtest",

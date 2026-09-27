@@ -100,6 +100,29 @@ def sent_emails(eager_celery) -> Iterator[list]:
 
 
 @pytest.fixture
+def sent_sms(eager_celery) -> Iterator[list]:
+    from tests.fake_notifications import sent_sms
+
+    sent_sms.clear()
+    yield sent_sms
+    sent_sms.clear()
+
+
+@pytest.fixture
+def fail_next_send(eager_celery) -> Iterator[tuple[list, list]]:
+    """`(fail_email_next, fail_sms_next)` — push an exception to make the next send of that
+    channel raise it (Task 4, #11: simulating a delivery failure). Cleared before and after,
+    so a test that doesn't push anything never sees another test's leftovers."""
+    from tests.fake_notifications import fail_email_next, fail_sms_next
+
+    fail_email_next.clear()
+    fail_sms_next.clear()
+    yield fail_email_next, fail_sms_next
+    fail_email_next.clear()
+    fail_sms_next.clear()
+
+
+@pytest.fixture
 async def client(database) -> AsyncIterator[AsyncClient]:
     from main import app
 

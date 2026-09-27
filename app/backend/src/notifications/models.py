@@ -13,7 +13,7 @@ something coherent for every type/channel pair before anybody has opened the set
 import uuid
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, Text, UniqueConstraint, func, text
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Text, UniqueConstraint, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
@@ -59,3 +59,42 @@ class NotificationTemplate(Base):
     subject_template: Mapped[str | None] = mapped_column(Text)
     body_template: Mapped[str] = mapped_column(Text)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class NotificationFailure(Base):
+    """A terminal delivery failure against a customer (Task 4, #11).
+
+    Written only for a `PermanentDeliveryError` (`notifications/providers.py`) — a 4xx from
+    Resend/Twilio, a bad SMTP recipient or a rejected SMTP login: the kind retrying will not
+    fix. A transient failure (network error, a 5xx) just keeps retrying under
+    `notifications/tasks.py`'s existing backoff and never reaches this table. Surfaced as a
+    "delivery failed" indicator on the client profile (`customers/routes.py`); ordinary
+    app-role DML, ordinary grants — nothing here is immutable or append-only, since a failure
+    row is diagnostic, not a compliance record.
+    """
+
+    __tablename__ = "notification_failures"
+    __table_args__ = (
+        CheckConstraint("channel IN ('email', 'sms')", name="ck_notification_failures_channel"),
+        CheckConstraint(
+            "notification_type IN (" + ", ".join(f"'{t}'" for t in NOTIFICATION_TYPES) + ")",
+            name="ck_notification_failures_type",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    # Cascades: a purged customer's diagnostic delivery history goes with them — there is
+    # nothing here that outlives the record it describes (contrast `audit_events`, which is
+    # append-only and never cascades).
+    customer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("customers.id", ondelete="CASCADE"), index=True
+    )
+    channel: Mapped[str] = mapped_column(Text)
+    notification_type: Mapped[str] = mapped_column(Text)
+    recipient: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str] = mapped_column(Text)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

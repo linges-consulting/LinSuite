@@ -1537,11 +1537,25 @@ export type Erasure = {
   purged_at: string | null
 }
 
+/** A terminal delivery failure (Phase 12 Task 4, #11): a permanent one (a bad address/number,
+ *  rejected credentials) writes this row and stops retrying — a transient one (network error,
+ *  a 5xx) just keeps retrying in the background and never appears here. */
+export type NotificationFailure = {
+  id: string
+  channel: 'email' | 'sms'
+  notification_type: string
+  recipient: string
+  reason: string
+  occurred_at: string
+}
+
 export type CustomerProfile = {
   customer: CustomerDetail
   timezone: string
   /** Newest first, upcoming included, cancelled and no-shows too. */
   appointments: Visit[]
+  /** Newest first. Empty for the common case — nothing has ever permanently failed to send. */
+  notification_failures: NotificationFailure[]
 }
 
 /** The profile and its visits in one response — one request, because on the server it is
