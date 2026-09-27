@@ -55,7 +55,19 @@ longer the fixed constants Task 2 shipped this file with.
 freshly committed, freshly reloaded appointment. `dispatch` (`notifications/triggers.py`)
 already no-ops silently when the business is not `email_ready`/`sms_ready` — the booking has
 already committed by the time it runs, so nothing here needs its own try/except to keep a
-missing sender from failing the request."""
+missing sender from failing the request.
+
+**`GET /services` (added here for Task 6, #10)**: the one piece of surface Tasks 1-3 didn't
+need but the booking page's first screen genuinely cannot work without — a client has to pick
+a service (and see who can deliver it, by name) *before* they have a `service_id` to hand
+`GET /availability`, and every existing listing that could answer that (`GET /catalog/
+services`, `GET /staff`) requires a signed-in session (`CurrentUser`/`schedule.view`). Reuses
+`scheduling/services.py`'s own `_roster`/`_kinds_in_stock`/`_catalog_out` — the identical "is
+this bookable" computation `book_public` itself relies on, not a second implementation of
+it — and lists only what is both `bookable_online` and `bookable`, the same two conditions
+that would otherwise refuse a booking against it. A GET, not a mutation, so it sits outside
+`main.py`'s Origin-check middleware (which only inspects `POST`/`PUT`/`PATCH`/`DELETE`), the
+same as `public_availability` above."""
 
 import hashlib
 import hmac
@@ -100,10 +112,76 @@ from scheduling.appointments import (
     slot_taken,
 )
 from scheduling.models import Appointment, AppointmentResource, BookingManagementLink, Staff
-from scheduling.services import catalog_entry
+from scheduling.services import _catalog_out, _kinds_in_stock, _roster, catalog_entry
 from scheduling.slots import AvailabilityOut, check_range, resolve_availability, unbookable, utc
 
 router = APIRouter(prefix="/public/booking", tags=["public"])
+
+
+# --- service listing (Task 6, #10) -----------------------------------------------------------
+
+
+class PublicStaffOut(BaseModel):
+    id: str
+    display_name: str
+
+
+class PublicServiceOut(BaseModel):
+    """The subset of `scheduling.services.CatalogServiceOut` safe to hand an anonymous
+    visitor: no internal `requirements`/`unbookable_reasons`, staff named rather than left as
+    bare ids (a client picking a provider needs a name to pick, the same way the staff booking
+    dialog does — `RosterEntry.display_name`)."""
+
+    id: str
+    name: str
+    description: str | None
+    duration_minutes: int
+    price_cents: int
+    staff: list[PublicStaffOut]
+
+
+class PublicServicesOut(BaseModel):
+    # False with an empty list is what tells the page to show "booking isn't available right
+    # now" instead of a picker with nothing in it that would otherwise look merely broken.
+    online_booking_enabled: bool
+    services: list[PublicServiceOut]
+
+
+@router.get("/services", response_model=PublicServicesOut)
+async def public_services(db: SessionDep):
+    """Every service a client may pick, with who can deliver it, by name — what the booking
+    page's first screen reads before any `service_id` exists to ask `GET /availability`
+    about."""
+    business = await load_business(db)
+    if not business.online_booking_enabled:
+        return PublicServicesOut(online_booking_enabled=False, services=[])
+    kinds = await _kinds_in_stock(db)
+    out = []
+    for service in await _roster(db, include_inactive=False):
+        if not service.bookable_online:
+            continue
+        catalog = _catalog_out(service, kinds)
+        if not catalog.bookable:
+            continue
+        staff = sorted(
+            (
+                PublicStaffOut(id=str(link.staff_id), display_name=link.staff.display_name)
+                for link in service.eligible_staff
+                if link.staff.active
+            ),
+            key=lambda s: s.display_name,
+        )
+        out.append(
+            PublicServiceOut(
+                id=str(service.id),
+                name=service.name,
+                description=service.description,
+                duration_minutes=service.duration_minutes,
+                price_cents=service.price_cents,
+                staff=staff,
+            )
+        )
+    return PublicServicesOut(online_booking_enabled=True, services=out)
 
 
 @router.get("/availability", response_model=AvailabilityOut)
@@ -409,13 +487,21 @@ class ManageBookingIn(BaseModel):
 class ManageBookingOut(BaseModel):
     """What the booking-management page shows. `cancellable` gates both the cancel and the
     reschedule action — one shared toggle for both, per m3.md's own Task 3 scope ("same
-    cutoff/toggle checks as cancel")."""
+    cutoff/toggle checks as cancel").
+
+    **`service_id`/`staff_id` (added for Task 6, #10)**: the reschedule sub-flow has to show
+    the client slots to pick from before it reruns `.../manage/reschedule`, and the only way
+    to ask `GET /availability` for those is with the ids — `service_name`/`staff_name` alone,
+    the display shape Task 3 shipped this with, cannot round-trip into that query. Cheap to
+    add: both are plain columns already on the loaded `appointment`, no second query."""
 
     appointment_id: str
     status: str
     starts_at: str
     ends_at: str
+    service_id: str
     service_name: str
+    staff_id: str
     staff_name: str
     cancellable: bool
 
@@ -426,7 +512,9 @@ def _out_manage(appointment: Appointment, cancellable: bool) -> ManageBookingOut
         status=appointment.status,
         starts_at=utc(appointment.starts_at),
         ends_at=utc(appointment.ends_at),
+        service_id=str(appointment.service_id),
         service_name=appointment.service.name,
+        staff_id=str(appointment.staff_id),
         staff_name=appointment.staff.display_name,
         cancellable=cancellable,
     )

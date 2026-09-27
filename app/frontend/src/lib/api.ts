@@ -2002,3 +2002,128 @@ export async function cancelGroup(groupId: string, reason?: string | null): Prom
   if (!res.ok) throw await failure(res, 'Could not cancel the visit')
   return res.json()
 }
+
+// --- public booking portal: `/book` and `/manage-booking` (Phase 6 Task 6, #10) --------------
+
+/** One bookable service on the public portal — `CatalogService`'s shape pared to what an
+ *  anonymous visitor may see: no `requirements`/`unbookable_reasons`, staff named rather than
+ *  left as bare ids (a client picking a provider needs a name, same as the staff dialog). */
+export type PublicService = {
+  id: string
+  name: string
+  description: string | null
+  duration_minutes: number
+  price_cents: number
+  staff: { id: string; display_name: string }[]
+}
+
+export type PublicServices = { online_booking_enabled: boolean; services: PublicService[] }
+
+/** `online_booking_enabled: false` with an empty list is the whole portal being off, not a
+ *  moment where no service happens to qualify — the page shows a different message for each. */
+export async function fetchPublicServices(): Promise<PublicServices> {
+  const res = await fetch('/api/public/booking/services', { credentials: 'omit', cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the services')
+  return res.json()
+}
+
+/**
+ * The public counterpart to `fetchAvailability` — same shape, `staff_id` omitted for "any
+ * available". `credentials: 'omit'`: a staff browser previewing `/book` must not send its
+ * session along (`fetchPublicForm`'s own reasoning). A 409 is a service the catalog no longer
+ * says is bookable; a 404 is an unknown or not-online-bookable one.
+ */
+export async function fetchPublicAvailability(query: {
+  service_id: string
+  from: string
+  to: string
+  staff_id?: string
+}): Promise<Availability> {
+  const params = new URLSearchParams({ service_id: query.service_id, from: query.from, to: query.to })
+  if (query.staff_id) params.set('staff_id', query.staff_id)
+  const res = await fetch(`/api/public/booking/availability?${params}`, {
+    credentials: 'omit',
+    cache: 'no-store',
+  })
+  if (!res.ok) throw await failure(res, 'Could not load the available times')
+  return res.json()
+}
+
+/** What the identity step sends, plus the honeypot (`website`): must arrive empty, or the
+ *  server accepts the request with a 200 and books nothing — the detection is never revealed,
+ *  so this client never branches on it either, same as the server's own docstring insists. */
+export type PublicBookingDraft = {
+  service_id: string
+  staff_id: string | null
+  starts_at: string
+  customer: CustomerDraft
+  website: string
+}
+
+/** What the confirmation screen shows. `management_link` is the only recovery path when no
+ *  notification channel is configured — shown plainly, on this screen, never only emailed. */
+export type PublicBooking = {
+  appointment_id: string
+  starts_at: string
+  ends_at: string
+  service_name: string
+  staff_name: string
+  management_link: string
+}
+
+/**
+ * `POST /api/public/booking`, sent the same way the public forms endpoints are: no
+ * credentials, and `referrerPolicy: 'origin'` so the server's Origin check (`main.py`) sees
+ * this deployment's own origin rather than `Origin: null`, which the page's `no-referrer`
+ * policy would otherwise produce for this one request (`fetchPublicForm`'s own note).
+ */
+export async function createPublicBooking(draft: PublicBookingDraft): Promise<PublicBooking> {
+  const res = await fetch('/api/public/booking', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(draft),
+    credentials: 'omit',
+    referrerPolicy: 'origin',
+    cache: 'no-store',
+  })
+  if (!res.ok) throw await failure(res, 'Could not book the appointment')
+  return res.json()
+}
+
+/** What the booking-management sub-flow shows and acts on. `cancellable` gates both cancel
+ *  and reschedule — one shared toggle, the server's own `ManageBookingOut` shape.
+ *  `service_id`/`staff_id` are what the reschedule step hands `fetchPublicAvailability`. */
+export type ManageBooking = {
+  appointment_id: string
+  status: string
+  starts_at: string
+  ends_at: string
+  service_id: string
+  service_name: string
+  staff_id: string
+  staff_name: string
+  cancellable: boolean
+}
+
+async function manageRequest(path: string, body: unknown): Promise<ManageBooking> {
+  const res = await fetch(`/api/public/booking/manage${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    credentials: 'omit',
+    referrerPolicy: 'origin',
+    cache: 'no-store',
+  })
+  // A dead link is a 404 `link_invalid`; the cutoff/toggle refusal is a 422
+  // `online_change_not_allowed` — both carry `code`, which the page reads to word the two
+  // differently rather than showing one generic failure for both.
+  if (!res.ok) throw await failure(res, 'Could not open this booking')
+  return res.json()
+}
+
+/** `token` is read from the URL fragment (`/manage-booking/#<token>`), never a path segment —
+ *  the same reason the form-link lookup keeps it out of the path (`fetchPublicForm`). */
+export const fetchManageBooking = (token: string) => manageRequest('', { token })
+export const cancelManageBooking = (token: string) => manageRequest('/cancel', { token })
+export const rescheduleManageBooking = (token: string, starts_at: string) =>
+  manageRequest('/reschedule', { token, starts_at })

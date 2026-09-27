@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { CancelConfirm } from '@/components/calendar/cancel-confirm'
 import { Grid } from '@/components/calendar/grid'
 import { OverrideConfirm } from '@/components/calendar/override-confirm'
+import { SlotButtons } from '@/components/calendar/slot-buttons'
 import type { Change, Column, Prefill } from '@/components/calendar/types'
 import { ClassificationBadge } from '@/components/classification-badge'
 import { EmptyState } from '@/components/empty-state'
@@ -1068,30 +1069,4 @@ function BookingDialog(props: {
   )
 }
 
-function SlotButtons(props: {
-  slots: AvailabilitySlot[]
-  chosen: AvailabilitySlot | null
-  timezone?: string
-  /** Named when several lists share a dialog, so "10:00 AM under Ana" is its own control. */
-  group?: string
-  onPick: (slot: AvailabilitySlot) => void
-}) {
-  return (
-    <div className="flex flex-wrap gap-1.5" role="group" aria-label={props.group}>
-      {props.slots.map((s) => (
-        <Button
-          key={s.starts_at}
-          type="button"
-          size="sm"
-          variant={props.chosen?.starts_at === s.starts_at ? 'default' : 'outline'}
-          aria-pressed={props.chosen?.starts_at === s.starts_at}
-          className="tabular-nums"
-          onClick={() => props.onPick(s)}
-        >
-          {clock(s.starts_at, props.timezone)}
-        </Button>
-      ))}
-    </div>
-  )
-}
 

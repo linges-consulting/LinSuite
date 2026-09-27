@@ -4,6 +4,8 @@ import { AppShell } from '@/components/app-shell'
 import { fetchSetupStatus } from '@/lib/api'
 import { useSession } from '@/lib/auth'
 import { useApplyBranding } from '@/lib/branding'
+import { BookingPage } from '@/routes/booking'
+import { ManageBookingPage } from '@/routes/booking-manage'
 import { ChangePasswordPage } from '@/routes/change-password'
 import { ClientPage, ClientsPage } from '@/routes/clients'
 import { ForgotPasswordPage } from '@/routes/forgot-password'
@@ -48,10 +50,14 @@ export default function App() {
       {/* `/f/#<token>`: the token is the fragment, which never reaches a server. Anything else
           under `/f` — the old `/f/<token>` shape included — is a dead link, never a lookup. */}
       <Route path="/f/*" element={<PublicFormPage />} />
-      {/* `/book` (Phase 6 Task 6, #10) mounts here too, same pattern: outside every gate and
-          the `<AppShell />` below, so there is no nav/header to hide for `?embed=1`. Embed mode
-          there (`lib/embed.ts::useEmbedMode`) only hides page-owned chrome the page adds on top
-          — see that file's docstring. */}
+      {/* `/book` and `/manage-booking/#<token>` (Phase 6 Task 6, #10): same pattern, outside
+          every gate and the `<AppShell />` below, so there is no nav/header to hide for
+          `?embed=1`. Embed mode there (`lib/embed.ts::useEmbedMode`) only hides page-owned
+          chrome the page adds on top — see that file's docstring. `/manage-booking`'s path is
+          fixed by the server (`scheduling/public.py::_management_url` mints the link with
+          this exact shape), not a frontend choice. */}
+      <Route path="/book" element={<BookingPage />} />
+      <Route path="/manage-booking/*" element={<ManageBookingPage />} />
       <Route path="*" element={<AppRoutes />} />
     </Routes>
   )
