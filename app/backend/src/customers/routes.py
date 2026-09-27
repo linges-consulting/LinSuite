@@ -247,10 +247,16 @@ async def _classifications(
     return {cid: classify(counts.get(cid, 0), threshold or 10) for cid in customer_ids}
 
 
-async def create_customer(db: AsyncSession, payload: CustomerIn, actor_id: uuid.UUID) -> Customer:
+async def create_customer(
+    db: AsyncSession, payload: CustomerIn, actor_id: uuid.UUID | None
+) -> Customer:
     """Stage a customer and its audit event in the caller's transaction. Flushes, so the id
     exists and a duplicate email is a 409 here rather than a surprise at the caller's commit;
-    the caller's `commit` is what makes both real."""
+    the caller's `commit` is what makes both real.
+
+    `actor_id` is `None` for the one caller with nobody signed in at all: the public booking
+    endpoint (`scheduling/public.py`) — the same "no actor" shape `core/audit.py` already
+    allows, never a fabricated system user."""
     customer = Customer(**payload.model_dump())
     db.add(customer)
     try:

@@ -540,7 +540,9 @@ class Appointment(Base):
     # authorizer is in the audit log, which is the record; this is the calendar's marker.
     overridden_rules: Mapped[list[str] | None] = mapped_column(JSONB)
     override_reason: Mapped[str | None] = mapped_column(Text)
-    created_by_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    # NULL means the client booked this themselves (migration 0037, Phase 6 Task 2) — the
+    # public booking endpoint has no signed-in actor at all, never "we forgot who did it".
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
