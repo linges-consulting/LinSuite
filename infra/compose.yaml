@@ -104,6 +104,18 @@ services:
       traefik.http.routers.auth.priority: "1000"
       traefik.http.routers.auth.service: app
       traefik.http.routers.auth.middlewares: auth-ratelimit@docker,api-bodylimit@docker
+      # The public form-link page (`/api/public`, #46): the one surface with no session at all,
+      # so the one a stranger can hammer. Its own bucket — 30/minute, burst 10 — sized for a
+      # client opening a link a few times, not for walking a token space; `forms/public.py`
+      # applies the same count per address in Redis wherever this edge is not in front.
+      traefik.http.routers.public.rule: Host(`${APP_HOST:-localhost}`) && PathPrefix(`/api/public`)
+      traefik.http.routers.public.entrypoints: web
+      traefik.http.routers.public.priority: "1000"
+      traefik.http.routers.public.service: app
+      traefik.http.routers.public.middlewares: public-ratelimit@docker,api-bodylimit@docker
+      traefik.http.middlewares.public-ratelimit.ratelimit.average: "30"
+      traefik.http.middlewares.public-ratelimit.ratelimit.period: "1m"
+      traefik.http.middlewares.public-ratelimit.ratelimit.burst: "10"
 
   worker:
     <<: *backend

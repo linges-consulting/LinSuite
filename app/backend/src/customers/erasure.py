@@ -44,13 +44,14 @@ from core.audit import record_event
 from core.db import SessionDep
 from customers import retention, tasks
 from customers.models import ALWAYS_ERASED, ERASED_NAMES, Customer, ErasureRequest
+from forms.links import revoke_open_links
 from scheduling.models import Appointment
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/customers", tags=["customers"])
 
-RETAINED_WHEN_HELD = ("Name", "Date of birth", "Visit history")
+RETAINED_WHEN_HELD = ("Name", "Date of birth", "Visit history", "Session notes")
 
 
 def is_held(expires_at: datetime | None, now: datetime) -> bool:
@@ -166,6 +167,8 @@ async def request_erasure(
         customer.date_of_birth = None
     customer.suppressed_at = now
     customer.updated_at = now
+    # Pre-flight C9: every form link still open for this client dies with the request.
+    await revoke_open_links(db, customer.id)
 
     request = ErasureRequest(
         customer_id=customer.id,

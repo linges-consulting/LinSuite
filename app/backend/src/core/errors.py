@@ -51,12 +51,19 @@ MFA_EMAIL_OTP_NOT_ALLOWED = "mfa_email_otp_not_allowed"
 # there. Emitted by the middleware in `main.py` rather than raised as `Forbidden`: that handler
 # runs inside `ExceptionMiddleware`, which a middleware's own exception never reaches.
 UPLOAD_ORIGIN_REQUIRED = "upload_origin_required"
+# The same check on the public surface (`/api/public/…`, fix round 1 of #46): a POST there
+# carries no session, so the `Origin` naming this deployment is what stands in for CSRF defence.
+ORIGIN_REQUIRED = "origin_required"
 # Redis is unreachable on a path that must not guess: the `jti` denylist, the Admin Mode
 # window, this session's MFA state and the credential throttle all fail closed. 503 rather
 # than 500 so a screen can say "try again shortly" instead of "something is broken"
 # (tech-stack §14). The availability cache is the one caller that degrades instead — a miss
 # there is a slower answer, not a weaker one.
 SERVICE_UNAVAILABLE = "service_unavailable"
+# The caller holds the capability, so this isn't a permission gap an administrator can close —
+# they just aren't this appointment's practitioner or this note's author. `capability_required`
+# would send them to ask for a grant that doesn't exist and can't fix it.
+NOT_NOTE_AUTHOR = "not_note_author"
 
 
 class Forbidden(HTTPException):
@@ -88,3 +95,19 @@ def is_retryable(error: Exception) -> bool:
         for candidate in (orig, getattr(orig, "__cause__", None))
         for code in (getattr(candidate, "sqlstate", None), getattr(candidate, "pgcode", None))
     )
+
+
+class DocumentIntegrityError(Exception):
+    """A stored document (or a sealed submission) failed authentication or its digest check
+    (`core.documents`, `forms.submissions.open_answers`).
+
+    Deliberately not an `HTTPException`: nothing a request did caused it and no retry will
+    fix it — the row, the key or the database was altered — so it surfaces as a 500 and the
+    log line carries the document id only, never content or key material."""
+
+
+class DocumentNotFound(LookupError):
+    """No document with this id belongs to this client (`core.documents.fetch_document`).
+
+    Its own class, apart from `DocumentIntegrityError`, so a route can answer 404 for an
+    unknown or another client's id and still let a failed verification surface as a 500."""

@@ -42,12 +42,21 @@ APP_ROLE, PURGE_ROLE = "linsuite_app", "linsuite_purge"
 APP_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE")
 # Per-table departures from the default. Extend this, never bypass the test.
 APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
+    "session_notes": ("SELECT", "INSERT", "UPDATE"),
     "audit_events": ("SELECT", "INSERT"),
     "audit_access_log": ("SELECT", "INSERT"),
     # A key is written once and never rewritten; only the purge role destroys one (0024).
     "customer_document_keys": ("SELECT", "INSERT"),
     # The record that an erasure was honoured: the app stamps `purged_at`, never deletes it.
     "erasure_requests": ("SELECT", "INSERT", "UPDATE"),
+    # Sealed documents are immutable; only the purge role removes one (0026).
+    "documents": ("SELECT", "INSERT"),
+    # A published form version is frozen; nobody but the owner removes one (0027).
+    "form_template_versions": ("SELECT", "INSERT"),
+    # The app stamps `revoked_at`/`consumed_at` (trigger-guarded); it never deletes a link.
+    "form_links": ("SELECT", "INSERT", "UPDATE"),
+    # A filled-in form is immutable; only the purge role removes one, when not held (0029).
+    "form_submissions": ("SELECT", "INSERT"),
 }
 # The purge role reads and deletes everywhere and writes nowhere — except the fact of its own
 # purge, which ADR-0001 §6 puts in the purge transaction (0024, pre-flight D11).
@@ -57,10 +66,16 @@ PURGE_EXCEPTIONS: dict[str, tuple[str, ...]] = {
 }
 # (table, trigger) pairs that must be attached and firing.
 TRIGGERS = (
+    ("session_notes", "session_notes_guard"),
+    ("session_notes", "session_notes_delete_guard"),
     ("appointments", "tg_appointments_staff_concurrency"),
     ("audit_events", "audit_events_no_rewrite"),
     ("audit_access_log", "audit_access_log_no_rewrite"),
     ("customer_document_keys", "customer_document_keys_guard"),
+    ("documents", "documents_guard"),
+    ("form_template_versions", "form_template_versions_append_only"),
+    ("form_links", "form_links_guard"),
+    ("form_submissions", "form_submissions_guard"),
 )
 
 
@@ -236,6 +251,9 @@ async def test_every_trigger_and_security_definer_function_pins_its_search_path(
         "audit_events_append_only",
         "audit_access_log_append_only",
         "customer_document_keys_guard",
+        "customer_record_guard",
+        "form_template_versions_append_only",
+        "form_links_guard",
         "appointments_enforce_staff_concurrency",
         "ensure_access_log_partitions",
     } <= set(found)

@@ -11,7 +11,7 @@ import qrcode from 'qrcode-generator'
  * markup is ours. One `<path>` of module squares rather than a few hundred `<rect>`s, and
  * `currentColor` so it inverts with the theme instead of vanishing on a dark surface.
  */
-export function QrCode({ value, label }: { value: string; label: string }) {
+export function QrCode({ value, label, className = 'size-44' }: { value: string; label: string; className?: string }) {
   // Type 0 = smallest version that fits; M is the error correction every authenticator reads.
   const qr = qrcode(0, 'M')
   qr.addData(value)
@@ -33,7 +33,7 @@ export function QrCode({ value, label }: { value: string; label: string }) {
       role="img"
       aria-label={label}
       viewBox={`0 0 ${size} ${size}`}
-      className="size-44 rounded-lg bg-background p-1 ring-1 ring-foreground/10"
+      className={`${className} rounded-lg bg-background p-1 ring-1 ring-foreground/10`}
       shapeRendering="crispEdges"
     >
       <path d={path} fill="currentColor" />

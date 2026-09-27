@@ -50,3 +50,21 @@ export const SCHEDULE = ['schedule'] as const
  *  changes invalidate the prefix, because the profile's visits (and the erasure dialog's
  *  upcoming-visit count) are read from it. */
 export const CUSTOMER_PROFILE = ['customer-profile'] as const
+/** Settings → Forms: the template list, and one template's version history (id after it). */
+export const FORM_TEMPLATES = ['form-templates'] as const
+export const FORM_VERSIONS = ['form-versions'] as const
+/** The "Send form" dialog's choices (`forms.issue`), and one client's open links (id after). */
+export const SENDABLE_FORMS = ['sendable-forms'] as const
+export const FORM_LINKS = ['form-links'] as const
+/** One client's completed forms (`forms.view`; metadata), id after; and one opened (logged). */
+export const FORM_SUBMISSIONS = ['form-submissions'] as const
+export const FORM_SUBMISSION = ['form-submission'] as const
+/** One client's essential-forms compliance (id after): the profile banner. */
+export const COMPLIANCE = ['compliance'] as const
+/** The "Forms needed" dashboard (`forms.issue`): clients with an upcoming appointment and a
+ *  non-compliant essential form. */
+export const FORMS_NEEDED = ['forms-needed'] as const
+export const NOTE_TEMPLATES = ['note-templates'] as const
+export const SESSION_NOTES = ['session-notes'] as const
+export const SESSION_NOTE = ['session-note'] as const
+export const NOTE_APPOINTMENTS = ['note-appointments'] as const

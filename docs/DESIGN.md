@@ -47,6 +47,8 @@ muted text `slate-600` (7:1). Dark: page `slate-950`, cards `slate-900`, text `s
 **3. Utilities** — `bg-primary`, `text-muted-foreground`, `border-input`, `bg-success/10 text-success`, etc.
 
 Rules: never a raw colour in a component. Status is never colour-only — pair with a label or icon.
+Persisted session-note annotation colours are record data, independent of theme and branding. Their named palette lives in `src/lib/note-diagrams.ts`; components render each recorded colour alongside annotation text and type.
+The signature pad (`signature-pad.tsx`) is the other deliberate exception: fixed white paper and dark ink in both themes, because a signature is a captured image, not themed UI — it must look the same on the page and in the printed/archived PDF regardless of the viewer's theme.
 Dark mode is designed with light, not derived from it; check contrast in both.
 
 ## Typography

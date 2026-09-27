@@ -1,3 +1,41 @@
+import type { Answers, FieldType, FormSchema } from '@/lib/forms'
+
+export type DiagramId = 'body_front' | 'body_back' | 'layout'
+export type NoteTemplateDraft = {
+  name: string
+  fields: { key: string; label: string; required: boolean }[]
+  diagram_ids: DiagramId[]
+  active: boolean
+}
+export type NoteTemplate = NoteTemplateDraft & { id: string }
+export type NoteAnnotation = {
+  id: string; kind: 'pin' | 'zone' | 'text'; diagram_id: DiagramId
+  x: number; y: number; colour: string; timestamp: string; text: string
+  width?: number | null; height?: number | null
+}
+export type NoteContent = { answers: Record<string, string>; annotations: NoteAnnotation[] }
+export type SessionNote = {
+  id: string; template_id: string; appointment_id: string; author_staff_id: string; author_name: string
+  template: NoteTemplateDraft; revision: number; created_at: string; updated_at: string
+  locked_at: string | null; can_edit: boolean
+}
+export type NoteAppointment = { id: string; starts_at: string; service_name: string }
+
+async function noteRequest<T>(url: string, method = 'GET', body?: unknown): Promise<T> {
+  const res = method === 'GET' ? await fetch(url, { cache: 'no-store' }) : await send(method, url, body)
+  if (!res.ok) throw await failure(res, 'Could not update the session record')
+  return res.json()
+}
+export const fetchNoteTemplates = (admin = false) => noteRequest<NoteTemplate[]>(admin ? '/api/admin/note-templates' : '/api/note-templates')
+export const saveNoteTemplate = (body: NoteTemplateDraft, id?: string) => noteRequest<NoteTemplate>(`/api/note-templates${id ? `/${id}` : ''}`, id ? 'PUT' : 'POST', body)
+const notePath = (customerId: string, id?: string) => `/api/customers/${customerId}/session-notes${id ? `/${id}` : ''}`
+export const fetchSessionNotes = (customerId: string) => noteRequest<SessionNote[]>(notePath(customerId))
+export const fetchSessionNote = (customerId: string, id: string) => noteRequest<SessionNote & NoteContent>(notePath(customerId, id))
+export const fetchNoteAppointments = (customerId: string) => noteRequest<NoteAppointment[]>(`/api/customers/${customerId}/session-note-appointments`)
+export const createSessionNote = (customerId: string, body: NoteContent & { appointment_id: string; template_id: string; template: NoteTemplateDraft }) => noteRequest<SessionNote>(notePath(customerId), 'POST', body)
+export const updateSessionNote = (customerId: string, id: string, body: NoteContent & { revision: number }) => noteRequest<SessionNote>(notePath(customerId, id), 'PUT', body)
+export const lockSessionNote = (customerId: string, id: string, revision: number) => noteRequest<SessionNote>(`${notePath(customerId, id)}/lock`, 'POST', { revision })
+
 /** FastAPI's 422 says which field it is unhappy about in `loc`; put the message under it.
  *  Shared by every edit form that shows a server error inline rather than as a toast.
  *
@@ -340,7 +378,13 @@ export async function uploadBrandingAsset(
 ): Promise<{ url: string; etag: string; width: number; height: number }> {
   const body = new FormData()
   body.append('file', file)
-  const res = await fetch(`/api/admin/business/${kind}`, { method: 'POST', body })
+  // `origin`, not the page's `no-referrer`: under `no-referrer` a browser sends `Origin: null`
+  // on a same-origin POST, and the server's upload check needs this deployment's origin.
+  const res = await fetch(`/api/admin/business/${kind}`, {
+    method: 'POST',
+    body,
+    referrerPolicy: 'origin',
+  })
   if (!res.ok) throw await failure(res, `Could not upload the ${kind}`)
   return res.json()
 }
@@ -999,6 +1043,314 @@ export async function reactivateService(id: string): Promise<ServiceRow> {
   return res.json()
 }
 
+// --- forms: templates and their frozen versions (Settings → Forms) ---------------------------
+
+export type FormKind = 'intake' | 'consent' | 'waiver' | 'other'
+
+/** What the next publish copies: the schema and the two versioned flags. */
+export type FormDraft = {
+  schema: FormSchema
+  is_health_form: boolean
+  is_mandatory: boolean
+}
+
+export type FormTemplate = {
+  id: string
+  name: string
+  kind: FormKind
+  retired_at: string | null
+  updated_at: string
+  latest_version: number | null
+  has_unpublished_changes: boolean
+  draft: FormDraft
+  /** Task 8 (#51): identity-level compliance settings, edited outside versioning. */
+  applies_to_all: boolean
+  valid_for_months: number | null
+  service_ids: string[]
+}
+
+export type FormVersionSummary = {
+  number: number
+  /** The title and kind as published — what the client saw. The template's may since differ. */
+  name: string
+  kind: FormKind
+  published_at: string
+  requires_resignature: boolean
+  is_health_form: boolean
+  is_mandatory: boolean
+}
+
+export async function fetchFormTemplates(): Promise<FormTemplate[]> {
+  const res = await fetch('/api/admin/forms')
+  if (!res.ok) throw await failure(res, 'Could not load the forms')
+  return (await res.json()).templates
+}
+
+export async function createFormTemplate(draft: {
+  name: string
+  kind: FormKind
+  is_health_form: boolean
+  is_mandatory: boolean
+}): Promise<FormTemplate> {
+  const res = await send('POST', '/api/admin/forms', draft)
+  if (!res.ok) throw await failure(res, 'Could not create the form')
+  return res.json()
+}
+
+/** The whole draft, replaced. Keys go back exactly as the builder minted them. */
+export async function saveFormDraft(
+  id: string,
+  draft: FormDraft & { name: string; kind: FormKind },
+): Promise<FormTemplate> {
+  const res = await send('PUT', `/api/admin/forms/${id}/draft`, draft)
+  if (!res.ok) throw await failure(res, 'Could not save the draft')
+  return res.json()
+}
+
+export async function publishFormTemplate(
+  id: string,
+  requiresResignature: boolean,
+): Promise<FormVersionSummary> {
+  const res = await send('POST', `/api/admin/forms/${id}/publish`, {
+    requires_resignature: requiresResignature,
+  })
+  if (!res.ok) throw await failure(res, 'Could not publish the form')
+  return res.json()
+}
+
+export async function fetchFormVersions(id: string): Promise<FormVersionSummary[]> {
+  const res = await fetch(`/api/admin/forms/${id}/versions`)
+  if (!res.ok) throw await failure(res, 'Could not load the version history')
+  return (await res.json()).versions
+}
+
+/** A published version's own fields — the summary list has everything but these. Used only
+ *  to tell whether the current draft is unchanged from the latest published version (fix:
+ *  Publish must not offer a version identical to the one already published). */
+export type FormVersion = FormVersionSummary & { schema: FormSchema }
+
+export async function fetchFormVersion(id: string, number: number): Promise<FormVersion> {
+  const res = await fetch(`/api/admin/forms/${id}/versions/${number}`)
+  if (!res.ok) throw await failure(res, 'Could not load the version')
+  return res.json()
+}
+
+/** Task 8 (#51): who the essential-forms checklist expects this form from — every client, or
+ *  clients with an upcoming appointment for one of these services — and for how long a
+ *  submission stays valid. Identity-level: `PUT` here never touches the draft or a version. */
+export type FormTemplateSettings = {
+  applies_to_all: boolean
+  valid_for_months: number | null
+  service_ids: string[]
+}
+
+export async function saveFormTemplateSettings(
+  id: string,
+  settings: FormTemplateSettings,
+): Promise<FormTemplate> {
+  const res = await send('PUT', `/api/admin/forms/${id}/settings`, settings)
+  if (!res.ok) throw await failure(res, 'Could not save the settings')
+  return res.json()
+}
+
+export async function retireFormTemplate(id: string): Promise<FormTemplate> {
+  const res = await send('POST', `/api/admin/forms/${id}/retire`, {})
+  if (!res.ok) throw await failure(res, 'Could not retire the form')
+  return res.json()
+}
+
+export async function deleteFormTemplate(id: string): Promise<void> {
+  const res = await send('DELETE', `/api/admin/forms/${id}`)
+  if (!res.ok) throw await failure(res, 'Could not delete the form')
+}
+
+// --- forms: sending a link to a client, and the page the client opens -----------------------
+
+/** A form the front desk may send: published, not retired, at its latest version. */
+export type SendableForm = { template_id: string; name: string; kind: FormKind; version: number }
+
+/** The one answer that carries the link's URL. Never stored or refetched: gone on close. */
+export type IssuedFormLink = {
+  id: string
+  url: string
+  expires_at: string
+  /** The address the link was queued to, or null when the client has none on file. */
+  emailed_to: string | null
+}
+
+export type OpenFormLink = {
+  id: string
+  template_name: string
+  version: number
+  issued_at: string
+  expires_at: string
+}
+
+/** `forms.issue`, Staff Mode. */
+export async function fetchSendableForms(): Promise<SendableForm[]> {
+  const res = await fetch('/api/forms/templates')
+  if (!res.ok) throw await failure(res, 'Could not load the forms')
+  return (await res.json()).templates
+}
+
+export async function issueFormLink(customerId: string, templateId: string): Promise<IssuedFormLink> {
+  const res = await post(`/api/customers/${customerId}/form-links`, { template_id: templateId })
+  if (!res.ok) throw await failure(res, 'Could not send the form')
+  return res.json()
+}
+
+export async function fetchOpenFormLinks(customerId: string): Promise<OpenFormLink[]> {
+  const res = await fetch(`/api/customers/${customerId}/form-links`)
+  if (!res.ok) throw await failure(res, 'Could not load the sent forms')
+  return (await res.json()).links
+}
+
+export async function revokeFormLink(customerId: string, linkId: string): Promise<void> {
+  const res = await post(`/api/customers/${customerId}/form-links/${linkId}/revoke`, {})
+  if (!res.ok) throw await failure(res, 'Could not revoke the link')
+}
+
+/** What `/f/#<token>` renders: the pinned version, the business, and a first name. */
+export type PublicForm = {
+  version_id: string
+  template_name: string
+  schema: FormSchema
+  business: { name: string; logo_url: string | null }
+  client_first_name: string
+  expires_at: string
+}
+
+/**
+ * The public lookup. The token goes in a JSON body, never the path: a path is what every
+ * access log writes down. `credentials: 'omit'`: a staff browser opening a client's link must
+ * not send its session along. `referrerPolicy: 'origin'` overrides the page's `no-referrer`
+ * for this one request, which would otherwise make the browser send `Origin: null` — and the
+ * server accepts this POST only from this deployment's origin. No path is sent either way.
+ */
+export async function fetchPublicForm(token: string): Promise<PublicForm> {
+  const res = await fetch('/api/public/forms/lookup', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+    credentials: 'omit',
+    referrerPolicy: 'origin',
+    cache: 'no-store',
+  })
+  if (!res.ok) throw await failure(res, 'Could not open the form')
+  return res.json()
+}
+
+/** What the page sends. `submission_id` is minted once per page and resent on every retry. */
+export type FormSubmitPayload = {
+  token: string
+  submission_id: string
+  version_id: string
+  answers: Answers
+}
+
+/**
+ * The public submit (#47), sent exactly like the lookup: token in the body, no credentials,
+ * `Origin` kept. 200 `received` or `already_received` (a retry of what was filed); a 422
+ * `invalid_answers` carries `errors: {key: code}` on the thrown error's body.
+ */
+export async function submitPublicForm(payload: FormSubmitPayload): Promise<{ status: string }> {
+  const res = await fetch('/api/public/forms/submit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    credentials: 'omit',
+    referrerPolicy: 'origin',
+    cache: 'no-store',
+  })
+  if (!res.ok) throw await failure(res, 'Could not send the form')
+  return res.json()
+}
+
+/** One completed form, as the profile lists it: metadata, never answers. */
+export type FormSubmissionSummary = {
+  id: string
+  template_id: string
+  template_name: string
+  version: number
+  method: 'link' | 'scan'
+  submitted_at: string
+  pdf_ready: boolean
+}
+
+export async function fetchFormPdf(customerId: string, id: string): Promise<Blob> {
+  const res = await fetch(`/api/customers/${customerId}/forms/${id}/pdf`, { cache: 'no-store' })
+  if (!res.ok || res.status === 202) throw await failure(res, 'The PDF is still rendering. Try again shortly.')
+  return res.blob()
+}
+
+export async function fetchPaperVersions(templateId: string): Promise<FormVersionSummary[]> {
+  const res = await fetch(`/api/forms/templates/${templateId}/versions`)
+  if (!res.ok) throw await failure(res, 'Could not load published versions')
+  return (await res.json()).versions
+}
+
+export async function fetchBlankForm(templateId: string, version: number): Promise<string> {
+  const res = await fetch(`/api/admin/forms/${templateId}/versions/${version}/print`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not print the form')
+  return res.text()
+}
+
+export async function uploadFormScan(customerId: string, payload: {
+  submission_id: string; template_id: string; version_number: number; pages: string[]
+}): Promise<void> {
+  const res = await send('POST', `/api/customers/${customerId}/forms/scans`, payload)
+  if (!res.ok) throw await failure(res, 'Could not save the scan')
+}
+
+/** One completed form opened (`forms.view`; logged): its own version's fields, and answers. */
+export type FormSubmissionDetail = FormSubmissionSummary & {
+  fields: { key: string; type: FieldType; label: string }[]
+  answers: Answers
+}
+
+export async function fetchClientSubmissions(customerId: string): Promise<FormSubmissionSummary[]> {
+  const res = await fetch(`/api/customers/${customerId}/forms`)
+  if (!res.ok) throw await failure(res, 'Could not load the completed forms')
+  return (await res.json()).submissions
+}
+
+export async function fetchFormSubmission(customerId: string, id: string): Promise<FormSubmissionDetail> {
+  const res = await fetch(`/api/customers/${customerId}/forms/${id}`)
+  if (!res.ok) throw await failure(res, 'Could not open the form')
+  return res.json()
+}
+
+// --- forms: essential-forms compliance (Task 8, #51) ------------------------------------------
+
+export type ComplianceStatus = 'missing' | 'expired' | 'resign_required'
+
+/** One essential template a client is not currently compliant with. Metadata — a name and a
+ *  status, never an answer (`core.access_log.PHI_FIELDS`) — so neither endpoint below logs. */
+export type ComplianceEntry = { template_id: string; name: string; status: ComplianceStatus }
+
+/** `customers.view`. The profile's alert banner. */
+export async function fetchCustomerCompliance(customerId: string): Promise<ComplianceEntry[]> {
+  const res = await fetch(`/api/customers/${customerId}/compliance`)
+  if (!res.ok) throw await failure(res, 'Could not load the compliance status')
+  return (await res.json()).templates
+}
+
+/** One client on the "Forms needed" dashboard, with the appointment that put them there. */
+export type FormsNeededEntry = {
+  customer_id: string
+  customer_name: string
+  next_appointment_at: string
+  templates: ComplianceEntry[]
+}
+
+/** `forms.issue`. Clients with a confirmed appointment in the next `days` (≤ 60, default 14)
+ *  who have any non-compliant essential form. */
+export async function fetchFormsNeeded(days = 14): Promise<FormsNeededEntry[]> {
+  const res = await fetch(`/api/forms/compliance?${new URLSearchParams({ days: String(days) })}`)
+  if (!res.ok) throw await failure(res, 'Could not load the forms-needed list')
+  return (await res.json()).clients
+}
+
 // --- availability: the bookable slots -------------------------------------------------------
 
 /** One start that can be booked. Instants in UTC (`...Z`); `staff_ids` is everyone eligible
@@ -1105,6 +1457,14 @@ export async function searchCustomers(q: string): Promise<Customer[]> {
   const res = await fetch(`/api/customers?${new URLSearchParams({ q })}`)
   if (!res.ok) throw await failure(res, 'Could not search the customers')
   return (await res.json()).customers
+}
+
+/** `customers.manage`. The same endpoint the booking dialog's inline "new client" posts to —
+ *  one place a customer is made, whichever screen starts it. */
+export async function createCustomer(draft: CustomerDraft): Promise<Customer> {
+  const res = await send('POST', '/api/customers', draft)
+  if (!res.ok) throw await failure(res, 'Could not create the client')
+  return res.json()
 }
 
 /** A customer as the Clients list and profile show one: the picker's fields plus when the

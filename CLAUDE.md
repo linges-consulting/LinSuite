@@ -65,7 +65,7 @@ Constraints any implementation must honor:
 
 - **Modular monolith**, one deployable app, strict domain boundaries: `auth`, `customers`, `scheduling`, `inventory`, `forms`, `billing`, `notifications`. Decoupled enough to extract later, but shipped as one app.
 - **Single-tenant**: each business gets its own VM/server + database stack. No shared multi-tenant database — never design cross-tenant data access. On-prem is a supported target, so nothing may depend on a cloud-provider-specific service.
-- **Celery workers** for notification delivery (exponential backoff retry), PDF generation, and exports. These must not run inline in request handlers.
+- **Celery workers** for notification delivery (exponential backoff retry), rendered PDF generation, and exports. These must not run inline in request handlers. The approved M2 Task 7 exception is the bounded JPEG/PNG scan wrapper: Pillow assembles at most eight browser-downsampled pages under the 2 MiB body cap in a thread, then submission, encrypted document and retention hold commit together.
 - **JWT sessions, two policies**: Staff Mode is a fixed long-lived session token (`STAFF_SESSION_HOURS`); Admin Mode is a short (15–30 min) sliding idle window with a hard limit, held server-side against the session, requiring re-auth once it lapses. Dual-role users explicitly switch modes — never a merged permission set.
 - **RBAC is capability-scoped**, not role-name based.
 - **Secure form links**: short-lived, single-use, high-entropy (UUIDv4/HMAC-signed, 24–48h expiry).
@@ -73,7 +73,7 @@ Constraints any implementation must honor:
 
 ### Document storage and immutability
 
-- PDFs live in **PostgreSQL `bytea`**, AES-256-GCM encrypted in the app layer, SHA-256 verified on read. No object storage, no filesystem. Access goes through `store_document`/`fetch_document` in `core/`. Each customer's data key lives wrapped under `DOCUMENT_MASTER_KEY` in `customer_document_keys` (`customers/keys.py`: `data_key(db, customer_id)`); deleting that row is the crypto-shred, allowed only to the purge role when the customer's retention hold is null or expired.
+- PDFs live in **PostgreSQL `bytea`**, AES-256-GCM encrypted in the app layer, HMAC-SHA256 (keyed from the client's key) verified on read. No object storage, no filesystem. Access goes through `store_document`/`fetch_document` in `core/`. Each customer's data key lives wrapped under `DOCUMENT_MASTER_KEY` in `customer_document_keys` (`customers/keys.py`: `data_key(db, customer_id)`); deleting that row is the crypto-shred, allowed only to the purge role when the customer's retention hold is null or expired.
 - Three document classes, and the distinction matters: **immutable** (signed consents, waivers, intake forms — `UPDATE`/`DELETE` revoked and trigger-blocked), **voidable** (invoices — never edited in place; cancel sets status + links a replacement, original retained for CRA's 6-year rule), **lockable** (session notes — mutable until locked).
 - Immutability is enforced by DB grants and triggers, never by PDF permission flags, which are advisory and trivially stripped.
 - Audit log is an append-only table with the same enforcement.

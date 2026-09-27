@@ -102,6 +102,19 @@ function fake({ canEdit = false }: { canEdit?: boolean } = {}) {
     respond: (url: string, body: unknown) => {
       const parsed = new URL(url, 'http://test')
       if (canEdit && url === '/api/auth/me') return Response.json(ME_WITH_MANAGE)
+      if (url === '/api/customers' && body && typeof body === 'object' && 'first_name' in body) {
+        const draft = body as { first_name: string; last_name: string; email: string | null; phone: string | null }
+        if (draft.email === 'taken@example.com') {
+          return Response.json(
+            { detail: 'A customer with that email already exists.' },
+            { status: 409 },
+          )
+        }
+        return Response.json(
+          { id: 'c3', ...draft, classification: 'new' },
+          { status: 201 },
+        )
+      }
       if (parsed.pathname === '/api/customers') {
         const q = (parsed.searchParams.get('q') ?? '').toLowerCase()
         const digits = q.replace(/\D/g, '')
@@ -126,6 +139,31 @@ function fake({ canEdit = false }: { canEdit?: boolean } = {}) {
           return Response.json(profile.customer)
         }
         return Response.json(profile)
+      }
+      if (parsed.pathname === '/api/customers/c3') {
+        return Response.json({
+          customer: {
+            id: 'c3',
+            first_name: 'New',
+            last_name: 'Client',
+            email: null,
+            phone: null,
+            classification: 'new',
+            created_at: '2026-09-22T12:00:00Z',
+            date_of_birth: null,
+            emergency_contact_name: null,
+            emergency_contact_phone: null,
+            emergency_contact_relationship: null,
+            secondary_contact_name: null,
+            secondary_contact_phone: null,
+            secondary_contact_email: null,
+            notes: null,
+            updated_at: '2026-09-22T12:00:00Z',
+            retention: { status: 'not_held', expires_on: null },
+          },
+          timezone: 'America/Toronto',
+          appointments: [],
+        })
       }
       return undefined
     },
@@ -186,6 +224,64 @@ test('no match is the standard empty state', async () => {
 
   expect(await screen.findByText('No clients match')).toBeInTheDocument()
   expect(screen.queryByRole('table')).not.toBeInTheDocument()
+})
+
+// --- gap: the list had no way to create a client, only the booking dialog did -----------------
+
+test('without customers.manage there is no "New client" button', async () => {
+  fake()
+  renderApp('/clients')
+  await screen.findByText('Priya Nair')
+
+  expect(screen.queryByRole('button', { name: 'New client' })).not.toBeInTheDocument()
+})
+
+test('"New client" opens a dialog that posts to the customers API and opens the new profile', async () => {
+  const { calls } = fake({ canEdit: true })
+  const user = userEvent.setup()
+  renderApp('/clients')
+  await screen.findByText('Priya Nair')
+
+  await user.click(screen.getByRole('button', { name: 'New client' }))
+  const dialog = await screen.findByRole('dialog', { name: 'New client' })
+  // Nothing to send yet: the button stays off rather than posting a blank client.
+  expect(within(dialog).getByRole('button', { name: 'Create client' })).toBeDisabled()
+
+  await user.type(within(dialog).getByLabelText('First name'), 'New')
+  await user.type(within(dialog).getByLabelText('Last name'), 'Client')
+  await user.type(within(dialog).getByLabelText('Phone'), '4165550100')
+  await user.click(within(dialog).getByRole('button', { name: 'Create client' }))
+
+  await waitFor(() => {
+    const created = calls.find((c) => c.method === 'POST' && c.url === '/api/customers')
+    expect(created?.body).toEqual({
+      first_name: 'New',
+      last_name: 'Client',
+      email: null,
+      phone: '4165550100',
+    })
+  })
+  expect(await screen.findByRole('heading', { name: 'New Client' })).toBeInTheDocument()
+})
+
+test('a duplicate email creating a client lands under the email field, same as editing one does', async () => {
+  fake({ canEdit: true })
+  const user = userEvent.setup()
+  renderApp('/clients')
+  await screen.findByText('Priya Nair')
+
+  await user.click(screen.getByRole('button', { name: 'New client' }))
+  const dialog = await screen.findByRole('dialog', { name: 'New client' })
+  await user.type(within(dialog).getByLabelText('First name'), 'New')
+  await user.type(within(dialog).getByLabelText('Last name'), 'Client')
+  await user.type(within(dialog).getByLabelText('Email'), 'taken@example.com')
+  await user.click(within(dialog).getByRole('button', { name: 'Create client' }))
+
+  expect(
+    await within(dialog).findByText('A customer with that email already exists.'),
+  ).toBeInTheDocument()
+  // Refused, not created: the dialog stays open on the same screen.
+  expect(screen.getByRole('dialog', { name: 'New client' })).toBeInTheDocument()
 })
 
 test('a row opens the profile, which loads client and visits in one request', async () => {
@@ -459,4 +555,19 @@ test('in Staff Mode the card asks for Admin Mode instead of requesting a refusal
   expect(await screen.findByRole('heading', { name: 'Access history' })).toBeInTheDocument()
   expect(screen.getByText(/Switch to Admin Mode/)).toBeInTheDocument()
   expect(reportCalls(calls)).toHaveLength(0)
+})
+
+test('form access history identifies opened PDFs and answers in clinic language', async () => {
+  auditor()
+  const passthrough = vi.mocked(fetch).getMockImplementation()!
+  vi.mocked(fetch).mockImplementation(async (url, init) => String(url).includes('/access-log')
+    ? Response.json({ ...ACCESS_LOG, entries: [
+      { ...ACCESS_LOG.entries[0], resource_type: 'form_document' },
+      { ...ACCESS_LOG.entries[1], resource_type: 'form_submission' },
+    ] })
+    : passthrough(url, init))
+  renderApp('/clients/c1')
+  const table = await screen.findByRole('table', { name: 'Access history' })
+  expect(within(table).getByText('Opened form PDF')).toBeInTheDocument()
+  expect(within(table).getByText('Opened form answers')).toBeInTheDocument()
 })

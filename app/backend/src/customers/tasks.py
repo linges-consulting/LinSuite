@@ -6,10 +6,10 @@ the client's `customer_document_keys` row, the crypto-shred of ADR-0001 §5 — 
 here, in a Celery task, never in a request.
 
 **One purge transaction, in a fixed order:** the `customer.key_destroyed` audit row, then
-the client's documents (none exist before Phase 8 — see `_shred`), then the key. All or
-nothing: an erasure with no audit row, or an audit row for an erasure that did not happen,
-cannot be committed. Nothing is written when there is nothing to delete, so re-running is
-silent.
+the client's documents and form submissions (their FK to the key row forces it), then the
+key. All or nothing: an erasure with no audit row, or an audit row for an erasure that did
+not happen, cannot be committed. Nothing is written when there is nothing to delete, so
+re-running is silent.
 
 **Eligibility is the database's.** The key's guard trigger (0024) refuses the DELETE while
 the client is under a hold — `retention_expires_at` in the future or `'infinity'`. That
@@ -45,11 +45,47 @@ from customers.models import ALWAYS_ERASED, ERASED_NAMES
 log = logging.getLogger(__name__)
 
 PURGE_AUTHORITY = "linsuite_purge"
-# The guard's own refusal. Any other `insufficient_privilege` — a grant gone missing — is a
-# real fault and must not be mistaken for "held" night after night.
-_GUARD_REFUSAL = "customer_document_keys: DELETE is not permitted"
+# The guards' own refusals — the key's (0024) and the shared record guard on `documents`
+# (0026) — matched as the exact table-qualified start of the message, so another table whose
+# name merely ends the same way cannot pass for either. Any other `insufficient_privilege` — a
+# grant gone missing — is a real fault and must not be mistaken for "held" night after night.
+_GUARD_REFUSALS = tuple(
+    f"{table}: DELETE is not permitted for "
+    for table in ("customer_document_keys", "documents", "form_submissions", "session_notes")
+)
+_FOREIGN_KEY_VIOLATION = "23503"
+# Every foreign key to `customer_document_keys` — the rows sealed under a client's key. The key
+# DELETE failing on one of these, and only these, means a sealed row committed mid-purge
+# (ADR-0001 rule 7). `test_the_shred_hook_knows_every_foreign_key_to_the_key_row` keeps the
+# set equal to the database's. Any other FK violation is a real fault and raises.
+KEY_REFERENCES = frozenset(
+    {
+        "documents_customer_id_fkey",
+        "form_submissions_customer_id_fkey",
+        "session_notes_customer_id_fkey",
+    }
+)
 # The trigger's predicate, verbatim: not held = no hold, or a hold that has passed.
 _NOT_HELD = "(retention_expires_at IS NULL OR retention_expires_at < now())"
+
+
+def _refused_by_guard(message: str) -> bool:
+    return message.startswith(_GUARD_REFUSALS)
+
+
+def _inserted_mid_purge(sqlstate: str | None, constraint: str | None) -> bool:
+    return sqlstate == _FOREIGN_KEY_VIOLATION and constraint in KEY_REFERENCES
+
+
+def _postgres(error: DBAPIError) -> tuple[str | None, str, str | None]:
+    """(SQLSTATE, the server's own message, the constraint it names) — asyncpg's error is a
+    cause down."""
+    cause = getattr(error.orig, "__cause__", None)
+    return (
+        getattr(error.orig, "sqlstate", None),
+        str(cause or ""),
+        getattr(cause, "constraint_name", None),
+    )
 
 
 def _run(work: Callable[..., Awaitable[Any]], *args: object) -> Any:
@@ -76,8 +112,13 @@ async def _shred(purge: AsyncEngine, customer_id: str, request_id: str | None) -
                 ),
                 {"c": customer_id, "m": metadata},
             )
-            # Phase 8: delete the client's document rows here — after the audit row, before
-            # the key they are sealed under (ADR-0001 amendment, rule 7).
+            # The client's sealed rows, after the audit row and before the key they are
+            # sealed under (ADR-0001 rule 8) — their FK to the key row forces this order.
+            # Every table in `KEY_REFERENCES` is deleted from here.
+            for table in ("documents", "form_submissions", "session_notes"):
+                await conn.execute(
+                    text(f"DELETE FROM {table} WHERE customer_id = :c"), {"c": customer_id}
+                )
             deleted = (
                 await conn.execute(
                     text("DELETE FROM customer_document_keys WHERE customer_id = :c"),
@@ -86,8 +127,19 @@ async def _shred(purge: AsyncEngine, customer_id: str, request_id: str | None) -
             ).rowcount
         except DBAPIError as error:
             await transaction.rollback()
-            if _GUARD_REFUSAL in str(error):
+            sqlstate, message, constraint = _postgres(error)
+            if _refused_by_guard(message):
                 return False  # held: the trigger said no, which is its job
+            if _inserted_mid_purge(sqlstate, constraint):
+                # A document or submission committed for this client while the purge ran (it
+                # waited on the insert's lock on the key row, ADR-0001 rule 7). Nothing was
+                # destroyed; the next run deletes it with the rest.
+                log.warning(
+                    "key for customer %s gained a sealed row mid-purge (%s); deferred",
+                    customer_id,
+                    constraint,
+                )
+                return False
             raise
         if deleted:
             await transaction.commit()

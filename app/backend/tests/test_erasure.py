@@ -105,7 +105,12 @@ def test_an_indefinite_hold_says_why_there_is_no_date():
 
 
 def test_what_is_retained_is_named_only_when_held():
-    assert erasure.retained(held=True) == ["Name", "Date of birth", "Visit history"]
+    assert erasure.retained(held=True) == [
+        "Name",
+        "Date of birth",
+        "Visit history",
+        "Session notes",
+    ]
     assert erasure.retained(held=False) == []
 
 
@@ -249,7 +254,7 @@ async def test_a_held_request_keeps_the_chart_purges_contacts_and_the_key_surviv
     assert resp.status_code == 201, resp.text
     body = resp.json()
     assert body["held"] is True
-    assert body["retained"] == ["Name", "Date of birth", "Visit history"]
+    assert body["retained"] == ["Name", "Date of birth", "Visit history", "Session notes"]
     local_end = before["retention_expires_at"].astimezone(ZoneInfo(TORONTO)).date()
     assert body["held_until"] == local_end.isoformat()
     assert f"retained until {local_end.day} {local_end:%b %Y}" in body["held_reason"]
@@ -450,7 +455,12 @@ async def test_a_suppressed_client_is_unlisted_unbookable_and_still_openable(cli
     customer = profile.json()["customer"]
     assert customer["suppressed"] is True
     assert customer["erasure"]["held"] is True
-    assert customer["erasure"]["retained"] == ["Name", "Date of birth", "Visit history"]
+    assert customer["erasure"]["retained"] == [
+        "Name",
+        "Date of birth",
+        "Visit history",
+        "Session notes",
+    ]
     assert "retained until" in customer["erasure"]["held_reason"]
     assert len(await access_rows()) == before + 1
 
@@ -555,13 +565,21 @@ async def test_a_passed_hold_reads_as_expired_and_nothing_is_promised_kept(clien
 
 async def test_a_tombstone_that_later_gains_a_hold_still_refuses_a_dob(client):
     """The DOB exception is for a chart that was held when erasure was asked — not for an
-    anonymous tombstone that a later clinical entry happened to put under a hold."""
+    anonymous tombstone that later came under a hold. `record_clinical_entry` now refuses a
+    suppressed client (#47), so no code path does that; the hold is put there as the owner (a
+    restore, or rows from before #47), and the PATCH must still refuse."""
     await as_admin(client)
     await switch(client, "general_business")
     customer_id, _, _ = await ready_customer(client)
     assert (await erase(client, customer_id)).status_code == 201
     await switch(client, "regulated_health")
-    await entry(customer_id)
+    with pytest.raises(retention.CustomerSuppressed):
+        await entry(customer_id)
+    await as_owner(
+        "UPDATE customers SET last_clinical_entry_at = now(), "
+        "retention_expires_at = 'infinity' WHERE id = :id",
+        id=customer_id,
+    )
     assert (await row(customer_id))["retention_expires_at"] == retention.INFINITY
 
     resp = await client.patch(f"{CUSTOMERS}/{customer_id}", json={"date_of_birth": "1990-01-01"})

@@ -7,16 +7,20 @@ import {
   Eraser,
   History,
   Pencil,
+  Plus,
   SearchX,
   ShieldCheck,
   ShieldOff,
+  TriangleAlert,
   UserRound,
   Users,
 } from 'lucide-react'
-import { useDeferredValue, useState } from 'react'
+import { useDeferredValue, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
 import { ClassificationBadge } from '@/components/classification-badge'
+import { ClientFormsCard, type ClientFormsCardHandle } from '@/components/client-forms'
+import { SessionNotesCard } from '@/components/session-notes'
 import { EmptyState } from '@/components/empty-state'
 import { Field as FormField, Form, FormError } from '@/components/form'
 import { Badge } from '@/components/ui/badge'
@@ -43,23 +47,27 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Textarea } from '@/components/ui/textarea'
 import {
   ApiError,
+  createCustomer,
   fetchAccessLog,
+  fetchCustomerCompliance,
   fetchCustomerProfile,
   fetchCustomers,
   fieldErrors,
   requestErasure,
   updateCustomer,
   type AccessEntry,
+  type ComplianceEntry,
+  type Customer,
   type CustomerDetail,
   type Erasure,
+  type CustomerDraft,
   type CustomerPatch,
-  type CustomerRecord,
   type Visit,
 } from '@/lib/api'
 import { useSession } from '@/lib/auth'
 import { formatPhone } from '@/lib/phone'
 import { invalidateScheduling } from '@/lib/query-client'
-import { CUSTOMER_PROFILE as PROFILE, CUSTOMERS } from '@/lib/query-keys'
+import { COMPLIANCE, CUSTOMER_PROFILE as PROFILE, CUSTOMERS } from '@/lib/query-keys'
 
 const PAGE_SIZE = 50
 
@@ -72,6 +80,9 @@ const PAGE_SIZE = 50
  */
 export function ClientsPage() {
   const navigate = useNavigate()
+  const { user } = useSession()
+  const canCreate = user?.capabilities.includes('customers.manage') ?? false
+  const [creating, setCreating] = useState(false)
   const [q, setQ] = useState('')
   const [page, setPage] = useState(1)
   // Keystrokes update the box at once; the query follows when React has a moment.
@@ -101,12 +112,27 @@ export function ClientsPage() {
             setPage(1)
           }}
         />
-        {list.data && (
-          <p className="ml-auto text-muted-foreground tabular-nums" aria-live="polite">
-            {total === 1 ? '1 client' : `${total} clients`}
-          </p>
-        )}
+        <div className="ml-auto flex items-center gap-3">
+          {list.data && (
+            <p className="text-muted-foreground tabular-nums" aria-live="polite">
+              {total === 1 ? '1 client' : `${total} clients`}
+            </p>
+          )}
+          {canCreate && (
+            <Button size="sm" onClick={() => setCreating(true)}>
+              <Plus aria-hidden />
+              New client
+            </Button>
+          )}
+        </div>
       </div>
+
+      {creating && (
+        <NewClientDialog
+          onClose={() => setCreating(false)}
+          onCreated={(id) => navigate(`/clients/${id}`)}
+        />
+      )}
 
       {list.isPending ? (
         <Skeleton className="h-64 w-full" />
@@ -202,6 +228,115 @@ export function ClientsPage() {
 }
 
 /**
+ * Gap: clients could only be created from the booking dialog. `customers.manage`, the same
+ * capability the booking dialog's inline "new client" needs, posts to the same
+ * `POST /api/customers` the booking flow's `create_customer` serves either way — one place a
+ * customer is made, whichever screen starts it — then opens the new profile.
+ */
+function NewClientDialog({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void
+  onCreated: (id: string) => void
+}) {
+  const queryClient = useQueryClient()
+  const [draft, setDraft] = useState({ first_name: '', last_name: '', email: '', phone: '' })
+  const [errors, setErrors] = useState<Record<string, string>>({})
+  const set = (patch: Partial<typeof draft>) => setDraft((d) => ({ ...d, ...patch }))
+  const create = useMutation({
+    mutationFn: () => {
+      const payload: CustomerDraft = {
+        first_name: draft.first_name.trim(),
+        last_name: draft.last_name.trim(),
+        email: draft.email.trim() || null,
+        phone: draft.phone.trim() || null,
+      }
+      return createCustomer(payload)
+    },
+    onSuccess: (created) => {
+      queryClient.invalidateQueries({ queryKey: CUSTOMERS })
+      toast.success(`${fullName(created)} added`)
+      onCreated(created.id)
+    },
+    onError: (error) => {
+      const found = fieldErrors(error)
+      if (
+        Object.keys(found).length === 0 &&
+        error instanceof ApiError &&
+        error.status === 409
+      ) {
+        found.email = error.message
+      }
+      setErrors(found)
+    },
+  })
+  const incomplete = !draft.first_name.trim() || !draft.last_name.trim()
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>New client</DialogTitle>
+          <DialogDescription>Added to the client list right away.</DialogDescription>
+        </DialogHeader>
+        <Form onSubmit={() => !incomplete && create.mutate()}>
+          <div className="grid gap-5 sm:grid-cols-2">
+            <FormField label="First name" htmlFor="new-client-first" error={errors.first_name}>
+              <Input
+                id="new-client-first"
+                autoFocus
+                required
+                maxLength={100}
+                value={draft.first_name}
+                onChange={(e) => set({ first_name: e.target.value })}
+              />
+            </FormField>
+            <FormField label="Last name" htmlFor="new-client-last" error={errors.last_name}>
+              <Input
+                id="new-client-last"
+                required
+                maxLength={100}
+                value={draft.last_name}
+                onChange={(e) => set({ last_name: e.target.value })}
+              />
+            </FormField>
+          </div>
+          <div className="grid gap-5 sm:grid-cols-2">
+            <FormField label="Phone" htmlFor="new-client-phone" error={errors.phone}>
+              <Input
+                id="new-client-phone"
+                value={draft.phone}
+                onChange={(e) => set({ phone: e.target.value })}
+              />
+            </FormField>
+            <FormField label="Email" htmlFor="new-client-email" error={errors.email}>
+              <Input
+                id="new-client-email"
+                type="email"
+                value={draft.email}
+                onChange={(e) => set({ email: e.target.value })}
+              />
+            </FormField>
+          </div>
+          {create.error && Object.keys(errors).length === 0 && (
+            <FormError>{create.error.message}</FormError>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={create.isPending || incomplete}>
+              {create.isPending ? 'Creating…' : 'Create client'}
+            </Button>
+          </DialogFooter>
+        </Form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/**
  * One client: who they are, how to reach them, and every visit past and upcoming with the
  * time in the business's zone. The whole page is one request, and on the server that request
  * is one access-log row — so the query is deliberately not refetched on focus and never
@@ -213,17 +348,29 @@ export function ClientPage() {
   const { user } = useSession()
   const canEdit = user?.capabilities.includes('customers.manage') ?? false
   const canAudit = user?.capabilities.includes('audit.view') ?? false
+  const canSendForms = user?.capabilities.includes('forms.issue') ?? false
+  const canViewForms = user?.capabilities.includes('forms.view') ?? false
+  const canViewNotes = user?.capabilities.includes('notes.view') ?? false
+  const canWriteNotes = user?.capabilities.includes('notes.write') ?? false
   // An Admin Mode capability: offered only while the window is open, never as a refusal.
   const canErase =
     (user?.capabilities.includes('customers.erase') ?? false) && user?.mode === 'admin'
   const [editing, setEditing] = useState(false)
   const [erasing, setErasing] = useState(false)
+  const formsCard = useRef<ClientFormsCardHandle>(null)
   const profile = useQuery({
     queryKey: [...PROFILE, id],
     queryFn: () => fetchCustomerProfile(id),
     staleTime: 5 * 60_000,
     refetchOnWindowFocus: false,
     retry: false,
+  })
+  // Metadata (template names and statuses, no answers) — `customers.view` reads it the same
+  // way it reads the rest of the profile; a suppressed client has nothing to chase.
+  const compliance = useQuery({
+    queryKey: [...COMPLIANCE, id],
+    queryFn: () => fetchCustomerCompliance(id),
+    enabled: profile.isSuccess && !profile.data.customer.suppressed,
   })
 
   return (
@@ -259,6 +406,13 @@ export function ClientPage() {
         <>
           {profile.data.customer.erasure && (
             <ErasureBanner erasure={profile.data.customer.erasure} />
+          )}
+          {compliance.data && compliance.data.length > 0 && (
+            <ComplianceBanner
+              entries={compliance.data}
+              canSend={canSendForms}
+              onSend={(templateId) => formsCard.current?.openSendFor(templateId)}
+            />
           )}
           <Card>
             <CardHeader className="flex-row items-center justify-between">
@@ -417,6 +571,18 @@ export function ClientPage() {
               </p>
             </CardContent>
           </Card>
+
+          {(canSendForms || canViewForms) && (
+            <ClientFormsCard
+              ref={formsCard}
+              customerId={id}
+              timezone={profile.data.timezone}
+              suppressed={profile.data.customer.suppressed}
+              canSend={canSendForms}
+              canView={canViewForms}
+            />
+          )}
+          {canViewNotes && <SessionNotesCard customerId={id} timezone={profile.data.timezone} suppressed={profile.data.customer.suppressed} canWrite={canWriteNotes} />}
 
           {editing && (
             <ClientEditDialog customer={profile.data.customer} onClose={() => setEditing(false)} />
@@ -604,6 +770,61 @@ function ErasureDialog({
 }
 
 /** After an erasure request: what was kept and why, in the words the client was given. */
+const COMPLIANCE_LABEL: Record<ComplianceEntry['status'], string> = {
+  missing: 'Missing',
+  expired: 'Expired',
+  resign_required: 'Needs a new signature',
+}
+
+/**
+ * Task 8 (#51): the essential forms this client is missing, expired on, or must re-sign —
+ * metadata, not PHI, the same reason opening the profile stays one access-log row. "Send
+ * form" reaches into the Forms card below through a ref so the dialog opens with this one
+ * already chosen, rather than asking the front desk to find it again in a list.
+ */
+function ComplianceBanner({
+  entries,
+  canSend,
+  onSend,
+}: {
+  entries: ComplianceEntry[]
+  canSend: boolean
+  onSend: (templateId: string) => void
+}) {
+  return (
+    <div
+      role="status"
+      aria-label="Essential forms outstanding"
+      className="flex items-start gap-2 rounded-xl border border-warning/30 bg-warning/5 p-4 text-sm"
+    >
+      <TriangleAlert aria-hidden className="mt-0.5 size-4 shrink-0 text-warning" />
+      <div className="flex-1 space-y-2">
+        <p className="font-medium">
+          {entries.length === 1 ? 'An essential form needs attention' : 'Essential forms need attention'}
+        </p>
+        <ul className="space-y-1.5">
+          {entries.map((entry) => (
+            <li key={entry.template_id} className="flex flex-wrap items-center gap-2">
+              <span>{entry.name}</span>
+              <Badge variant="warning">{COMPLIANCE_LABEL[entry.status]}</Badge>
+              {canSend && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="ml-auto"
+                  onClick={() => onSend(entry.template_id)}
+                >
+                  Send form
+                </Button>
+              )}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  )
+}
+
 function ErasureBanner({ erasure }: { erasure: Erasure }) {
   return (
     <div
@@ -650,6 +871,9 @@ const ACCESS_PAGE_SIZE = 25
 const OPENED: Record<string, string> = {
   customer_profile: 'Opened profile',
   customer_erasure: 'Requested erasure',
+  form_document: 'Opened form PDF',
+  form_submission: 'Opened form answers',
+  session_note: 'Opened session note',
 }
 
 /**
@@ -870,7 +1094,7 @@ function RetentionLine({ retention }: { retention: CustomerDetail['retention'] }
   return <Badge variant="warning">Retention status unknown</Badge>
 }
 
-function fullName(c: CustomerRecord): string {
+function fullName(c: Customer): string {
   return `${c.first_name} ${c.last_name}`
 }
 

@@ -177,3 +177,141 @@ async def test_migration_0025_round_trips(database):
 
     await _upgrade_to("head")
     assert await _erasure() == (True, True, 1)
+
+
+async def _documents() -> tuple[bool, bool]:
+    """(documents exists, customer_record_guard exists)."""
+    async with session_scope() as db:
+        table = await db.scalar(text("SELECT to_regclass('documents') IS NOT NULL"))
+        function = await db.scalar(
+            text("SELECT to_regprocedure('public.customer_record_guard()') IS NOT NULL")
+        )
+    return bool(table), bool(function)
+
+
+async def test_migration_0026_round_trips(database):
+    """0026 adds `documents` and the shared guard; the downgrade drops both, so the
+    re-upgrade's CREATEs succeed."""
+    assert await _documents() == (True, True)
+
+    await _downgrade_to("0025")
+    assert await _documents() == (False, False)
+
+    await _upgrade_to("head")
+    assert await _documents() == (True, True)
+
+
+async def _form_templates() -> tuple[bool, bool, bool, int]:
+    """(form_templates exists, form_template_versions exists, its append-only function exists,
+    roles holding `forms.manage`)."""
+    async with session_scope() as db:
+        templates = await db.scalar(text("SELECT to_regclass('form_templates') IS NOT NULL"))
+        versions = await db.scalar(text("SELECT to_regclass('form_template_versions') IS NOT NULL"))
+        function = await db.scalar(
+            text(
+                "SELECT to_regprocedure('public.form_template_versions_append_only()') IS NOT NULL"
+            )
+        )
+        holders = await db.scalar(
+            text("SELECT count(*) FROM role_capabilities WHERE capability = 'forms.manage'")
+        )
+    return bool(templates), bool(versions), bool(function), int(holders)
+
+
+async def test_migration_0027_round_trips(database):
+    """0027 adds both template tables, the append-only trigger function and the
+    Administrator's `forms.manage`; the downgrade takes all of it back out."""
+    assert await _form_templates() == (True, True, True, 1)
+
+    await _downgrade_to("0026")
+    assert await _form_templates() == (False, False, False, 0)
+
+    await _upgrade_to("head")
+    assert await _form_templates() == (True, True, True, 1)
+
+
+async def _form_links() -> tuple[bool, bool, int]:
+    async with session_scope() as db:
+        table = await db.scalar(text("SELECT to_regclass('form_links') IS NOT NULL"))
+        function = await db.scalar(
+            text("SELECT count(*) > 0 FROM pg_proc WHERE proname = 'form_links_guard'")
+        )
+        holders = await db.scalar(
+            text("SELECT count(*) FROM role_capabilities WHERE capability = 'forms.issue'")
+        )
+    return bool(table), bool(function), int(holders)
+
+
+async def test_migration_0028_round_trips(database):
+    """0028 adds `form_links` with its guard trigger and gives both seeded roles
+    `forms.issue`; the downgrade takes all of it back out, to the explicit revision."""
+    assert await _form_links() == (True, True, 2)
+
+    await _downgrade_to("0027")
+    assert await _form_links() == (False, False, 0)
+
+    await _upgrade_to("head")
+    assert await _form_links() == (True, True, 2)
+
+
+async def _form_submissions() -> tuple[bool, bool, int]:
+    async with session_scope() as db:
+        table = await db.scalar(text("SELECT to_regclass('form_submissions') IS NOT NULL"))
+        trigger = await db.scalar(
+            text("SELECT count(*) > 0 FROM pg_trigger WHERE tgname = 'form_submissions_guard'")
+        )
+        holders = await db.scalar(
+            text("SELECT count(*) FROM role_capabilities WHERE capability = 'forms.view'")
+        )
+    return bool(table), bool(trigger), int(holders)
+
+
+async def test_migration_0029_round_trips(database):
+    """0029 adds `form_submissions` with its guard trigger (0026's shared function, which the
+    downgrade leaves alone) and gives both seeded roles `forms.view`; the downgrade takes the
+    table and the grant back out, to the explicit revision."""
+    assert await _form_submissions() == (True, True, 2)
+
+    await _downgrade_to("0028")
+    assert await _form_submissions() == (False, False, 0)
+    async with session_scope() as db:
+        assert await db.scalar(
+            text("SELECT to_regprocedure('public.customer_record_guard()') IS NOT NULL")
+        )
+
+    # "head" rather than "0029": a later ticket (0030) adds a migration on top, and leaving
+    # the database at 0029 here would fail the next test to assume it starts at head.
+    await _upgrade_to("head")
+    assert await _form_submissions() == (True, True, 2)
+
+
+async def _form_compliance() -> tuple[bool, bool, bool]:
+    """(the two new `form_templates` columns exist, its new CHECK exists, `form_template_services`
+    exists)."""
+    async with session_scope() as db:
+        columns = await db.scalar(
+            text(
+                "SELECT count(*) = 2 FROM information_schema.columns WHERE table_name = "
+                "'form_templates' AND column_name IN ('applies_to_all', 'valid_for_months')"
+            )
+        )
+        check = await db.scalar(
+            text(
+                "SELECT count(*) > 0 FROM pg_constraint WHERE conname = "
+                "'ck_form_templates_valid_for_months'"
+            )
+        )
+        services = await db.scalar(text("SELECT to_regclass('form_template_services') IS NOT NULL"))
+    return bool(columns), bool(check), bool(services)
+
+
+async def test_migration_0030_round_trips(database):
+    """0030 adds `form_templates.applies_to_all`/`valid_for_months` (with its CHECK) and the
+    `form_template_services` mapping table; the downgrade takes all three back out."""
+    assert await _form_compliance() == (True, True, True)
+
+    await _downgrade_to("0029")
+    assert await _form_compliance() == (False, False, False)
+
+    await _upgrade_to("head")
+    assert await _form_compliance() == (True, True, True)

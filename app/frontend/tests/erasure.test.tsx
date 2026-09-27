@@ -48,7 +48,7 @@ const ERASED_HELD = {
   held: true,
   held_until: '2042-03-14',
   held_reason: 'Regulated health record — retained until 14 Mar 2042, then destroyed',
-  retained: ['Name', 'Date of birth', 'Visit history'],
+  retained: ['Name', 'Date of birth', 'Visit history', 'Session notes'],
   purged_at: null,
 }
 

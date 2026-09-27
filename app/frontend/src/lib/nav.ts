@@ -22,7 +22,7 @@ export type NavItem = {
  * Hiding is a courtesy, not the enforcement: `Requires` on each route is what actually
  * refuses, and typing the URL still gets the honest refusal rather than the screen.
  */
-const ADMINISTRATIVE = ['admin', 'roles.manage', 'users.manage', 'catalog.manage']
+const ADMINISTRATIVE = ['admin', 'roles.manage', 'users.manage', 'catalog.manage', 'forms.manage']
 
 export const NAV: NavItem[] = [
   { to: '/schedule', label: 'Schedule', icon: CalendarDays },

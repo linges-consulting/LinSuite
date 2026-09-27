@@ -70,3 +70,17 @@ async def data_key(db: AsyncSession, customer_id: uuid.UUID) -> bytes:
         await create_key(db, customer_id)
         wrapped = await db.scalar(query)
     return unwrap(wrapped, customer_id, get_settings().document_master_key)
+
+
+async def existing_key(db: AsyncSession, customer_id: uuid.UUID) -> bytes | None:
+    """The client's DEK, or None once it has been shredded. Never creates one: code that only
+    *reads* documents must not mint a key their documents were never sealed under — and a
+    render for a purged client must find nothing rather than start them a fresh key."""
+    wrapped = await db.scalar(
+        select(CustomerDocumentKey.wrapped_key).where(
+            CustomerDocumentKey.customer_id == customer_id
+        )
+    )
+    if wrapped is None:
+        return None
+    return unwrap(wrapped, customer_id, get_settings().document_master_key)

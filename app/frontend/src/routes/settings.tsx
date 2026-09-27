@@ -2,6 +2,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { BrandingPanel } from '@/routes/settings-branding'
 import { BusinessPanel } from '@/routes/settings-business'
 import { ClosuresPanel } from '@/routes/settings-closures'
+import { FormsPanel } from '@/routes/settings-forms'
+import { NoteTemplatesPanel } from '@/routes/settings-notes'
 import { ResourcesPanel } from '@/routes/settings-resources'
 import { ServicesPanel } from '@/routes/settings-services'
 import { RolesPanel } from '@/routes/settings-roles'
@@ -22,13 +24,15 @@ import { StaffPanel } from '@/routes/settings-staff'
 export function SettingsPage() {
   return (
     <Tabs defaultValue="business" className="gap-4">
-      <TabsList>
+      <TabsList className="h-auto flex-wrap justify-start">
         <TabsTrigger value="business">Business</TabsTrigger>
         <TabsTrigger value="branding">Branding</TabsTrigger>
         <TabsTrigger value="roles">Roles</TabsTrigger>
         <TabsTrigger value="staff">Staff</TabsTrigger>
         <TabsTrigger value="resources">Resources</TabsTrigger>
         <TabsTrigger value="services">Services</TabsTrigger>
+        <TabsTrigger value="forms">Forms</TabsTrigger>
+        <TabsTrigger value="notes">Note templates</TabsTrigger>
         <TabsTrigger value="closures">Closures</TabsTrigger>
         <TabsTrigger value="security">Security</TabsTrigger>
       </TabsList>
@@ -49,6 +53,12 @@ export function SettingsPage() {
       </TabsContent>
       <TabsContent value="services">
         <ServicesPanel />
+      </TabsContent>
+      <TabsContent value="forms">
+        <FormsPanel />
+      </TabsContent>
+      <TabsContent value="notes">
+        <NoteTemplatesPanel />
       </TabsContent>
       <TabsContent value="closures">
         <ClosuresPanel />

@@ -82,6 +82,12 @@ CAPABILITIES: tuple[Capability, ...] = (
         # who opened their chart, so it sits behind the same short window as the settings.
         requires_admin_mode=True,
     ),
+    Capability(
+        "forms.manage",
+        "Build and publish intake forms, consents and waivers.",
+        "Administration",
+        requires_admin_mode=True,
+    ),
     Capability("schedule.view", "See the appointment calendar.", "Schedule"),
     Capability("schedule.manage", "Book, move and cancel appointments.", "Schedule"),
     Capability(
@@ -98,6 +104,21 @@ CAPABILITIES: tuple[Capability, ...] = (
         "explained.",
         "Customers",
         # Irreversible, so it sits behind the short window like the other compliance action.
+        requires_admin_mode=True,
+    ),
+    # Front-desk work, so Staff Mode: the clinic tablet is never signed in, and staff hand
+    # it over by showing the link's QR code (owner ruling, #46).
+    Capability("forms.issue", "Send forms to clients and take scans.", "Customers"),
+    # Reading a completed form is a PHI access (logged per open); the list is metadata (#47).
+    Capability("forms.view", "Open clients' completed forms.", "Customers"),
+    Capability("notes.view", "Open clients' session notes and visual markup.", "Customers"),
+    Capability(
+        "notes.write", "Author, edit and lock your own appointment session notes.", "Customers"
+    ),
+    Capability(
+        "notes.manage",
+        "Configure session-note templates.",
+        "Administration",
         requires_admin_mode=True,
     ),
 )

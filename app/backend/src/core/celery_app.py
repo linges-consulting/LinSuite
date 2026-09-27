@@ -16,7 +16,9 @@ from celery.signals import setup_logging, worker_init
 from core.config import get_settings
 from core.logging import configure_logging
 
-celery_app = Celery("linsuite", include=["core.tasks", "customers.tasks", "notifications.tasks"])
+celery_app = Celery(
+    "linsuite", include=["core.tasks", "customers.tasks", "forms.tasks", "notifications.tasks"]
+)
 
 
 @celery_app.on_configure.connect
@@ -29,6 +31,10 @@ def _configure(sender: Celery, **_: object) -> None:
     # worker never runs two schedulers. Beat only enqueues; the worker does the work.
     sender.conf.timezone = "UTC"
     sender.conf.beat_schedule = {
+        "reconcile-form-archives": {
+            "task": "forms.tasks.reconcile_archives",
+            "schedule": 300.0,
+        },
         # Nightly at 03:15 UTC. Idempotent and a no-op on all but one night a year, so the
         # hour does not matter.
         "maintain-partitions": {
