@@ -196,6 +196,50 @@ async def test_reschedule_honours_the_same_cutoff_as_cancel(client):
     assert resp.json()["code"] == "online_change_not_allowed"
 
 
+async def test_disabling_online_cancellation_also_blocks_reschedule(client):
+    """`cancellable` is one shared toggle for both actions (module docstring's own reading of
+    the ticket's "Self-service cancellation and rescheduling, subject to admin policy" bullet —
+    #10 names only one admin toggle, "online cancellation on/off", not a second one for
+    rescheduling). `test_reschedule_honours_the_same_cutoff_as_cancel` already pins the cutoff
+    half of that shared gate; this pins the toggle half, which nothing here tested directly."""
+    service, staff = await setup(client)
+    booked = await book(client, service, staff, at("10:00"))
+    token = token_of(booked["management_link"])
+    await set_business(online_cancellation_enabled=False)
+
+    resp = await client.post(
+        RESCHEDULE, json={"token": token, "starts_at": at("13:00")}, headers=ORIGIN
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["code"] == "online_change_not_allowed"
+
+
+async def test_disabling_online_booking_does_not_strand_an_existing_bookings_manage_flow(client):
+    """`online_booking_enabled` gates *new* bookings only (`scheduling/public.py`'s
+    `public_availability`/`book_public`) — a business turning off new online bookings must not
+    strand a client who already booked online from managing that booking. Confirms
+    `manage`/`cancel`/`reschedule` read nothing about `online_booking_enabled` at all."""
+    service, staff = await setup(client)
+    booked = await book(client, service, staff, at("10:00"))
+    token = token_of(booked["management_link"])
+    await set_business(online_booking_enabled=False)
+
+    view = await client.post(MANAGE, json={"token": token}, headers=ORIGIN)
+    assert view.status_code == 200, view.text
+    assert view.json()["status"] == "confirmed"
+    assert view.json()["cancellable"] is True
+
+    rescheduled = await client.post(
+        RESCHEDULE, json={"token": token, "starts_at": at("13:00")}, headers=ORIGIN
+    )
+    assert rescheduled.status_code == 200, rescheduled.text
+    assert rescheduled.json()["starts_at"] == at("13:00")
+
+    cancelled = await client.post(CANCEL, json={"token": token}, headers=ORIGIN)
+    assert cancelled.status_code == 200, cancelled.text
+    assert cancelled.json()["status"] == "cancelled"
+
+
 async def test_an_unknown_token_and_an_already_cancelled_ones_get_the_same_404_shape(client):
     service, staff = await setup(client)
     booked = await book(client, service, staff, at("10:00"))

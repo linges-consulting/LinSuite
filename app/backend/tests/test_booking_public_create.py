@@ -21,6 +21,7 @@ from tests.test_appointments import (  # noqa: F401 — the autouse fixture come
     me_staff_id,
     put_hours,
 )
+from tests.test_appointments import book as staff_book
 
 BOOK = "/api/public/booking"
 ORIGIN = {"Origin": "http://test.linsuite.example"}
@@ -272,6 +273,60 @@ async def test_daily_cap_per_email_refuses_the_one_past_the_limit(client):
     )
     assert over.status_code == 429, over.text
     assert over.headers["retry-after"] == "86400"
+
+
+async def test_the_public_booking_creation_route_never_books_a_slot_only_a_staff_override_reaches(
+    client,
+):
+    """The acceptance-critical claim (#10's own acceptance criteria: "the public endpoint never
+    offers a slot that staff availability does not permit, including out-of-shift times"),
+    proven through *booking creation* specifically — `test_booking_public.py`'s own adversarial
+    test already proves it for `GET .../availability`, and Task 1's row in the ledger explicitly
+    scopes that test to availability lookup only. This is the same override precedent
+    (`tests/test_overrides.py`), but the client attempts the actual `POST /api/public/booking`
+    against the identical start, both before and after staff's own override-booking exists."""
+    await as_admin(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me, [(0, 540, 720)])  # Monday 09:00-12:00
+    service = await make_service(client, [me])
+
+    # Before any override exists: the public creation route already refuses 11:30 as
+    # not-offered — the engine's own advisory rule, never relaxed for this route.
+    before = await client.post(
+        BOOK,
+        json={
+            "service_id": service,
+            "staff_id": me,
+            "starts_at": at("11:30"),
+            "customer": customer(email="adversary-before@example.com"),
+        },
+        headers=ORIGIN,
+    )
+    assert before.status_code == 422, before.text
+    assert before.json()["code"] == "not_offered"
+
+    # Staff, with the session still authenticated, actually override-books that same start —
+    # the exact staff-side capability the ticket says a client must never reach.
+    overridden = await staff_book(
+        client, service, me, at("11:30"), override=True, override_reason="Client asked"
+    )
+    assert overridden.status_code == 201, overridden.text
+    client.cookies.clear()
+
+    # After the override booking exists, the public route still refuses the identical slot —
+    # the engine's own advisory rule still holds, regardless of what a human has since done.
+    after = await client.post(
+        BOOK,
+        json={
+            "service_id": service,
+            "staff_id": me,
+            "starts_at": at("11:30"),
+            "customer": customer(email="adversary-after@example.com"),
+        },
+        headers=ORIGIN,
+    )
+    assert after.status_code == 422, after.text
+    assert after.json()["code"] == "not_offered"
 
 
 async def test_daily_cap_per_ip_is_independent_of_email(client):
