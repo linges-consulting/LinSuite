@@ -24,6 +24,8 @@ export const TIME_OFF = ['time-off'] as const
 export const CLOSURES = ['closures'] as const
 export const MFA = ['mfa'] as const
 export const SECURITY = ['security-policy'] as const
+/** Settings → Notifications: sender, SMS, templates, reminder intervals (#11). */
+export const NOTIFICATION_SETTINGS = ['notification-settings'] as const
 /** The public branding document: read by the shell, invalidated by the Branding panel. */
 export const BRANDING_DOCUMENT = ['branding'] as const
 export const BUSINESS = ['business'] as const

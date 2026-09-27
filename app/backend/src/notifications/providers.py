@@ -12,17 +12,30 @@ are the two real senders: Resend called directly over `httpx` (bearer token, no 
 endpoint doesn't justify a whole dependency when `httpx` is already here) and SMTP over
 stdlib `smtplib`/`email.message.EmailMessage` (no new dependency).
 
-**Selection changed shape in Task 2.** `NOTIFICATION_PROVIDER` used to be the only knob;
-it now stays for the `console`/`recording` dev/test override *only* — picked unconditionally,
-so the test suite never makes a real HTTP or SMTP call no matter what a business row holds.
+**Selection changed shape in Task 2.** `NOTIFICATION_PROVIDER=recording` is the *test* override
+only, and wins unconditionally — the suite must never make a real HTTP/SMTP call no matter
+what a business row holds. `console`, the shipped default, is **not** an unconditional
+override (Task 6 fix, #11): `.env.example` always said to "leave this at console ... and
+configure the sender from the app instead", but the first cut of `get_provider()` treated the
+default the same as the test sentinel and returned `ConsoleProvider` even for a fully
+configured, verified business — which meant no deployment could ever actually send through
+Resend/SMTP without changing an env var the settings panel gives no reason to touch. Fixed by
+narrowing `_OVERRIDE_PROVIDERS` to `{"recording"}`; `console` now only wins when there is no
+business row or it has not chosen a sender, exactly the fallback `.env.example` describes and
+`test_get_provider_degrades_to_console_when_unconfigured_and_not_overridden` already pinned
+(that test sets a third, non-override value precisely to exercise this fallback, so it was
+never actually testing the old unconditional-console branch — nothing had to change there).
 Anything else reads the tenant's own configured sender off `business.email_sender` instead:
 email is tenant-owned config now (Resend/SMTP credentials live on `businesses`), not a
 deployment-wide env var. `get_provider()` takes the `Business` row for this reason; the
-existing callers that don't pass one (password reset, MFA, ...) are unaffected as long as
-`NOTIFICATION_PROVIDER` stays at its shipped default of `console` — degrading to `console`
-is also what happens for a business that hasn't configured a sender yet, so an unconfigured
-deployment can still complete a password reset. Task 5's trigger functions are what fetch the
-business row and pass it through; wiring that up is their job, not this module's.
+existing callers that don't pass one (password reset, MFA, ...) are unaffected — with no
+business row, the fallback is still `console`, so an unconfigured deployment can still complete
+a password reset. `notifications/tasks.py::send_email`/`send_sms` still don't fetch and pass
+the business row through Celery's JSON-only arguments — that wiring is still owed (Task 2's
+original note; still true after this fix) and is why a *queued* send is still `console` today
+regardless of a configured sender, even though `get_provider(business)` called directly (Task
+6's settings-panel test-send action) now correctly reaches Resend/SMTP. Left for Task 7's full
+regression pass to close, since it touches the trigger/task wiring, not this module.
 
 `TwilioProvider` (Task 3, #11) is SMS's real sender: Twilio's REST API directly over `httpx`
 (Basic Auth with the account SID/auth token), the same no-SDK shape as `ResendProvider`.
@@ -65,9 +78,11 @@ _HTTP_TIMEOUT = 10.0
 _SMTP_TIMEOUT = 10
 _DEFAULT_SMTP_PORT = 587
 
-# The dev/test override values of `NOTIFICATION_PROVIDER` — picked unconditionally, regardless
-# of anything a business row holds. Everything else reads `business.email_sender`.
-_OVERRIDE_PROVIDERS = frozenset({"console", "recording"})
+# The dev/test override value of `NOTIFICATION_PROVIDER` — picked unconditionally, regardless
+# of anything a business row holds. `console` is deliberately *not* in this set (module
+# docstring, Task 6 fix): it is the shipped default and the no-business/no-sender fallback,
+# not a permanent override.
+_OVERRIDE_PROVIDERS = frozenset({"recording"})
 
 
 class PermanentDeliveryError(Exception):
@@ -315,3 +330,19 @@ def get_provider(business: "Business | None" = None) -> NotificationProvider:
     if business is None or not business.email_sender:
         return PROVIDERS["console"]()
     return _tenant_provider(business)
+
+
+def get_sms_provider(business: "Business") -> NotificationProvider:
+    """`get_provider`'s counterpart for SMS (Task 6, #11's settings-panel test-send action —
+    the first real caller that passes a business through to an SMS send). There is no
+    `business.sms_sender` to switch on the way `email_sender` does: SMS has exactly one real
+    adapter, so `sms_enabled` plus the three `twilio_*` columns are the whole configuration.
+    `NOTIFICATION_PROVIDER=recording` still wins unconditionally, same as `get_provider` — the
+    suite must never dial Twilio for real either."""
+    if get_settings().notification_provider in _OVERRIDE_PROVIDERS:
+        return PROVIDERS["recording"]()
+    return PROVIDERS["twilio"](
+        account_sid=business.twilio_account_sid,
+        auth_token=decrypt_credential(business.twilio_auth_token_encrypted or ""),
+        from_number=business.twilio_from_number,
+    )

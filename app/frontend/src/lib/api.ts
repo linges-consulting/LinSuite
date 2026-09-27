@@ -935,6 +935,102 @@ export async function updateSecurityPolicy(policy: SecurityChange): Promise<Secu
   return res.json()
 }
 
+// --- notifications: sender, SMS, templates, reminders (Phase 12 Task 6, #11) ----------------
+
+export type NotificationTemplate = {
+  id: string
+  notification_type: string
+  channel: 'email' | 'sms'
+  subject_template: string | null
+  body_template: string
+  updated_at: string
+  /** The `$identifier`s this type's seeded body actually uses (`notifications/render.py`'s
+   *  `safe_substitute` leaves an unrecognised one literal, so this is a courtesy, not a limit). */
+  merge_fields: string[]
+}
+
+export type NotificationSettings = {
+  email_sender: 'resend' | 'smtp' | null
+  /** Read straight off `notifications/providers.py::email_ready` — the one fact the banner is
+   *  built from, never inferred here from which fields happen to be filled in. */
+  email_ready: boolean
+  resend_from_address: string | null
+  /** Whether a key is stored — the key itself is write-only and never sent to the browser. */
+  resend_api_key_set: boolean
+  resend_domain_verified_at: string | null
+  smtp_host: string | null
+  smtp_port: number | null
+  smtp_username: string | null
+  smtp_from_address: string | null
+  smtp_password_set: boolean
+  smtp_verified_at: string | null
+  sms_enabled: boolean
+  sms_ready: boolean
+  twilio_account_sid: string | null
+  twilio_from_number: string | null
+  twilio_auth_token_set: boolean
+  reminder_intervals_hours: number[]
+  templates: NotificationTemplate[]
+}
+
+/** A field left out is left alone — the three secrets included, so rotating one credential
+ *  never means retyping the others. `email_sender: 'none'` is the explicit clear; omitting
+ *  the field (as every other field can) means "leave it as it is". */
+export type NotificationSettingsChange = Partial<{
+  email_sender: 'resend' | 'smtp' | 'none'
+  resend_from_address: string | null
+  resend_api_key: string
+  smtp_host: string | null
+  smtp_port: number | null
+  smtp_username: string | null
+  smtp_password: string
+  smtp_from_address: string | null
+  sms_enabled: boolean
+  twilio_account_sid: string | null
+  twilio_auth_token: string
+  twilio_from_number: string | null
+  reminder_intervals_hours: number[]
+}>
+
+export async function fetchNotificationSettings(): Promise<NotificationSettings> {
+  const res = await fetch('/api/admin/business/notifications')
+  if (!res.ok) throw await failure(res, 'Could not load the notification settings')
+  return res.json()
+}
+
+export async function updateNotificationSettings(
+  change: NotificationSettingsChange,
+): Promise<NotificationSettings> {
+  const res = await send('PATCH', '/api/admin/business/notifications', change)
+  if (!res.ok) throw await failure(res, 'Could not save the notification settings')
+  return res.json()
+}
+
+/** Calls the real adapter synchronously and, only on success, sets the verified timestamp —
+ *  the one thing that ungates the "disabled behind a banner" state for real (#11). */
+export async function sendTestEmail(to: string): Promise<NotificationSettings> {
+  const res = await send('POST', '/api/admin/business/notifications/test-email', { to })
+  if (!res.ok) throw await failure(res, 'The test email could not be sent')
+  return res.json()
+}
+
+/** SMS has no verified flag to flip (`notifications/providers.py::sms_ready` never gates on
+ *  one) — this still performs a real send, it just reports success or the adapter's error. */
+export async function sendTestSms(to: string): Promise<{ sent: boolean }> {
+  const res = await send('POST', '/api/admin/business/notifications/test-sms', { to })
+  if (!res.ok) throw await failure(res, 'The test text could not be sent')
+  return res.json()
+}
+
+export async function updateNotificationTemplate(
+  id: string,
+  change: { subject_template: string | null; body_template: string },
+): Promise<NotificationTemplate> {
+  const res = await send('PUT', `/api/admin/business/notifications/templates/${id}`, change)
+  if (!res.ok) throw await failure(res, 'Could not save the template')
+  return res.json()
+}
+
 // --- services: the catalog ----------------------------------------------------------------
 
 /** One thing delivering a service needs. `resource_id` null is "any active resource of this

@@ -317,6 +317,30 @@ def test_get_provider_builds_an_smtp_provider_from_the_business_row(database, mo
     assert provider._password == "s3cret"
 
 
+def test_get_provider_reaches_the_tenant_sender_even_at_the_shipped_console_default(
+    database, monkeypatch
+):
+    """Task 6 fix, #11: `.env.example` says to "leave this at console ... and configure the
+    sender from the app instead" — so a deployment that never touches `NOTIFICATION_PROVIDER`
+    (still `console`, the shipped default) must still reach a configured, verified business's
+    real sender. Before this fix `console` was in `_OVERRIDE_PROVIDERS` and won unconditionally,
+    the same as `recording`; only the test suite's own `NOTIFICATION_PROVIDER=recording` masked
+    that this ever regressed a live deployment."""
+    from core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "notification_provider", "console")
+    business = _business(
+        email_sender="resend",
+        resend_api_key_encrypted=encrypt_credential("re_live_key"),
+        resend_from_address="hello@cedar.example",
+    )
+
+    provider = get_provider(business)
+
+    assert isinstance(provider, ResendProvider)
+    assert provider._api_key == "re_live_key"
+
+
 def test_get_provider_override_wins_even_over_a_configured_business(database):
     # `NOTIFICATION_PROVIDER=recording` (the test harness default) is picked unconditionally —
     # the suite must never make a real HTTP/SMTP call, whatever a business row holds.

@@ -13,10 +13,12 @@ import httpx
 import pytest
 
 from core.models import Business
+from notifications.credentials import encrypt_credential
 from notifications.providers import (
     ConsoleProvider,
     PermanentDeliveryError,
     TwilioProvider,
+    get_sms_provider,
     sms_ready,
 )
 
@@ -137,3 +139,40 @@ def test_sms_ready_is_true_when_enabled_and_fully_configured():
         twilio_from_number="+15551234567",
     )
     assert sms_ready(business) is True
+
+
+# --- get_sms_provider (Task 6, #11) -------------------------------------------------------------
+
+
+def test_get_sms_provider_builds_a_twilio_provider_from_the_business_row(database, monkeypatch):
+    from core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "notification_provider", "unused-in-production")
+    business = _business(
+        sms_enabled=True,
+        twilio_account_sid="ACtest",
+        twilio_auth_token_encrypted=encrypt_credential("secrettoken"),
+        twilio_from_number="+15551234567",
+    )
+
+    provider = get_sms_provider(business)
+
+    assert isinstance(provider, TwilioProvider)
+    assert provider._account_sid == "ACtest"
+    assert provider._auth_token == "secrettoken"
+    assert provider._from_number == "+15551234567"
+
+
+def test_get_sms_provider_override_wins_even_over_a_configured_business(database):
+    # `NOTIFICATION_PROVIDER=recording` (the test harness default) is picked unconditionally —
+    # the suite must never dial Twilio for real, whatever a business row holds.
+    from tests.fake_notifications import RecordingProvider
+
+    business = _business(
+        sms_enabled=True,
+        twilio_account_sid="ACtest",
+        twilio_auth_token_encrypted=encrypt_credential("secrettoken"),
+        twilio_from_number="+15551234567",
+    )
+
+    assert isinstance(get_sms_provider(business), RecordingProvider)

@@ -4,6 +4,7 @@ import { BusinessPanel } from '@/routes/settings-business'
 import { ClosuresPanel } from '@/routes/settings-closures'
 import { FormsPanel } from '@/routes/settings-forms'
 import { NoteTemplatesPanel } from '@/routes/settings-notes'
+import { NotificationsPanel } from '@/routes/settings-notifications'
 import { ResourcesPanel } from '@/routes/settings-resources'
 import { ServicesPanel } from '@/routes/settings-services'
 import { RolesPanel } from '@/routes/settings-roles'
@@ -34,6 +35,7 @@ export function SettingsPage() {
         <TabsTrigger value="forms">Forms</TabsTrigger>
         <TabsTrigger value="notes">Note templates</TabsTrigger>
         <TabsTrigger value="closures">Closures</TabsTrigger>
+        <TabsTrigger value="notifications">Notifications</TabsTrigger>
         <TabsTrigger value="security">Security</TabsTrigger>
       </TabsList>
       <TabsContent value="business">
@@ -62,6 +64,9 @@ export function SettingsPage() {
       </TabsContent>
       <TabsContent value="closures">
         <ClosuresPanel />
+      </TabsContent>
+      <TabsContent value="notifications">
+        <NotificationsPanel />
       </TabsContent>
       <TabsContent value="security">
         <SecurityPanel />

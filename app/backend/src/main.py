@@ -52,6 +52,7 @@ from scheduling.staff import public as roster_router
 from scheduling.staff import router as staff_router
 from scheduling.time_off import router as time_off_router
 from settings.images import FAVICON_MAX_BYTES, LOGO_MAX_BYTES
+from settings.notifications_routes import router as notification_settings_router
 from settings.routes import public as branding_router
 from settings.routes import router as business_router
 
@@ -267,5 +268,6 @@ api.include_router(form_scans_router)
 api.include_router(form_compliance_router)
 api.include_router(public_forms_router)
 api.include_router(business_router)
+api.include_router(notification_settings_router)
 api.include_router(branding_router)
 app.include_router(api)
