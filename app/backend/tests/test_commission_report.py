@@ -33,6 +33,8 @@ async def claimed_instance(client):
             await purge.execute(text("DELETE FROM invoice_line_taxes"))
             await purge.execute(text("DELETE FROM invoice_line_discounts"))
             await purge.execute(text("DELETE FROM invoice_lines"))
+            await purge.execute(text("DELETE FROM retail_return_lines"))  # #76
+            await purge.execute(text("DELETE FROM retail_returns"))  # #76
             await purge.execute(text("DELETE FROM invoice_refunds"))  # #67
             await purge.execute(text("DELETE FROM invoices"))
             await purge.execute(text("DELETE FROM business_invoice_counters"))

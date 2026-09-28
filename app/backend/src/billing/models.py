@@ -1417,6 +1417,60 @@ class RetailInvoiceLine(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+# ## retail returns (#76, M4 spec #54 stories 81-82)
+#
+# A return action records which retail invoice lines came back and, per line, whether the goods
+# were restocked — two independent choices from the money side. Restocking is a `kind="return"`
+# movement through `inventory/stock.py::record_movement`; an opened/damaged item still counts
+# as returned (it can't be returned twice) but never touches stock. Money goes back only through
+# `billing/payments.py::record_refund` (#67's admin-approved, capped path), which stamps the
+# refund on the one shared ledger (`invoice_refunds.retail_invoice_id`); `refund_id` links it.
+# The over-return guard runs under `lock_lineage`'s row lock on the retail invoice. Both tables
+# are append-only (migration 0062).
+
+
+class RetailReturn(Base):
+    __tablename__ = "retail_returns"
+    __table_args__ = (Index("ix_retail_returns_retail_invoice", "retail_invoice_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    retail_invoice_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("retail_invoices.id", ondelete="CASCADE")
+    )
+    reason: Mapped[str] = mapped_column(Text)
+    refund_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("invoice_refunds.id", ondelete="RESTRICT"), unique=True
+    )
+    returned_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    returned_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    lines: Mapped[list["RetailReturnLine"]] = relationship(lazy="selectin")
+
+
+class RetailReturnLine(Base):
+    __tablename__ = "retail_return_lines"
+    __table_args__ = (
+        CheckConstraint("quantity >= 1", name="ck_retail_return_lines_quantity"),
+        Index("ix_retail_return_lines_invoice_line", "retail_invoice_line_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    return_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("retail_returns.id", ondelete="CASCADE")
+    )
+    retail_invoice_line_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("retail_invoice_lines.id", ondelete="RESTRICT")
+    )
+    quantity: Mapped[int] = mapped_column(Integer)
+    restocked: Mapped[bool] = mapped_column(Boolean)
+
+
 # ---------------------------------------------------------------------------------------------
 #
 # ## commission posting + report (#69, M4 spec #54 stories 94, 97-100)
@@ -1599,12 +1653,23 @@ class InvoicePayment(Base):
             name="ck_invoice_payments_pending_only_insurer",
         ),
         Index("ix_invoice_payments_invoice", "invoice_id"),
+        # #76: one ledger for both invoice kinds — each row belongs to exactly one.
+        CheckConstraint(
+            "num_nonnulls(invoice_id, retail_invoice_id) = 1",
+            name="ck_invoice_payments_one_invoice",
+        ),
+        Index("ix_invoice_payments_retail_invoice", "retail_invoice_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True, server_default=text("gen_random_uuid()")
     )
-    invoice_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoices.id", ondelete="CASCADE"))
+    invoice_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("invoices.id", ondelete="CASCADE")
+    )
+    retail_invoice_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("retail_invoices.id", ondelete="CASCADE")
+    )
     payer_type: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, server_default=text("'received'"))
     method: Mapped[str] = mapped_column(Text)
@@ -1633,12 +1698,22 @@ class InvoiceRefund(Base):
     __table_args__ = (
         CheckConstraint("amount_cents > 0", name="ck_invoice_refunds_amount"),
         Index("ix_invoice_refunds_invoice", "invoice_id"),
+        CheckConstraint(
+            "num_nonnulls(invoice_id, retail_invoice_id) = 1",
+            name="ck_invoice_refunds_one_invoice",
+        ),
+        Index("ix_invoice_refunds_retail_invoice", "retail_invoice_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True, server_default=text("gen_random_uuid()")
     )
-    invoice_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoices.id", ondelete="CASCADE"))
+    invoice_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("invoices.id", ondelete="CASCADE")
+    )
+    retail_invoice_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("retail_invoices.id", ondelete="CASCADE")
+    )
     amount_cents: Mapped[int] = mapped_column(Integer)
     reason: Mapped[str] = mapped_column(Text)
     approved_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))

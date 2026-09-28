@@ -44,6 +44,8 @@ async def claimed_instance(client):
                 "package_credit_redemptions",
                 "package_purchase_credits",
                 "invoice_payment_transfers",  # #68
+                "retail_return_lines",  # #76
+                "retail_returns",  # #76
                 "invoice_refunds",  # #67
                 "invoice_payments",
                 "invoice_balance_authorizations",

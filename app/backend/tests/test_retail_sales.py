@@ -50,6 +50,9 @@ async def claimed_instance(client):
         # own (0054) — one test here issues a *service* invoice too, to prove the shared
         # numbering series — and #61's own ledger (0050). All must go before the rows they
         # reference below ("children before parents", `test_invoice_issue.py`'s own ordering).
+        await purge.execute(text("DELETE FROM retail_return_lines"))  # #76
+        await purge.execute(text("DELETE FROM retail_returns"))  # #76
+        await purge.execute(text("DELETE FROM invoice_payments"))  # #66/#76
         await purge.execute(text("DELETE FROM retail_invoice_lines"))
         await purge.execute(text("DELETE FROM retail_invoices"))
         await purge.execute(text("DELETE FROM invoice_payment_transfers"))  # #68
