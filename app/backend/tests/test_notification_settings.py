@@ -112,13 +112,13 @@ async def test_an_unconfigured_business_says_so_plainly(client):
     assert body["enable_walk_in_queue"] is False
 
 
-async def test_the_templates_list_has_all_twelve_seeded_rows_with_their_merge_fields(client):
+async def test_the_templates_list_has_all_fourteen_seeded_rows_with_their_merge_fields(client):
     await as_admin(client)
 
     body = (await client.get(NOTIFICATIONS)).json()
 
     templates = body["templates"]
-    assert len(templates) == 12
+    assert len(templates) == 14
     pairs = {(t["notification_type"], t["channel"]) for t in templates}
     assert pairs == {
         (t, c)
@@ -129,6 +129,7 @@ async def test_the_templates_list_has_all_twelve_seeded_rows_with_their_merge_fi
             "cancellation",
             "form_link",
             "package_notice",
+            "low_stock",  # #62
         )
         for c in ("email", "sms")
     }
@@ -429,6 +430,35 @@ async def test_the_walk_in_queue_toggle_is_left_alone_by_an_unrelated_patch(clie
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["enable_walk_in_queue"] is True
+
+
+# --- low-stock alert opt-in (#62) --------------------------------------------------------------
+#
+# Only the toggle's own GET/PATCH round trip and its default — `tests/test_low_stock_alerts.py`
+# is where it actually gates a queued send.
+
+
+async def test_low_stock_alert_email_enabled_defaults_off(client):
+    await as_admin(client)
+
+    resp = await client.get(NOTIFICATIONS)
+
+    assert resp.json()["low_stock_alert_email_enabled"] is False
+
+
+async def test_the_low_stock_alert_toggle_round_trips(client):
+    await as_admin(client)
+
+    resp = await client.patch(NOTIFICATIONS, json={"low_stock_alert_email_enabled": True})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["low_stock_alert_email_enabled"] is True
+
+    events = await audit("business.notification_settings_updated")
+    assert events[-1] == {"changed": ["low_stock_alert_email_enabled"]}
+
+    again = await client.get(NOTIFICATIONS)
+    assert again.json()["low_stock_alert_email_enabled"] is True
 
 
 # --- templates: their own sub-resource, audited by field name only --------------------------

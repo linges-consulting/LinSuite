@@ -34,6 +34,10 @@ NOTIFICATION_TYPES = (
     "cancellation",
     "form_link",
     "package_notice",
+    # #62: an inventory event, not a customer one — its one real caller
+    # (`notifications/triggers.py::notify_low_stock`) addresses the business's own contact
+    # email, not a customer, but it is still one row per (type, channel) like every sibling.
+    "low_stock",
 )
 CHANNELS = ("email", "sms")
 

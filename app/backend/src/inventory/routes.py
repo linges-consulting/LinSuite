@@ -33,6 +33,7 @@ from auth.session import CurrentUser
 from core.audit import record_event
 from core.db import SessionDep
 from inventory.models import Product, ProductVariant
+from inventory.stock import is_below_threshold
 from scheduling._admin_forms import blank_to_none, refuse_emptied_field
 
 router = APIRouter(prefix="/admin/products", tags=["inventory"])
@@ -57,6 +58,11 @@ class VariantOut(BaseModel):
     price_cents: int
     quantity_on_hand: int
     low_stock_threshold: int
+    # Always shown, regardless of the business's email opt-in (#62's own acceptance
+    # criterion) — computed fresh off the live pair below, never off the persisted
+    # `low_stock_alerted` email-dedup flag, so a direct PATCH to either field (bypassing
+    # `inventory/stock.py::record_movement`) can never leave a stale badge on screen.
+    is_low_stock: bool
     tax_component_keys: list[str]
     active: bool
     sort_order: int
@@ -84,6 +90,7 @@ class CatalogVariantOut(BaseModel):
     price_cents: int
     quantity_on_hand: int
     low_stock_threshold: int
+    is_low_stock: bool
     tax_component_keys: list[str]
 
 
@@ -104,6 +111,7 @@ def _variant_out(variant: ProductVariant) -> VariantOut:
         price_cents=variant.price_cents,
         quantity_on_hand=variant.quantity_on_hand,
         low_stock_threshold=variant.low_stock_threshold,
+        is_low_stock=is_below_threshold(variant.quantity_on_hand, variant.low_stock_threshold),
         tax_component_keys=list(variant.tax_component_keys),
         active=variant.active,
         sort_order=variant.sort_order,
@@ -135,6 +143,7 @@ def _catalog_out(product: Product) -> CatalogProductOut:
                 price_cents=v.price_cents,
                 quantity_on_hand=v.quantity_on_hand,
                 low_stock_threshold=v.low_stock_threshold,
+                is_low_stock=is_below_threshold(v.quantity_on_hand, v.low_stock_threshold),
                 tax_component_keys=list(v.tax_component_keys),
             )
             for v in product.variants

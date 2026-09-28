@@ -252,6 +252,17 @@ class Business(Base):
         Boolean, server_default=text("true")
     )
 
+    # --- low-stock alert opt-in (#62; `inventory/stock.py`, `notifications/triggers.py::
+    # notify_low_stock`) --------------------------------------------------------------------
+    # Off by default, following `enable_walk_in_queue`'s exact shape (0040): the in-app warning
+    # (`inventory/routes.py`'s `is_low_stock`) is always shown regardless of this flag — this
+    # only gates the *email* side. No new capability: reading/writing it goes through the
+    # existing `settings/notifications_routes.py` panel, behind that router's own
+    # `Requires("admin")` — the same reasoning `enable_walk_in_queue`'s own migration gives.
+    low_stock_alert_email_enabled: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false")
+    )
+
 
 class AuditEvent(Base):
     """Append-only: who did what, and when (ADR-0002).

@@ -135,6 +135,15 @@ class ProductVariant(Base):
     low_stock_threshold: Mapped[int] = mapped_column(Integer, server_default="0")
     # See the module docstring: free-form keys until #57's tax_components table lands.
     tax_component_keys: Mapped[list[str]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    # Armed (false) vs already-alerted (true) for the *current* crossing below
+    # `low_stock_threshold` (#62; `inventory/stock.py::record_movement` is the only writer,
+    # flipped atomically in the same transaction as the stock-changing write — never a
+    # separate follow-up query, which is what would let two concurrent sales double-fire).
+    # Restocking back at-or-above the threshold flips this back to false, rearming the next
+    # crossing. Not exposed on the wire directly (`inventory/routes.py` computes a fresh
+    # `is_low_stock` for display instead, off the live quantity/threshold pair, so a direct
+    # PATCH to either — bypassing `record_movement` — can never leave a stale in-app badge).
+    low_stock_alerted: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     sort_order: Mapped[int] = mapped_column(Integer, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
