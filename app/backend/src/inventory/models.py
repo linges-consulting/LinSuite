@@ -39,6 +39,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    Uuid,
     func,
     text,
 )
@@ -142,3 +143,58 @@ class ProductVariant(Base):
     )
 
     product: Mapped[Product] = relationship(back_populates="variants")
+
+
+class StockMovement(Base):
+    """The append-only ledger behind `ProductVariant.quantity_on_hand` (#61; #54 stories
+    78-80). Every change to stock — a receiving delivery, a completed sale, a return, or an
+    administrator's manual count correction — writes one row here; `inventory/stock.py::
+    record_movement` is the only writer, and the only thing that ever touches
+    `quantity_on_hand` directly.
+
+    **Signed, whole-unit, never zero.** `quantity_delta` is positive for anything that adds
+    stock (`receipt`, `return`) and negative for anything that removes it (`sale`, or an
+    `adjustment` correcting a count downward) — one column rather than a magnitude-plus-
+    direction pair, the same shape a ledger's signed amount takes over separate debit/credit
+    columns.
+
+    **`reason` is required for a manual `adjustment`, optional everywhere else**
+    (`ck_stock_movements_adjustment_reason`): a receiving delivery explains itself, a
+    correction to what is actually on the shelf does not.
+
+    **Append-only by DB grant and trigger** (`0050_stock_movements.py`), the same
+    `audit_events`/`documents` precedent CLAUDE.md's "Document storage and immutability"
+    section names — `linsuite_app` keeps SELECT/INSERT only. A movement, once written, is
+    never edited or replaced by the application.
+
+    **No FK to whatever caused it.** A sale's invoice line, a return's credit — later tickets
+    (#75 and beyond) decide that shape; this ledger only needs to know a movement happened,
+    by whom, and why, not what triggered it.
+    """
+
+    __tablename__ = "stock_movements"
+    __table_args__ = (
+        CheckConstraint("quantity_delta <> 0", name="ck_stock_movements_quantity_delta"),
+        CheckConstraint(
+            "kind IN ('receipt', 'sale', 'return', 'adjustment')", name="ck_stock_movements_kind"
+        ),
+        CheckConstraint(
+            "kind <> 'adjustment' OR reason IS NOT NULL",
+            name="ck_stock_movements_adjustment_reason",
+        ),
+        Index("ix_stock_movements_variant_created", "variant_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    variant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("product_variants.id"))
+    kind: Mapped[str] = mapped_column(String(16))
+    quantity_delta: Mapped[int] = mapped_column(Integer)
+    reason: Mapped[str | None] = mapped_column(Text)
+    # Not a foreign key: the ledger outlives the account that made the entry — the same
+    # reasoning `AuditEvent.actor_user_id` gives.
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    variant: Mapped[ProductVariant] = relationship()
