@@ -60,6 +60,7 @@ from auth import modes
 from auth.capabilities import ADMIN, BY_KEY, Requires
 from auth.models import User
 from auth.session import ClaimsDep
+from billing.completion import record_draft_bill_line
 from core.audit import record_event
 from core.db import SessionDep
 from core.errors import CAPABILITY_REQUIRED, Forbidden
@@ -1168,6 +1169,11 @@ async def complete_appointment(appointment_id: uuid.UUID, actor: Scheduler, db: 
         metadata={},
     )
     await _clear_queue_entry(db, appointment.id)
+    # #59: the visit's draft service bill gets its line here, in this same transaction — the
+    # commission rate is snapshotted onto it now, at completion, not later at invoice issue
+    # (#54's explicit M4 reversal of the older assumption). Never on cancel or no-show, which
+    # never reach this line.
+    await record_draft_bill_line(db, appointment)
     await db.commit()
     await cache.bump()
     return _out(await _load(db, appointment.id))

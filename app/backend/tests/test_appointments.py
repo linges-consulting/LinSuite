@@ -61,6 +61,12 @@ async def claimed_instance(client):
         await wipe_document_keys()
         async with session_scope() as db:
             for table in (
+                # #59's draft bill lines/bills FK to appointments/services/staff/customers
+                # with no cascade from that side — deleted first, before anything they point
+                # at, the same reason queue_entries/appointment_resources/appointments come
+                # before customers below.
+                "service_bill_lines",
+                "service_bills",
                 # A leftover queue entry (Phase 7 Task 1, #12) FKs to customers/services/
                 # staff with no cascade — deleted first, the same reason
                 # appointment_resources/appointments come before customers below.
@@ -212,6 +218,34 @@ async def audit_events() -> list[tuple[str, str, str | None, dict]]:
             )
         ).all()
     return [(r.event_type, r.target_type, r.target_id, r.metadata) for r in rows]
+
+
+async def service_bills() -> list[tuple[str, str | None, str]]:
+    """Every draft/issued service bill (#59), as (id, booking_group_id, status) — ids cast to
+    text in SQL so the tuple compares directly against the plain strings the API/JSON side
+    deals in, regardless of what the driver would otherwise hand back for a `uuid` column."""
+    async with session_scope() as db:
+        rows = (
+            await db.execute(
+                text("SELECT id::text, booking_group_id::text, status FROM service_bills")
+            )
+        ).all()
+    return [(r[0], r[1], r[2]) for r in rows]
+
+
+async def service_bill_lines(bill_id: str | None = None) -> list[dict]:
+    """Every line (#59), or just one bill's, as dicts keyed by column name, ids as text."""
+    async with session_scope() as db:
+        query = (
+            "SELECT id::text, bill_id::text, appointment_id::text, service_id::text, "
+            "staff_id::text, price_cents, commission_rate_bp FROM service_bill_lines"
+        )
+        params = {}
+        if bill_id is not None:
+            query += " WHERE bill_id = :bill_id"
+            params = {"bill_id": bill_id}
+        rows = (await db.execute(text(query), params)).mappings().all()
+    return [dict(r) for r in rows]
 
 
 def constraint_of(error: IntegrityError) -> str | None:
