@@ -6,7 +6,7 @@ over a real PostgreSQL.
 Reuses `tests/test_invoice_issue.py`'s own fixture/helper chain (the only way to get a real
 issued invoice is to book, confirm, complete and issue a real appointment) — this file defines
 its own `claimed_instance` for the same reason that one does: the two new append-only tables
-(migration 0055) must be wiped, purge-role-bypassed, before `invoices`/`service_bills` and
+(migration 0058) must be wiped, purge-role-bypassed, before `invoices`/`service_bills` and
 everything under them.
 """
 

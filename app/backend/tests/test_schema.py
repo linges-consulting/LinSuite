@@ -70,7 +70,7 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "invoice_lines": ("SELECT", "INSERT"),
     "invoice_line_discounts": ("SELECT", "INSERT"),
     "invoice_line_taxes": ("SELECT", "INSERT"),
-    # #66, 0055: the payment ledger and the admin/owner balance-exception record are both
+    # #66, 0058: the payment ledger and the admin/owner balance-exception record are both
     # financial records, append-only for the same reason `invoice_lines` is — never edited or
     # voided in place; a correction is a new row, #67's job.
     "invoice_payments": ("SELECT", "INSERT"),

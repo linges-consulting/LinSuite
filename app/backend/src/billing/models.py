@@ -915,7 +915,7 @@ class InvoiceLineTax(Base):
 # a later ticket (#70's receipt-release gate, most directly) should import and call rather than
 # re-deriving any part of this — see that module's own docstring for the exact shape.
 #
-# **`InvoicePayment`**: append-only (migration 0055's unconditional shape, `invoice_lines`'s
+# **`InvoicePayment`**: append-only (migration 0058's unconditional shape, `invoice_lines`'s
 # own precedent) — a payment entry is a financial record like an invoice line, never edited or
 # voided in place. A correction is a new entry, #67's job. `payer_type`/`method` are locked
 # together by a DB constraint (`method = 'insurer'` if and only if `payer_type = 'insurer'`) so
@@ -997,7 +997,7 @@ class InvoiceBalanceAuthorization(Base):
     """One admin/owner action authorizing an invoice to complete checkout with money still
     outstanding, with a recorded reason. See the module section above — its mere existence for
     an invoice is what `billing/payments.py::is_checkout_complete` checks; append-only
-    (migration 0055), same unconditional shape as `InvoicePayment`."""
+    (migration 0058), same unconditional shape as `InvoicePayment`."""
 
     __tablename__ = "invoice_balance_authorizations"
     __table_args__ = (
