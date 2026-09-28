@@ -47,6 +47,9 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "audit_access_log": ("SELECT", "INSERT"),
     # A key is written once and never rewritten; only the purge role destroys one (0024).
     "customer_document_keys": ("SELECT", "INSERT"),
+    # The one business-owned key (#55/ADR-0003): written once, never rewritten, and — unlike
+    # a customer key — never destroyed by anyone in v1 either (0044).
+    "business_document_keys": ("SELECT", "INSERT"),
     # The record that an erasure was honoured: the app stamps `purged_at`, never deletes it.
     "erasure_requests": ("SELECT", "INSERT", "UPDATE"),
     # Sealed documents are immutable; only the purge role removes one (0026).
@@ -63,6 +66,9 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
 PURGE_PRIVILEGES = ("SELECT", "DELETE")
 PURGE_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "audit_events": ("SELECT", "INSERT", "DELETE"),
+    # Never destroyed by the purge role either (0044) — there is no crypto-shred of the
+    # business's own key in v1.
+    "business_document_keys": ("SELECT",),
 }
 # (table, trigger) pairs that must be attached and firing.
 TRIGGERS = (
@@ -72,6 +78,7 @@ TRIGGERS = (
     ("audit_events", "audit_events_no_rewrite"),
     ("audit_access_log", "audit_access_log_no_rewrite"),
     ("customer_document_keys", "customer_document_keys_guard"),
+    ("business_document_keys", "business_document_keys_guard"),
     ("documents", "documents_guard"),
     ("form_template_versions", "form_template_versions_append_only"),
     ("form_links", "form_links_guard"),

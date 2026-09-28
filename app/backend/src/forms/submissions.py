@@ -258,7 +258,9 @@ async def view_pdf(customer_id: uuid.UUID, submission_id: uuid.UUID, db: Session
         return JSONResponse(
             {"status": "rendering"}, status_code=202, headers={"Cache-Control": "no-store"}
         )
-    content, _ = await fetch_document(db, key=key, customer_id=customer_id, document_id=document_id)
+    content, _ = await fetch_document(
+        db, key=key, key_owner="customer", customer_id=customer_id, document_id=document_id
+    )
     return Response(
         content,
         media_type="application/pdf",

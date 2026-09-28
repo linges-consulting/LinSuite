@@ -315,17 +315,30 @@ class AccessLogEntry(Base):
 
 
 class Document(Base):
-    """One sealed document — a signed consent, an intake form, a scan (`core/documents.py`).
+    """One sealed document — a signed consent, an intake form, a scan, or (#55/ADR-0003) a
+    financial document sealed under the business's own key (`core/documents.py`).
 
     Immutable (CLAUDE.md): `linsuite_app` holds SELECT and INSERT only, and `documents_guard`
     (0026) refuses UPDATE and DELETE to everyone but the table owner — except DELETE by
     `linsuite_purge` for a client not under a retention hold. Written and read only through
     `store_document`/`fetch_document`.
 
-    `customer_id` references the client's *key row*, not `customers`, with no cascade
-    (ADR-0001 rule 7): inserting a document locks the key row it is sealed under, so a purge
-    deleting that key serialises against the insert, and the purge must delete the documents
-    first. A string FK, so `core/` still imports no domain module.
+    **Two key tiers, picked by `key_owner`, never inferred.** `'customer'` (default, the
+    original tier, unchanged): `customer_id` is required and references the client's *key
+    row*, not `customers`, with no cascade (ADR-0001 rule 7) — inserting a document locks the
+    key row it is sealed under, so a purge deleting that key serialises against the insert,
+    and the purge must delete the documents first. A string FK, so `core/` still imports no
+    domain module. `'business'`: sealed under the deployment's one `business_document_keys`
+    row (`billing/keys.py`) instead, `customer_id` always NULL — that FK is exactly what must
+    not exist for a financial document, since it must outlive any one customer's crypto-shred
+    (a paid invoice is a CRA record for six years regardless of what happens to that client's
+    chart). `linked_customer_id` is a business-keyed document's own, plain reference to
+    `customers.id` for the client it is for (NULL for an anonymous retail sale) — it carries
+    no locking behaviour and survives that client's shred untouched, which is the whole
+    reason it is a separate column from `customer_id` rather than the same one doing double
+    duty. `retain_until` is that document's own CRA-clock expiry, tracked independently of
+    `customers.retention_expires_at`; nothing purges by it yet (a later ticket's job) — this
+    one only makes sure the value has somewhere to live from the first business document on.
     """
 
     __tablename__ = "documents"
@@ -333,20 +346,40 @@ class Document(Base):
         # A re-run render of the same source is `ON CONFLICT DO NOTHING`, never a second copy.
         UniqueConstraint("kind", "source_id", name="uq_documents_kind_source_id"),
         CheckConstraint("octet_length(digest) = 32", name="ck_documents_digest_length"),
+        CheckConstraint("key_owner IN ('customer', 'business')", name="ck_documents_key_owner"),
+        CheckConstraint(
+            "(key_owner = 'customer' AND customer_id IS NOT NULL) OR "
+            "(key_owner = 'business' AND customer_id IS NULL)",
+            name="ck_documents_owner_customer_id",
+        ),
+        CheckConstraint(
+            "key_owner = 'business' OR linked_customer_id IS NULL",
+            name="ck_documents_owner_linked_customer_id",
+        ),
         Index("ix_documents_customer_id", "customer_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid, primary_key=True, server_default=text("gen_random_uuid()")
     )
-    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customer_document_keys.customer_id"))
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("customer_document_keys.customer_id")
+    )
+    # 'customer' (default) or 'business' — see the class docstring. Text, not a DB enum: the
+    # two-value CHECK above is the same enforcement a `citext`/native enum would give, without
+    # an `ALTER TYPE` the day a third tier ever exists.
+    key_owner: Mapped[str] = mapped_column(Text, server_default=text("'customer'"))
+    linked_customer_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("customers.id"))
+    # CRA six-year rule (#55): set by a business-keyed document's caller, NULL on a
+    # customer-keyed row (that tier's retention is the client's own hold, not this column).
+    retain_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # What produced it (`form_submission`, ...) and that thing's id.
     kind: Mapped[str] = mapped_column(Text)
     source_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     content_type: Mapped[str] = mapped_column(Text)
     # `core.crypto.seal`: nonce || ciphertext || tag.
     ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
-    # HMAC-SHA256 of the plaintext under a subkey of the client's DEK (`core/documents.py`),
+    # HMAC-SHA256 of the plaintext under a subkey of the sealing key (`core/documents.py`),
     # checked after every decrypt. Keyed, not a bare hash: it dies with the key.
     digest: Mapped[bytes] = mapped_column(LargeBinary)
     size_bytes: Mapped[int] = mapped_column(Integer)
