@@ -14,6 +14,7 @@ from core.config import get_settings
 from core.db import Base
 from customers import models as _customers_models  # noqa: F401
 from forms import models as _forms_models  # noqa: F401
+from inventory import models as _inventory_models  # noqa: F401
 from notes import models as _notes_models  # noqa: F401
 from notifications import models as _notifications_models  # noqa: F401
 from scheduling import models as _scheduling_models  # noqa: F401

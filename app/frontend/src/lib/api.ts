@@ -1155,6 +1155,120 @@ export async function reactivateService(id: string): Promise<ServiceRow> {
   return res.json()
 }
 
+// --- products: the retail catalog (M4 #56) ------------------------------------------------
+
+/** One sellable unit — a SKU, an optional barcode, a price and a whole-unit stock count,
+ *  with its own low-stock threshold independent of any sibling variant. Unlike a service's
+ *  eligible-staff set, a variant has identity of its own: it is created, edited, deactivated
+ *  and reactivated one at a time, never as part of a bulk save. */
+export type ProductVariantRow = {
+  id: string
+  product_id: string
+  name: string
+  sku: string
+  barcode: string | null
+  price_cents: number
+  quantity_on_hand: number
+  low_stock_threshold: number
+  tax_component_keys: string[]
+  active: boolean
+  sort_order: number
+}
+
+export type ProductRow = {
+  id: string
+  name: string
+  description: string | null
+  active: boolean
+  sort_order: number
+  variants: ProductVariantRow[]
+}
+
+export type ProductDraft = { name: string; description: string | null; sort_order: number }
+
+export type ProductVariantDraft = {
+  name: string
+  sku: string
+  barcode: string | null
+  price_cents: number
+  quantity_on_hand: number
+  low_stock_threshold: number
+}
+
+export async function fetchProducts(includeInactive = false): Promise<ProductRow[]> {
+  const res = await fetch(`/api/admin/products${includeInactive ? '?include_inactive=true' : ''}`)
+  if (!res.ok) throw await failure(res, 'Could not load the products')
+  return (await res.json()).products
+}
+
+export async function createProduct(draft: ProductDraft): Promise<ProductRow> {
+  const res = await send('POST', '/api/admin/products', draft)
+  if (!res.ok) throw await failure(res, 'Could not create the product')
+  return res.json()
+}
+
+export async function updateProduct(
+  id: string,
+  draft: Partial<ProductDraft>,
+): Promise<ProductRow> {
+  const res = await send('PATCH', `/api/admin/products/${id}`, draft)
+  if (!res.ok) throw await failure(res, 'Could not save the product')
+  return res.json()
+}
+
+export async function deactivateProduct(id: string): Promise<ProductRow> {
+  const res = await send('POST', `/api/admin/products/${id}/deactivate`, {})
+  if (!res.ok) throw await failure(res, 'Could not deactivate the product')
+  return res.json()
+}
+
+export async function reactivateProduct(id: string): Promise<ProductRow> {
+  const res = await send('POST', `/api/admin/products/${id}/reactivate`, {})
+  if (!res.ok) throw await failure(res, 'Could not reactivate the product')
+  return res.json()
+}
+
+/** Every variant endpoint returns the whole product — the same shape the table reads — so a
+ *  screen that just created or edited one variant never has to refetch separately. */
+export async function createVariant(
+  productId: string,
+  draft: ProductVariantDraft,
+): Promise<ProductRow> {
+  const res = await send('POST', `/api/admin/products/${productId}/variants`, draft)
+  if (!res.ok) throw await failure(res, 'Could not create the variant')
+  return res.json()
+}
+
+export async function updateVariant(
+  productId: string,
+  variantId: string,
+  draft: Partial<ProductVariantDraft>,
+): Promise<ProductRow> {
+  const res = await send('PATCH', `/api/admin/products/${productId}/variants/${variantId}`, draft)
+  if (!res.ok) throw await failure(res, 'Could not save the variant')
+  return res.json()
+}
+
+export async function deactivateVariant(productId: string, variantId: string): Promise<ProductRow> {
+  const res = await send(
+    'POST',
+    `/api/admin/products/${productId}/variants/${variantId}/deactivate`,
+    {},
+  )
+  if (!res.ok) throw await failure(res, 'Could not deactivate the variant')
+  return res.json()
+}
+
+export async function reactivateVariant(productId: string, variantId: string): Promise<ProductRow> {
+  const res = await send(
+    'POST',
+    `/api/admin/products/${productId}/variants/${variantId}/reactivate`,
+    {},
+  )
+  if (!res.ok) throw await failure(res, 'Could not reactivate the variant')
+  return res.json()
+}
+
 // --- forms: templates and their frozen versions (Settings → Forms) ---------------------------
 
 export type FormKind = 'intake' | 'consent' | 'waiver' | 'other'
