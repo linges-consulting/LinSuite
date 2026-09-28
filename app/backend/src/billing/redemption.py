@@ -30,7 +30,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import exists, func, select
+from sqlalchemy import ColumnElement, exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.capabilities import Requires
@@ -71,6 +71,17 @@ class Eligible:
         return shares[self.redeemed]
 
 
+def spendable(today: Date) -> list[ColumnElement[bool]]:
+    """The purchase-level half of eligibility: activated (paid), not voided by a refund, not
+    past `expires_at` (inclusive, `today` in the business's timezone). `_eligible` adds the
+    appointment's customer and service; the liability report (#74) uses it as-is."""
+    return [
+        PackagePurchase.credits_activated,
+        (PackagePurchase.expires_at.is_(None)) | (PackagePurchase.expires_at >= today),
+        ~exists().where(PackageCreditVoid.package_purchase_id == PackagePurchase.id),
+    ]
+
+
 async def _eligible(
     db: AsyncSession, appointment: Appointment, today: Date, purchase_id: uuid.UUID | None = None
 ) -> list[Eligible]:
@@ -79,9 +90,7 @@ async def _eligible(
         .join(PackagePurchaseCredit)
         .where(
             PackagePurchase.customer_id == appointment.customer_id,
-            PackagePurchase.credits_activated,
-            (PackagePurchase.expires_at.is_(None)) | (PackagePurchase.expires_at >= today),
-            ~exists().where(PackageCreditVoid.package_purchase_id == PackagePurchase.id),
+            *spendable(today),
             PackagePurchaseCredit.service_id == appointment.service_id,
         )
         .order_by(PackagePurchase.purchased_at)

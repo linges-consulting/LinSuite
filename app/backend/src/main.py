@@ -21,6 +21,7 @@ from billing.bill_authority import router as bill_authority_router
 from billing.bill_review import router as bill_review_router
 from billing.commission_report import router as commission_report_router
 from billing.invoices import router as invoices_router
+from billing.package_liability import router as package_liability_router
 from billing.package_purchase import router as package_purchase_router
 from billing.package_refund import router as package_refund_router
 from billing.packages import router as package_definitions_router
@@ -325,6 +326,8 @@ api.include_router(invoices_router)
 api.include_router(package_purchase_router)
 # #73: package/bundle refunds (`billing.manage`, Admin Mode) — see `billing/package_refund.py`.
 api.include_router(package_refund_router)
+# #74: unused-package liability report (`billing.manage`, Admin Mode).
+api.include_router(package_liability_router)
 # Retail sale (#75): draft cart -> atomic, stock-deducting issue (`billing.view`, Staff Mode).
 # Always its own invoice, never combined with a service invoice — a separate table pair and a
 # separate router, sharing only the `business_invoice_counters` numbering series.
