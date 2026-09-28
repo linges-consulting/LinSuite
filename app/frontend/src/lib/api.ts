@@ -2131,3 +2131,83 @@ export const fetchManageBooking = (token: string) => manageRequest('', { token }
 export const cancelManageBooking = (token: string) => manageRequest('/cancel', { token })
 export const rescheduleManageBooking = (token: string, starts_at: string) =>
   manageRequest('/reschedule', { token, starts_at })
+
+// --- walk-in queue ("take a number", #12) --------------------------------------------------
+
+export type QueueEntryStatus = 'waiting' | 'in_service' | 'done' | 'abandoned'
+
+/** `QueueEntryOut`'s shape (`scheduling/queue.py`). `estimated_wait_minutes` and
+ *  `compliance_gaps` are only ever populated by `fetchQueueEntries` (the list read) — every
+ *  other queue action's own single-entry response carries `null` for both, the server's own
+ *  "not computed here" convention (Tasks 6/7's docstrings). */
+export type QueueEntry = {
+  id: string
+  status: QueueEntryStatus
+  arrived_at: string
+  requested_service: { id: string; name: string }
+  preferred_staff: { id: string; display_name: string } | null
+  customer: { id: string; first_name: string; last_name: string; phone: string | null } | null
+  bare_name: string | null
+  bare_phone: string | null
+  appointment_id: string | null
+  /** An **estimate**, never a promise (Task 6's own labelling rule) — null for a non-waiting
+   *  entry. */
+  estimated_wait_minutes: number | null
+  /** Only ever guaranteed complete for an essential template that applies to every client
+   *  (`applies_to_all`) — a template scoped to the requested service can't yet "apply" to a
+   *  walk-in with no confirmed appointment (Task 7's own documented gap). `null` outside the
+   *  list read. */
+  compliance_gaps: ComplianceEntry[] | null
+}
+
+export type QueueList = { entries: QueueEntry[] }
+
+/**
+ * `null` means `enable_walk_in_queue` is off — the server's whole-surface 404 (#12's own
+ * acceptance criterion, "no queue surface exists anywhere in the product" while disabled),
+ * never an error. `lib/nav.ts`'s gate and the queue screen itself both read this same shape,
+ * off the same query key, so flipping the toggle needs no second endpoint to notice.
+ */
+export async function fetchQueueEntries(includeAbandoned = false): Promise<QueueList | null> {
+  const qs = includeAbandoned ? '?include_abandoned=true' : ''
+  const res = await fetch(`/api/queue-entries${qs}`, { cache: 'no-store' })
+  if (res.status === 404) return null
+  if (!res.ok) throw await failure(res, 'Could not load the queue')
+  return res.json()
+}
+
+/** Exactly one of `customer_id`/`bare_name`, mirroring the server's own CHECK — "a walk-in
+ *  may never become a full customer record" (CLAUDE.md). */
+export type AddQueueEntryDraft = {
+  customer_id?: string
+  bare_name?: string
+  bare_phone?: string | null
+  requested_service_id: string
+  preferred_staff_id?: string | null
+}
+
+export async function addQueueEntry(draft: AddQueueEntryDraft): Promise<QueueEntry> {
+  const res = await send('POST', '/api/queue-entries', draft)
+  if (!res.ok) throw await failure(res, 'Could not add this walk-in to the queue')
+  return res.json()
+}
+
+export async function abandonQueueEntry(id: string): Promise<QueueEntry> {
+  const res = await send('POST', `/api/queue-entries/${encodeURIComponent(id)}/abandon`, {})
+  if (!res.ok) throw await failure(res, 'Could not update this queue entry')
+  return res.json()
+}
+
+/** What `POST .../start` hands back: the queue entry (now `in_service`) and the ordinary
+ *  `Appointment` it became — trimmed to what the queue screen's own success toast needs,
+ *  not the calendar's full `Appointment` shape. */
+export type QueueStartResult = {
+  queue_entry: QueueEntry
+  appointment: { id: string; staff: { display_name: string }; service: { name: string } }
+}
+
+export async function startQueueEntry(id: string): Promise<QueueStartResult> {
+  const res = await send('POST', `/api/queue-entries/${encodeURIComponent(id)}/start`, {})
+  if (!res.ok) throw await failure(res, 'Could not start this walk-in')
+  return res.json()
+}

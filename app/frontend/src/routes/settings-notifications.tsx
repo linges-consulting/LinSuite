@@ -621,8 +621,10 @@ function BookingPolicySection(props: {
  * own distinction between the two things called "walk-in": the always-on "next available"
  * search shortcut lives in the ordinary booking flow and needs no toggle at all; this is the
  * opt-in queue for a business where service starts when a chair frees, not by appointment
- * time. Off by default. There is no queue screen or nav entry to gate on this yet (Tasks
- * 2/8) — this section only saves the flag.
+ * time. Off by default. This section only saves the flag; the queue screen and its nav
+ * entry (`routes/queue.tsx`, `lib/nav.ts`) read it back indirectly, through
+ * `GET /api/queue-entries`'s own 404 while it is off (Task 8, #12) — not a second read of
+ * this panel's own endpoint, which a `queue.manage`-only account may not hold `admin` to call.
  */
 function WalkInQueueSection(props: { form: Draft; set: (patch: Partial<Draft>) => void }) {
   const { form, set } = props

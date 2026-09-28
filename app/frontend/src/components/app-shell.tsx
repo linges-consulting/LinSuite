@@ -1,3 +1,4 @@
+import { useQuery } from '@tanstack/react-query'
 import { LogOut, Menu, ShieldCheck, UserRound, X } from 'lucide-react'
 import { useState } from 'react'
 import { Link, NavLink, Outlet, useLocation } from 'react-router'
@@ -13,15 +14,29 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import { fetchQueueEntries } from '@/lib/api'
 import { useLogout, useSession } from '@/lib/auth'
 import { NAV, navFor } from '@/lib/nav'
+import { QUEUE } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 
 export function AppShell() {
   const [open, setOpen] = useState(false)
   const { pathname } = useLocation()
   const { user } = useSession()
-  const nav = navFor(user)
+  const canManageQueue = user?.capabilities?.includes('queue.manage') ?? false
+  // The nav entry's own gate: `fetchQueueEntries` returns `null` for the server's whole-
+  // surface 404 while `enable_walk_in_queue` is off — the same query the Queue screen itself
+  // reads (`QUEUE`), so this costs nothing extra once that screen is open, and this is the
+  // one fetch that decides whether it is ever linked to at all. Hidden while the answer is
+  // still in flight, the safe default `navFor` itself documents.
+  const queue = useQuery({
+    queryKey: QUEUE,
+    queryFn: () => fetchQueueEntries(true),
+    enabled: canManageQueue,
+    staleTime: 30_000,
+  })
+  const nav = navFor(user, { queueEnabled: canManageQueue && queue.data !== undefined && queue.data !== null })
   // The title comes from the full list, not the filtered one: someone who reaches a screen
   // they hold no capability for still deserves a heading over the refusal.
   const title =

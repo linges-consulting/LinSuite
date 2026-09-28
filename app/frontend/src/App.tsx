@@ -15,6 +15,7 @@ import { MfaEnrolPage } from '@/routes/mfa-enrol'
 import { MfaVerifyPage } from '@/routes/mfa-verify'
 import { PlaceholderPage } from '@/routes/placeholder'
 import { PublicFormPage } from '@/routes/public-form'
+import { QueuePage } from '@/routes/queue'
 import { ResetPasswordPage } from '@/routes/reset-password'
 import { SchedulePage } from '@/routes/schedule'
 import { SecurityPage } from '@/routes/security'
@@ -168,6 +169,7 @@ function AppRoutes() {
       <Route element={gate}>
         <Route index element={<HomePage />} />
         <Route path="schedule" element={<SchedulePage />} />
+        <Route path="queue" element={<QueuePage />} />
         <Route path="clients" element={<ClientsPage />} />
         <Route path="clients/:id" element={<ClientPage />} />
         <Route path="catalog" element={<PlaceholderPage title="Catalog" />} />
