@@ -11,7 +11,7 @@
 
 | Ticket | Status | Commit | Branch |
 | --- | --- | --- | --- |
-| #71 M4 17: Package/bundle purchase invoice | done | (see commit at HEAD of this branch) | `worktree-agent-a938f512737e03a6b` |
+| #71 M4 17: Package/bundle purchase invoice | done | `57614e5` | `worktree-agent-a938f512737e03a6b` |
 
 ## #71 detail
 
