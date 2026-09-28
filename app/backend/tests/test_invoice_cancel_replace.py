@@ -222,6 +222,31 @@ async def test_a_second_cancel_carries_the_inherited_money_down_the_chain(client
         assert (await client.get(f"{INVOICES}/{earlier}")).json()["outstanding_cents"] == 0
 
 
+async def test_a_refund_made_before_cancel_is_carried_net_and_never_refunded_twice(client):
+    # #67 x #68: the transfer carries money received *less* refunds, so the replacement neither
+    # re-owes the refunded amount nor offers it for a second refund.
+    invoice_id = await issue_an_invoice(client, price_cents=10000)
+    await pay(client, invoice_id, 12000)  # overpaid by 2000
+    refund = await client.post(
+        f"{INVOICES}/{invoice_id}/refunds", json={"amount_cents": 2000, "reason": "Overpaid"}
+    )
+    assert refund.status_code == 201, refund.text
+    bill_id = (await cancel(client, invoice_id))["replacement_bill_id"]
+
+    replacement = await reissue(client, bill_id)
+
+    assert replacement["outstanding_cents"] == 0
+    assert replacement["checkout_complete"] is True
+    history = (await client.get(payments_url(replacement["id"]))).json()
+    assert history["transfers"][0]["received_cents"] == 10000
+    original = (await client.get(f"{INVOICES}/{invoice_id}")).json()
+    assert (original["outstanding_cents"], original["refunded_cents"]) == (0, 2000)
+    again = await client.post(
+        f"{INVOICES}/{replacement['id']}/refunds", json={"amount_cents": 10001, "reason": "r"}
+    )
+    assert again.status_code == 422, again.text
+
+
 # --- commission, retries -----------------------------------------------------------------------
 
 

@@ -152,6 +152,7 @@ class InvoiceOut(BaseModel):
     pending_insurer_cents: int
     client_outstanding_cents: int
     checkout_complete: bool
+    refunded_cents: int
 
 
 class InvoiceSummaryOut(BaseModel):
@@ -165,6 +166,7 @@ class InvoiceSummaryOut(BaseModel):
     pending_insurer_cents: int
     client_outstanding_cents: int
     checkout_complete: bool
+    refunded_cents: int
 
 
 def _line_out(line: InvoiceLine) -> InvoiceLineOut:
@@ -328,8 +330,8 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
         # Carry every cent the original holds (its own payments plus anything it inherited)
         # onto the replacement — never charged again, never counted twice. An increase is then
         # an ordinary new payment; a decrease leaves a credit for #67's approved refund.
-        received, pending, received_insurer = (await ledger_sums(db, [replaces.id])).get(
-            replaces.id, (0, 0, 0)
+        received, pending, received_insurer, _refunded = (await ledger_sums(db, [replaces.id])).get(
+            replaces.id, (0, 0, 0, 0)
         )
         db.add(
             InvoicePaymentTransfer(
