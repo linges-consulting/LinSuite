@@ -296,8 +296,12 @@ test('starting a walk-in moves it out of the waiting list', async () => {
 // --- abandoning ------------------------------------------------------------------------------
 
 test('abandoning a waiting entry removes it from the visible list', async () => {
+  // `arrived_at` must be "now", not the shared `entry()` factory's fixed default — abandoning
+  // sets `status` only (this file's mock, `queueStub`), and "abandoned today" is judged by
+  // arrival date (`routes/queue.tsx`'s own `abandonedToday`), so a fixed past date would only
+  // count as "today" on the one calendar day this test was written.
   const user = userEvent.setup()
-  queueStub({ entries: [entry()] })
+  queueStub({ entries: [entry({ arrived_at: new Date().toISOString() })] })
   renderApp('/queue')
 
   await screen.findByText('Jamie Lee')
