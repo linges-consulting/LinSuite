@@ -1426,7 +1426,7 @@ class RetailInvoiceLine(Base):
 # `billing/payments.py::record_refund` (#67's admin-approved, capped path), which stamps the
 # refund on the one shared ledger (`invoice_refunds.retail_invoice_id`); `refund_id` links it.
 # The over-return guard runs under `lock_lineage`'s row lock on the retail invoice. Both tables
-# are append-only (migration 0062).
+# are append-only (migration 0063).
 
 
 class RetailReturn(Base):

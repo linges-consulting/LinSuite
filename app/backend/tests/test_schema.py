@@ -91,7 +91,7 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     # #68, 0059: the payment-transfer history is a financial record too — append-only.
     "invoice_payment_transfers": ("SELECT", "INSERT"),
     "invoice_refunds": ("SELECT", "INSERT"),  # #67
-    # #76, 0062: a return (and each line of it) is a record of what happened — append-only.
+    # #76, 0063: a return (and each line of it) is a record of what happened — append-only.
     "retail_returns": ("SELECT", "INSERT"),
     "retail_return_lines": ("SELECT", "INSERT"),
     # #72, 0061: the package credit redemption ledger — spending a credit is a new row.
