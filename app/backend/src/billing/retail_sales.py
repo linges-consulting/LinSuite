@@ -21,12 +21,20 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from auth.capabilities import Requires
 from auth.models import User
 from billing.invoice_numbering import allocate_invoice_number
-from billing.models import RetailInvoice, RetailInvoiceLine, RetailSale, RetailSaleLine
+from billing.models import (
+    RetailInvoice,
+    RetailInvoiceLine,
+    RetailReturn,
+    RetailReturnLine,
+    RetailSale,
+    RetailSaleLine,
+)
+from billing.payments import AdminReviewer, balance, lock_lineage, record_refund
 from core.audit import record_event
 from core.db import SessionDep
 from core.models import Business
@@ -109,6 +117,9 @@ class RetailInvoiceOut(BaseModel):
     issued_at: datetime
     issued_by: str
     lines: list[RetailInvoiceLineOut]
+    # #76: from the shared payment ledger (`billing/payments.py::balances`).
+    outstanding_cents: int
+    refunded_cents: int
 
 
 class RetailInvoiceSummaryOut(BaseModel):
@@ -147,8 +158,11 @@ def _sale_out(sale: RetailSale) -> RetailSaleOut:
     )
 
 
-def _invoice_out(invoice: RetailInvoice) -> RetailInvoiceOut:
+async def _invoice_out(db: SessionDep, invoice: RetailInvoice) -> RetailInvoiceOut:
+    money = await balance(db, invoice)
     return RetailInvoiceOut(
+        outstanding_cents=money.outstanding_cents,
+        refunded_cents=money.refunded_cents,
         id=str(invoice.id),
         business_id=invoice.business_id,
         invoice_number=invoice.invoice_number,
@@ -465,7 +479,7 @@ async def issue_retail_sale(
 
     invoice = await db.get(RetailInvoice, invoice.id, populate_existing=True)
     assert invoice is not None
-    return _invoice_out(invoice)
+    return await _invoice_out(db, invoice)
 
 
 # --- reading issued retail invoices -------------------------------------------------------------
@@ -502,4 +516,156 @@ async def get_retail_invoice(
     invoice = await db.get(RetailInvoice, invoice_id, populate_existing=True)
     if invoice is None:
         raise HTTPException(status_code=404, detail="No such retail invoice.")
-    return _invoice_out(invoice)
+    return await _invoice_out(db, invoice)
+
+
+# --- returns (#76): goods back and money back are two independent choices ----------------------
+
+
+class ReturnLineIn(BaseModel):
+    retail_invoice_line_id: uuid.UUID
+    quantity: Annotated[int, Field(ge=1, le=1_000_000)]
+    # False for an opened/damaged item: it counts as returned, but never goes back on the shelf.
+    restock: bool
+
+
+class RetailReturnIn(BaseModel):
+    reason: Annotated[str, Field(min_length=1, max_length=2000)]
+    lines: Annotated[list[ReturnLineIn], Field(min_length=1)]
+    # Omitted = no money back. Never derived from the lines: the refund is its own decision.
+    refund_cents: Annotated[int, Field(gt=0)] | None = None
+
+
+class RetailReturnLineOut(BaseModel):
+    id: str
+    retail_invoice_line_id: str
+    quantity: int
+    restocked: bool
+
+
+class RetailReturnOut(BaseModel):
+    id: str
+    retail_invoice_id: str
+    reason: str
+    refund_id: str | None
+    refund_cents: int | None
+    returned_by: str
+    returned_at: datetime
+    lines: list[RetailReturnLineOut]
+
+
+@router.post("/retail-invoices/{invoice_id}/returns", status_code=201)
+async def return_retail_items(
+    invoice_id: uuid.UUID, payload: RetailReturnIn, actor: AdminReviewer, db: SessionDep
+) -> RetailReturnOut:
+    """One return action. `billing.manage` (Admin Mode) — the same gate as #67's refund, since a
+    return may carry one. Restock writes a whole-unit `kind="return"` movement per line; the
+    refund goes through `record_refund` (capped at money received less prior refunds). The
+    retail invoice's row lock (`lock_lineage`) serializes concurrent returns, so a line's
+    returned quantity can never exceed what was sold."""
+    invoice = await db.get(RetailInvoice, invoice_id, populate_existing=True)
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="No such retail invoice.")
+    if invoice.status != "issued":
+        raise HTTPException(status_code=422, detail="This retail invoice is not issued.")
+    requested = [item.retail_invoice_line_id for item in payload.lines]
+    if len(set(requested)) != len(requested):
+        raise HTTPException(status_code=422, detail="Each line may appear only once per return.")
+
+    await lock_lineage(db, invoice.id, RetailInvoice)
+    sold = {line.id: line for line in invoice.lines}
+    returned = dict(
+        (
+            await db.execute(
+                select(RetailReturnLine.retail_invoice_line_id, func.sum(RetailReturnLine.quantity))
+                .join(RetailReturn, RetailReturn.id == RetailReturnLine.return_id)
+                .where(RetailReturn.retail_invoice_id == invoice.id)
+                .group_by(RetailReturnLine.retail_invoice_line_id)
+            )
+        ).all()
+    )
+    for item in payload.lines:
+        line = sold.get(item.retail_invoice_line_id)
+        if line is None:
+            raise HTTPException(status_code=404, detail="No such line on this retail invoice.")
+        remaining = line.quantity - returned.get(line.id, 0)
+        if item.quantity > remaining:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Only {remaining} of this line can still be returned.",
+            )
+
+    refund = None
+    if payload.refund_cents is not None:
+        refund = await record_refund(
+            db, invoice, amount_cents=payload.refund_cents, reason=payload.reason, approver=actor
+        )
+    ret = RetailReturn(
+        retail_invoice_id=invoice.id,
+        reason=payload.reason,
+        refund_id=refund.id if refund is not None else None,
+        returned_by=actor.id,
+    )
+    db.add(ret)
+    await db.flush()
+    # Variant-id order, as at issue: two concurrent restocks never take row locks crosswise.
+    for item in sorted(payload.lines, key=lambda i: sold[i.retail_invoice_line_id].variant_id):
+        line = sold[item.retail_invoice_line_id]
+        db.add(
+            RetailReturnLine(
+                return_id=ret.id,
+                retail_invoice_line_id=line.id,
+                quantity=item.quantity,
+                restocked=item.restock,
+            )
+        )
+        if item.restock:
+            await record_movement(
+                db,
+                variant_id=line.variant_id,
+                kind="return",
+                quantity_delta=item.quantity,
+                actor_user_id=actor.id,
+                reason=payload.reason,
+            )
+    await db.flush()
+    record_event(
+        db,
+        "retail_invoice.return_recorded",
+        target_type="retail_invoice",
+        target_id=str(invoice.id),
+        actor_user_id=actor.id,
+        metadata={
+            "return_id": str(ret.id),
+            "refund_cents": payload.refund_cents,
+            "lines": [
+                {
+                    "line_id": str(i.retail_invoice_line_id),
+                    "quantity": i.quantity,
+                    "restock": i.restock,
+                }
+                for i in payload.lines
+            ],
+        },
+    )
+    await db.commit()
+    ret = await db.get(RetailReturn, ret.id, populate_existing=True)
+    assert ret is not None
+    return RetailReturnOut(
+        id=str(ret.id),
+        retail_invoice_id=str(ret.retail_invoice_id),
+        reason=ret.reason,
+        refund_id=str(ret.refund_id) if ret.refund_id is not None else None,
+        refund_cents=payload.refund_cents,
+        returned_by=str(ret.returned_by),
+        returned_at=ret.returned_at,
+        lines=[
+            RetailReturnLineOut(
+                id=str(r.id),
+                retail_invoice_line_id=str(r.retail_invoice_line_id),
+                quantity=r.quantity,
+                restocked=r.restocked,
+            )
+            for r in ret.lines
+        ],
+    )

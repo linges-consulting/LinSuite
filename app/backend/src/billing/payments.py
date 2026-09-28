@@ -17,6 +17,11 @@ refund is an `invoice_refunds` row (admin/owner only), added back onto the outst
 Both take `lock_lineage`'s row lock before checking the cap (refunds <= received, across the
 invoice's replacement lineage), so concurrent attempts serialize in Postgres.
 
+**Retail invoices share this ledger (#76).** `invoice_payments`/`invoice_refunds` rows reference
+exactly one of `invoices` or `retail_invoices`; every function here takes either kind (`AnyInvoice`)
+and the ledger math is the same code for both — ids are UUIDs, so one id list never mixes them up.
+`retail_router` mounts the same payment/correction/refund handlers under `/retail-invoices/{id}`.
+
 Nothing here is a stored flag; both halves are computed fresh from the ledger and the
 authorization table on every call, per CLAUDE.md and this ticket's own acceptance criteria.
 
@@ -26,6 +31,7 @@ this same screen); `billing.manage` (Admin Mode) authorizes the outstanding-bala
 """
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, Literal
@@ -47,12 +53,26 @@ from billing.models import (
     InvoicePaymentTransfer,
     InvoiceRefund,
     PackagePurchase,
+    RetailInvoice,
 )
 from billing.package_purchase import activate_credits
 from core.audit import record_event
 from core.db import SessionDep
 
 router = APIRouter(prefix="/invoices", tags=["billing"])
+retail_router = APIRouter(prefix="/retail-invoices", tags=["billing"])
+
+AnyInvoice = Invoice | RetailInvoice
+
+
+def _ledger_fk(invoice: AnyInvoice) -> str:
+    """Which ledger column points at this invoice (#76)."""
+    return "retail_invoice_id" if isinstance(invoice, RetailInvoice) else "invoice_id"
+
+
+def _target_type(invoice: AnyInvoice) -> str:
+    return "retail_invoice" if isinstance(invoice, RetailInvoice) else "invoice"
+
 
 AdminReviewer = Annotated[User, Depends(Requires("billing.manage"))]
 
@@ -100,6 +120,7 @@ async def ledger_sums(
     `refunded` is informational and stays on the invoice it was recorded against. Invoices with
     no ledger activity are absent (read as zeros)."""
     amount = InvoicePayment.amount_cents
+    owner = func.coalesce(InvoicePayment.invoice_id, InvoicePayment.retail_invoice_id)
     received = InvoicePayment.status == "received"
     superseding = aliased(InvoicePayment)
     effective = ~exists().where(superseding.corrects_payment_id == InvoicePayment.id)
@@ -107,21 +128,25 @@ async def ledger_sums(
         row[0]: [*row[1:], 0]
         for row in await db.execute(
             select(
-                InvoicePayment.invoice_id,
+                owner,
                 func.coalesce(func.sum(amount).filter(received), 0),
                 func.coalesce(func.sum(amount).filter(InvoicePayment.status == "pending"), 0),
                 func.coalesce(
                     func.sum(amount).filter(received, InvoicePayment.payer_type == "insurer"), 0
                 ),
             )
-            .where(InvoicePayment.invoice_id.in_(ids), effective)
-            .group_by(InvoicePayment.invoice_id)
+            .where(
+                or_(InvoicePayment.invoice_id.in_(ids), InvoicePayment.retail_invoice_id.in_(ids)),
+                effective,
+            )
+            .group_by(owner)
         )
     }
+    refund_owner = func.coalesce(InvoiceRefund.invoice_id, InvoiceRefund.retail_invoice_id)
     for invoice_id, refunded in await db.execute(
-        select(InvoiceRefund.invoice_id, func.sum(InvoiceRefund.amount_cents))
-        .where(InvoiceRefund.invoice_id.in_(ids))
-        .group_by(InvoiceRefund.invoice_id)
+        select(refund_owner, func.sum(InvoiceRefund.amount_cents))
+        .where(or_(InvoiceRefund.invoice_id.in_(ids), InvoiceRefund.retail_invoice_id.in_(ids)))
+        .group_by(refund_owner)
     ):
         acc = sums.setdefault(invoice_id, [0, 0, 0, 0])
         acc[0] -= refunded
@@ -143,7 +168,7 @@ async def ledger_sums(
     return {k: (v[0], v[1], v[2], v[3]) for k, v in sums.items()}
 
 
-async def balances(db: AsyncSession, invoices: list[Invoice]) -> dict[uuid.UUID, Balance]:
+async def balances(db: AsyncSession, invoices: Sequence[AnyInvoice]) -> dict[uuid.UUID, Balance]:
     """Batched: a fixed handful of queries regardless of list length (the billing list's own
     reader).
 
@@ -193,17 +218,23 @@ async def balances(db: AsyncSession, invoices: list[Invoice]) -> dict[uuid.UUID,
 # --- the refund cap (#67) ----------------------------------------------------------------------
 
 
-async def lock_lineage(db: AsyncSession, invoice_id: uuid.UUID) -> list[uuid.UUID]:
+async def lock_lineage(
+    db: AsyncSession,
+    invoice_id: uuid.UUID,
+    model: type[Invoice] | type[RetailInvoice] = Invoice,
+) -> list[uuid.UUID]:
     """Every invoice in `invoice_id`'s replacement lineage (`replaces_invoice_id`, both
-    directions), row-locked `FOR UPDATE` in id order. Every correction and refund takes this
-    lock first, so the cap check and the write it guards are serialized per lineage — the lock
-    is Postgres's, never an app lock (CLAUDE.md "Concurrency")."""
+    directions), row-locked `FOR UPDATE` in id order. `model=RetailInvoice` walks the retail
+    table instead (#76) — the same lock #76's return action takes for its over-return guard.
+    Every correction and refund takes this lock first, so the cap check and the write it guards
+    are serialized per lineage — the lock is Postgres's, never an app lock (CLAUDE.md
+    "Concurrency")."""
     ids = {invoice_id}
     frontier = {invoice_id}
     while frontier:
         rows = await db.execute(
-            select(Invoice.id, Invoice.replaces_invoice_id).where(
-                or_(Invoice.id.in_(frontier), Invoice.replaces_invoice_id.in_(frontier))
+            select(model.id, model.replaces_invoice_id).where(
+                or_(model.id.in_(frontier), model.replaces_invoice_id.in_(frontier))
             )
         )
         found = {x for row in rows for x in row if x is not None}
@@ -211,7 +242,7 @@ async def lock_lineage(db: AsyncSession, invoice_id: uuid.UUID) -> list[uuid.UUI
         ids |= found
     ordered = sorted(ids)
     await db.execute(
-        select(Invoice.id).where(Invoice.id.in_(ordered)).order_by(Invoice.id).with_for_update()
+        select(model.id).where(model.id.in_(ordered)).order_by(model.id).with_for_update()
     )
     return ordered
 
@@ -225,12 +256,12 @@ async def refundable_cents(db: AsyncSession, lineage: list[uuid.UUID]) -> int:
 
 
 async def record_refund(
-    db: AsyncSession, invoice: Invoice, *, amount_cents: int, reason: str, approver: User
+    db: AsyncSession, invoice: AnyInvoice, *, amount_cents: int, reason: str, approver: User
 ) -> InvoiceRefund:
     """The one refund path (#67; #73/#76 call this too). The caller must already have checked
     the approver holds `billing.manage` in Admin Mode. Stages the refund + audit event without
     committing; raises 422 past the cap."""
-    lineage = await lock_lineage(db, invoice.id)
+    lineage = await lock_lineage(db, invoice.id, type(invoice))
     available = await refundable_cents(db, lineage)
     if amount_cents > available:
         raise HTTPException(
@@ -238,14 +269,17 @@ async def record_refund(
             detail=f"Refund exceeds money received less prior refunds ({available} cents).",
         )
     refund = InvoiceRefund(
-        invoice_id=invoice.id, amount_cents=amount_cents, reason=reason, approved_by=approver.id
+        **{_ledger_fk(invoice): invoice.id},
+        amount_cents=amount_cents,
+        reason=reason,
+        approved_by=approver.id,
     )
     db.add(refund)
     await db.flush()
     record_event(
         db,
         "invoice.refund_recorded",
-        target_type="invoice",
+        target_type=_target_type(invoice),
         target_id=str(invoice.id),
         actor_user_id=approver.id,
         metadata={"refund_id": str(refund.id), "amount_cents": amount_cents, "reason": reason},
@@ -253,11 +287,11 @@ async def record_refund(
     return refund
 
 
-async def balance(db: AsyncSession, invoice: Invoice) -> Balance:
+async def balance(db: AsyncSession, invoice: AnyInvoice) -> Balance:
     return (await balances(db, [invoice]))[invoice.id]
 
 
-async def is_checkout_complete(db: AsyncSession, invoice: Invoice) -> bool:
+async def is_checkout_complete(db: AsyncSession, invoice: AnyInvoice) -> bool:
     """The one predicate a later ticket (#70's receipt-release gate, most directly) should
     import and call — never re-derive it."""
     return (await balance(db, invoice)).checkout_complete
@@ -276,7 +310,8 @@ class RecordPaymentIn(BaseModel):
 
 class PaymentOut(BaseModel):
     id: str
-    invoice_id: str
+    invoice_id: str | None
+    retail_invoice_id: str | None = None
     payer_type: str
     method: str
     status: str
@@ -305,7 +340,8 @@ class RefundIn(BaseModel):
 
 class RefundOut(BaseModel):
     id: str
-    invoice_id: str
+    invoice_id: str | None
+    retail_invoice_id: str | None = None
     amount_cents: int
     reason: str
     approved_by: str
@@ -338,10 +374,15 @@ class BalanceAuthorizationOut(BaseModel):
     authorized_at: datetime
 
 
+def _str(value: uuid.UUID | None) -> str | None:
+    return str(value) if value is not None else None
+
+
 def _payment_out(payment: InvoicePayment) -> PaymentOut:
     return PaymentOut(
         id=str(payment.id),
-        invoice_id=str(payment.invoice_id),
+        invoice_id=_str(payment.invoice_id),
+        retail_invoice_id=_str(payment.retail_invoice_id),
         payer_type=payment.payer_type,
         method=payment.method,
         status=payment.status,
@@ -359,7 +400,8 @@ def _payment_out(payment: InvoicePayment) -> PaymentOut:
 def _refund_out(refund: InvoiceRefund) -> RefundOut:
     return RefundOut(
         id=str(refund.id),
-        invoice_id=str(refund.invoice_id),
+        invoice_id=_str(refund.invoice_id),
+        retail_invoice_id=_str(refund.retail_invoice_id),
         amount_cents=refund.amount_cents,
         reason=refund.reason,
         approved_by=str(refund.approved_by),
@@ -400,6 +442,13 @@ async def _load_invoice(db: SessionDep, invoice_id: uuid.UUID) -> Invoice:
     return invoice
 
 
+async def _load_retail_invoice(db: SessionDep, invoice_id: uuid.UUID) -> RetailInvoice:
+    invoice = await db.get(RetailInvoice, invoice_id, populate_existing=True)
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="No such retail invoice.")
+    return invoice
+
+
 # --- recording payments (billing.view — checkout, #65's own precedent) ------------------------
 
 
@@ -407,7 +456,12 @@ async def _load_invoice(db: SessionDep, invoice_id: uuid.UUID) -> Invoice:
 async def record_payment(
     invoice_id: uuid.UUID, payload: RecordPaymentIn, actor: BillViewer, db: SessionDep
 ) -> PaymentOut:
-    invoice = await _load_invoice(db, invoice_id)
+    return await _record_payment(db, await _load_invoice(db, invoice_id), payload, actor)
+
+
+async def _record_payment(
+    db: SessionDep, invoice: AnyInvoice, payload: RecordPaymentIn, actor: User
+) -> PaymentOut:
     if invoice.status != "issued":
         raise HTTPException(
             status_code=422, detail="This invoice is not issued; payments cannot be recorded."
@@ -415,7 +469,7 @@ async def record_payment(
     _check_payer(payload.payer_type, payload.method, payload.status)
 
     payment = InvoicePayment(
-        invoice_id=invoice.id,
+        **{_ledger_fk(invoice): invoice.id},
         payer_type=payload.payer_type,
         method=payload.method,
         status=payload.status,
@@ -428,7 +482,7 @@ async def record_payment(
     record_event(
         db,
         "invoice.payment_recorded",
-        target_type="invoice",
+        target_type=_target_type(invoice),
         target_id=str(invoice.id),
         actor_user_id=actor.id,
         metadata={
@@ -442,7 +496,8 @@ async def record_payment(
     # #71/#72: a package purchase's credits activate the moment its invoice is fully paid —
     # money actually received, never a pending insurer allocation or a balance exception.
     if (
-        invoice.package_purchase_id is not None
+        isinstance(invoice, Invoice)
+        and invoice.package_purchase_id is not None
         and (await balance(db, invoice)).outstanding_cents <= 0
     ):
         purchase = await db.get(PackagePurchase, invoice.package_purchase_id)
@@ -456,10 +511,16 @@ async def record_payment(
 async def list_payments(
     invoice_id: uuid.UUID, _: BillViewer, db: SessionDep
 ) -> dict[str, list[PaymentOut] | list[PaymentTransferOut]]:
-    await _load_invoice(db, invoice_id)
+    return await _list_payments(db, await _load_invoice(db, invoice_id))
+
+
+async def _list_payments(
+    db: SessionDep, invoice: AnyInvoice
+) -> dict[str, list[PaymentOut] | list[PaymentTransferOut]]:
+    invoice_id = invoice.id
     payments = await db.scalars(
         select(InvoicePayment)
-        .where(InvoicePayment.invoice_id == invoice_id)
+        .where(getattr(InvoicePayment, _ledger_fk(invoice)) == invoice_id)
         .order_by(InvoicePayment.recorded_at)
     )
     transfers = await db.scalars(
@@ -505,9 +566,20 @@ async def correct_payment(
     money back to the client — that is only ever `POST /refunds`. Refused if it would leave the
     lineage's received money below what has already been refunded."""
     invoice = await _load_invoice(db, invoice_id)
-    lineage = await lock_lineage(db, invoice.id)
+    return await _correct_payment(db, invoice, payment_id, payload, actor)
+
+
+async def _correct_payment(
+    db: SessionDep,
+    invoice: AnyInvoice,
+    payment_id: uuid.UUID,
+    payload: CorrectPaymentIn,
+    actor: User,
+) -> PaymentOut:
+    fk = _ledger_fk(invoice)
+    lineage = await lock_lineage(db, invoice.id, type(invoice))
     original = await db.get(InvoicePayment, payment_id)
-    if original is None or original.invoice_id != invoice.id:
+    if original is None or getattr(original, fk) != invoice.id:
         raise HTTPException(status_code=404, detail="No such payment on this invoice.")
     if await db.scalar(select(exists().where(InvoicePayment.corrects_payment_id == payment_id))):
         raise HTTPException(
@@ -526,7 +598,7 @@ async def correct_payment(
     _check_payer(fields["payer_type"], fields["method"], original.status)
 
     correction = InvoicePayment(
-        invoice_id=invoice.id,
+        **{fk: invoice.id},
         status=original.status,
         collected_by=actor.id,
         corrects_payment_id=original.id,
@@ -543,7 +615,7 @@ async def correct_payment(
     record_event(
         db,
         "invoice.payment_corrected",
-        target_type="invoice",
+        target_type=_target_type(invoice),
         target_id=str(invoice.id),
         actor_user_id=actor.id,
         metadata={
@@ -574,10 +646,13 @@ async def refund(
 async def list_refunds(
     invoice_id: uuid.UUID, _: BillViewer, db: SessionDep
 ) -> dict[str, list[RefundOut]]:
-    await _load_invoice(db, invoice_id)
+    return await _list_refunds(db, await _load_invoice(db, invoice_id))
+
+
+async def _list_refunds(db: SessionDep, invoice: AnyInvoice) -> dict[str, list[RefundOut]]:
     refunds = await db.scalars(
         select(InvoiceRefund)
-        .where(InvoiceRefund.invoice_id == invoice_id)
+        .where(getattr(InvoiceRefund, _ledger_fk(invoice)) == invoice.id)
         .order_by(InvoiceRefund.refunded_at)
     )
     return {"refunds": [_refund_out(r) for r in refunds]}
@@ -632,3 +707,52 @@ async def list_balance_exceptions(
         .order_by(InvoiceBalanceAuthorization.authorized_at)
     )
     return {"exceptions": [_authorization_out(a) for a in authorizations]}
+
+
+# --- the same ledger, for retail invoices (#76) -------------------------------------------------
+# No balance-exception route: `invoice_balance_authorizations` still keys to `invoices` only.
+
+
+@retail_router.post("/{invoice_id}/payments", status_code=201)
+async def record_retail_payment(
+    invoice_id: uuid.UUID, payload: RecordPaymentIn, actor: BillViewer, db: SessionDep
+) -> PaymentOut:
+    return await _record_payment(db, await _load_retail_invoice(db, invoice_id), payload, actor)
+
+
+@retail_router.get("/{invoice_id}/payments")
+async def list_retail_payments(
+    invoice_id: uuid.UUID, _: BillViewer, db: SessionDep
+) -> dict[str, list[PaymentOut] | list[PaymentTransferOut]]:
+    return await _list_payments(db, await _load_retail_invoice(db, invoice_id))
+
+
+@retail_router.post("/{invoice_id}/payments/{payment_id}/corrections", status_code=201)
+async def correct_retail_payment(
+    invoice_id: uuid.UUID,
+    payment_id: uuid.UUID,
+    payload: CorrectPaymentIn,
+    actor: BillViewer,
+    db: SessionDep,
+) -> PaymentOut:
+    invoice = await _load_retail_invoice(db, invoice_id)
+    return await _correct_payment(db, invoice, payment_id, payload, actor)
+
+
+@retail_router.post("/{invoice_id}/refunds", status_code=201)
+async def retail_refund(
+    invoice_id: uuid.UUID, payload: RefundIn, actor: AdminReviewer, db: SessionDep
+) -> RefundOut:
+    invoice = await _load_retail_invoice(db, invoice_id)
+    created = await record_refund(
+        db, invoice, amount_cents=payload.amount_cents, reason=payload.reason, approver=actor
+    )
+    await db.commit()
+    return _refund_out(created)
+
+
+@retail_router.get("/{invoice_id}/refunds")
+async def list_retail_refunds(
+    invoice_id: uuid.UUID, _: BillViewer, db: SessionDep
+) -> dict[str, list[RefundOut]]:
+    return await _list_refunds(db, await _load_retail_invoice(db, invoice_id))
