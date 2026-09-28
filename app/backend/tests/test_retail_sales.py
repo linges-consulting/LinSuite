@@ -46,7 +46,7 @@ async def claimed_instance(client):
         await purge.execute(text("DELETE FROM audit_events"))
         await purge.execute(text("DELETE FROM erasure_requests"))
         await purge.execute(text("DELETE FROM form_links"))
-        # #75's own append-only/voidable tables (purge-role-bypassed, migration 0055), #65's
+        # #75's own append-only/voidable tables (purge-role-bypassed, migration 0056), #65's
         # own (0054) — one test here issues a *service* invoice too, to prove the shared
         # numbering series — and #61's own ledger (0050). All must go before the rows they
         # reference below ("children before parents", `test_invoice_issue.py`'s own ordering).

@@ -1126,7 +1126,7 @@ class RetailInvoice(Base):
 
 class RetailInvoiceLine(Base):
     """One frozen line of an issued retail invoice. Append-only from the app role's own grant
-    (migration 0055) — even the invoice's own cancel transition never touches a line, the same
+    (migration 0056) — even the invoice's own cancel transition never touches a line, the same
     shape `InvoiceLine` already follows."""
 
     __tablename__ = "retail_invoice_lines"

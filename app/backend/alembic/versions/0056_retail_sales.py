@@ -1,7 +1,7 @@
 """Retail sale: draft -> atomic stock-deducting issue (#75).
 
-Revision ID: 0055
-Revises: 0054
+Revision ID: 0056
+Revises: 0055
 Create Date: 2026-09-28
 
 A retail sale of `ProductVariant`s is always its own invoice, never combined with a service
@@ -23,8 +23,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0055"
-down_revision: str | None = "0054"
+revision: str = "0056"
+down_revision: str | None = "0055"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

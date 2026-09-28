@@ -70,10 +70,10 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "invoice_lines": ("SELECT", "INSERT"),
     "invoice_line_discounts": ("SELECT", "INSERT"),
     "invoice_line_taxes": ("SELECT", "INSERT"),
-    # Voidable (#75, 0055) — the same shape as `invoices`: UPDATE stays granted for the one
+    # Voidable (#75, 0056) — the same shape as `invoices`: UPDATE stays granted for the one
     # permitted cancel transition, DELETE never does.
     "retail_invoices": ("SELECT", "INSERT", "UPDATE"),
-    # Frozen retail invoice snapshot rows: append-only, same shape as `invoice_lines` (#75, 0055).
+    # Frozen retail invoice snapshot rows: append-only, same shape as `invoice_lines` (#75, 0056).
     "retail_invoice_lines": ("SELECT", "INSERT"),
 }
 # The purge role reads and deletes everywhere and writes nowhere — except the fact of its own
