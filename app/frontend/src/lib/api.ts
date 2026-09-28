@@ -2325,3 +2325,68 @@ export async function startQueueEntry(id: string): Promise<QueueStartResult> {
   if (!res.ok) throw await failure(res, 'Could not start this walk-in')
   return res.json()
 }
+
+// --- billing: tax components and their effective-dated rates (#57) ----------------------
+
+export type TaxRate = {
+  id: string
+  rate_bp: number
+  effective_from: string
+  /** Null: still in effect. Never edited once closed — a new rate always adds a row. */
+  effective_to: string | null
+}
+
+export type TaxComponent = {
+  id: string
+  code: string
+  name: string
+  /** Null: federal, applies whatever the business's own province is (e.g. GST). */
+  province: string | null
+  active: boolean
+  rates: TaxRate[]
+  /** The rate in effect today, in the business's own timezone. Null if the earliest rate is
+   *  still in the future. */
+  current_rate_bp: number | null
+  /** A hint only: whether this business's own province would pick this component up
+   *  (#57 acceptance criterion 1). Which components actually apply to one catalog item is a
+   *  later ticket's job. */
+  applicable_to_business: boolean
+}
+
+export type TaxComponentDraft = {
+  code: string
+  name: string
+  province: string | null
+  rate_bp: number
+  effective_from: string
+}
+
+export async function fetchTaxComponents(): Promise<TaxComponent[]> {
+  const res = await fetch('/api/admin/billing/tax-components')
+  if (!res.ok) throw await failure(res, 'Could not load the tax components')
+  return (await res.json()).tax_components
+}
+
+export async function createTaxComponent(draft: TaxComponentDraft): Promise<TaxComponent> {
+  const res = await send('POST', '/api/admin/billing/tax-components', draft)
+  if (!res.ok) throw await failure(res, 'Could not create the tax component')
+  return res.json()
+}
+
+export async function updateTaxComponent(
+  id: string,
+  patch: Partial<Pick<TaxComponent, 'name' | 'province' | 'active'>>,
+): Promise<TaxComponent> {
+  const res = await send('PATCH', `/api/admin/billing/tax-components/${id}`, patch)
+  if (!res.ok) throw await failure(res, 'Could not save the tax component')
+  return res.json()
+}
+
+export async function addTaxComponentRate(
+  id: string,
+  rate: { rate_bp: number; effective_from: string },
+): Promise<TaxComponent> {
+  const res = await send('POST', `/api/admin/billing/tax-components/${id}/rates`, rate)
+  if (!res.ok) throw await failure(res, 'Could not add the new rate')
+  return res.json()
+}

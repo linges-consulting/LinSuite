@@ -64,6 +64,7 @@ async def claimed_instance(client):
                 "customers",
                 "service_requirements",
                 "service_staff",
+                "package_definition_services",
                 "services",
                 "working_hours",
                 "time_off",

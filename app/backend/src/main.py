@@ -19,6 +19,7 @@ from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
 from billing.packages import router as package_definitions_router
 from billing.routes import router as discounts_router
+from billing.tax_routes import router as tax_router
 from core.config import get_settings
 from core.db import SessionDep, get_engine, session_scope
 from core.errors import (
@@ -290,4 +291,7 @@ api.include_router(package_definitions_router)
 api.include_router(inventory_router)
 # The read side, on `/catalog` beside the service catalog: what retail checkout reads.
 api.include_router(inventory_catalog_router)
+# Settings → Billing → Tax: tax components and their effective-dated rates (`billing.manage`,
+# Admin Mode, #57).
+api.include_router(tax_router)
 app.include_router(api)
