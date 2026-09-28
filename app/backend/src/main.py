@@ -44,6 +44,7 @@ from forms.scans import router as form_scans_router
 from forms.submissions import router as form_submissions_router
 from inventory.routes import public as inventory_catalog_router
 from inventory.routes import router as inventory_router
+from inventory.stock_routes import router as stock_router
 from notes.routes import router as notes_router
 from scheduling.appointments import router as appointments_router
 from scheduling.closures import router as closures_router
@@ -291,6 +292,9 @@ api.include_router(package_definitions_router)
 api.include_router(inventory_router)
 # The read side, on `/catalog` beside the service catalog: what retail checkout reads.
 api.include_router(inventory_catalog_router)
+# Receiving a delivery and correcting a stock count (`inventory.receive`/`inventory.adjust`,
+# both Admin Mode, #61) — the append-only `stock_movements` ledger behind `quantity_on_hand`.
+api.include_router(stock_router)
 # Settings → Billing → Tax: tax components and their effective-dated rates (`billing.manage`,
 # Admin Mode, #57).
 api.include_router(tax_router)

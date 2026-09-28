@@ -142,6 +142,23 @@ CAPABILITIES: tuple[Capability, ...] = (
         "Billing",
         requires_admin_mode=True,
     ),
+    # M4 #61: two distinct, independently grantable keys, rather than one — receiving a
+    # delivery and correcting a miscount are different trust decisions, and an owner may want
+    # to hand the first to a trusted lead without the second. Both default to admin/owner
+    # only. A future sale-driven deduction (#75) never checks either (m4.md, `inventory/
+    # stock.py::record_movement` takes no capability at all — only the two routes below do).
+    Capability(
+        "inventory.receive",
+        "Record stock received from a delivery.",
+        "Inventory",
+        requires_admin_mode=True,
+    ),
+    Capability(
+        "inventory.adjust",
+        "Correct a variant's stock count and record why.",
+        "Inventory",
+        requires_admin_mode=True,
+    ),
 )
 
 BY_KEY: dict[str, Capability] = {c.key: c for c in CAPABILITIES}
