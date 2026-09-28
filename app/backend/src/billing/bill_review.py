@@ -30,8 +30,8 @@ with no reapply step.
 """
 
 import uuid
+from datetime import UTC, datetime
 from datetime import date as Date
-from datetime import datetime
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
@@ -107,6 +107,7 @@ class BillOut(BaseModel):
     customer: Ref
     booking_group_id: str | None
     created_at: datetime
+    updated_at: datetime
     lines: list[BillLineOut]
     eligible_discounts: list[DiscountChoiceOut]
     subtotal_cents: int
@@ -114,6 +115,16 @@ class BillOut(BaseModel):
     tax_totals_by_component: dict[str, int]
     tax_total_cents: int
     grand_total_cents: int
+    # #64: an admin/owner-authorized exception (staff-request approval or inline admin edit),
+    # reported alongside the ordinarily-computed total rather than replacing it — see
+    # `billing/models.py::ServiceBill`'s own "bill review authority" section for why this is a
+    # separate field and not a second way to arrive at `grand_total_cents`.
+    override_total_cents: int | None
+    override_reason: str | None
+    # The two business-setting toggles (#64), read fresh on every bill view so the screen can
+    # decide whether to offer either override path without a second request.
+    bill_override_requests_enabled: bool
+    inline_admin_bill_edit_enabled: bool
 
 
 class BillSummaryOut(BaseModel):
@@ -297,6 +308,7 @@ async def _compute(
         ),
         booking_group_id=str(bill.booking_group_id) if bill.booking_group_id else None,
         created_at=bill.created_at,
+        updated_at=bill.updated_at,
         lines=line_outs,
         eligible_discounts=[
             DiscountChoiceOut(
@@ -315,6 +327,10 @@ async def _compute(
         tax_totals_by_component=tax_totals,
         tax_total_cents=tax_total_cents,
         grand_total_cents=grand_total_cents,
+        override_total_cents=bill.manual_override_cents,
+        override_reason=bill.manual_override_reason,
+        bill_override_requests_enabled=business.enable_bill_override_requests,
+        inline_admin_bill_edit_enabled=business.enable_inline_admin_bill_edit,
     )
 
 
@@ -396,6 +412,20 @@ async def apply_discounts(
                 status_code=422,
                 detail=f"No such enabled discount: {', '.join(sorted(str(i) for i in unknown))}",
             )
+
+    # #64: this is "staff resumes ordinary billing on the same draft" — an admin-authorized
+    # exception is a one-shot answer to a specific ask, not a standing rule, so picking up the
+    # ordinary predefined-discount flow again clears it rather than leaving a stale override
+    # silently shadowing whatever staff pick here next.
+    bill.manual_override_cents = None
+    bill.manual_override_reason = None
+    # Bumped explicitly: unlike `ServiceBill`'s own row, this route never issues an `UPDATE`
+    # against it otherwise (only `service_bill_discounts` changes) — SQLAlchemy's `onupdate`
+    # only fires when the mapped row itself is written. `bill_authority.py`'s stale-approval
+    # guard pins exactly this column at request time, so a discount change staff make here
+    # must be visible to that guard the same way a sibling appointment completing already is
+    # (`billing/completion.py::record_draft_bill_line`).
+    bill.updated_at = datetime.now(UTC)
 
     try:
         computed = await _compute(db, business, bill, selected_ids=selected_ids)

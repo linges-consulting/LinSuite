@@ -238,6 +238,20 @@ class Business(Base):
     # route on this same column; this task only makes the toggle itself exist and be honest.
     enable_walk_in_queue: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
 
+    # --- bill review authority toggles (#64, M4 spec #54 stories 15-17) --------------------
+    # Both default *on* — the opposite of `enable_walk_in_queue` above, because these two gate
+    # an override path on a screen (#63's bill review) that already exists for everybody, not
+    # a whole surface nobody has opted into yet. Off means "no *new* use of the staff-facing
+    # convenience path"; it never touches an admin/owner's own ordinary access to a bill from
+    # their own screen in Admin Mode, and it never erases request history already made
+    # (`billing/bill_authority.py`'s own docstring has the enforcement detail).
+    enable_bill_override_requests: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("true")
+    )
+    enable_inline_admin_bill_edit: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("true")
+    )
+
 
 class AuditEvent(Base):
     """Append-only: who did what, and when (ADR-0002).
