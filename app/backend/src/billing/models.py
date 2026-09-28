@@ -1626,7 +1626,7 @@ class InvoiceBalanceAuthorization(Base):
 
 class PackageCreditRedemption(Base):
     """One package credit spent on one completed appointment (#72) — the append-only
-    redemption ledger (migration 0059). Written only by `billing/redemption.py::redeem_credit`,
+    redemption ledger (migration 0061). Written only by `billing/redemption.py::redeem_credit`,
     inside `complete_appointment`'s own transaction. Remaining credits for a
     `PackagePurchaseCredit` = its `credits_total` minus its rows here; never a stored counter.
 

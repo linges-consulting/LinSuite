@@ -15,7 +15,7 @@ entitlement belongs there too.
 
 **Race safety.** The purchase row is locked `FOR UPDATE` before counting what is left, so a
 second completion racing for the last credit waits, recounts, and gets a clean 409. The
-database refuses it anyway (migration 0059's unique `sequence` + insert guard) — the lock only
+database refuses it anyway (migration 0061's unique `sequence` + insert guard) — the lock only
 makes the refusal readable.
 
 **Value.** A credit's `allocated_price_cents` (#71) is the value of all `credits_total`
