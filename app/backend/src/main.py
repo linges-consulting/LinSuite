@@ -41,6 +41,8 @@ from forms.public import router as public_forms_router
 from forms.routes import router as forms_router
 from forms.scans import router as form_scans_router
 from forms.submissions import router as form_submissions_router
+from inventory.routes import public as inventory_catalog_router
+from inventory.routes import router as inventory_router
 from notes.routes import router as notes_router
 from scheduling.appointments import router as appointments_router
 from scheduling.closures import router as closures_router
@@ -284,4 +286,8 @@ api.include_router(branding_router)
 # Settings → Packages & bundles (#60): prepaid credit definitions (`billing.manage`, Admin
 # Mode). Definitions only — no purchase flow yet.
 api.include_router(package_definitions_router)
+# Settings → Products (M4 #56): products and their variants — SKU, barcode, price, stock.
+api.include_router(inventory_router)
+# The read side, on `/catalog` beside the service catalog: what retail checkout reads.
+api.include_router(inventory_catalog_router)
 app.include_router(api)
