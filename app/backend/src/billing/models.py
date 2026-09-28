@@ -1547,7 +1547,15 @@ class InvoicePayment(Base):
 
     __tablename__ = "invoice_payments"
     __table_args__ = (
-        CheckConstraint("amount_cents > 0", name="ck_invoice_payments_amount"),
+        # A correction (#67) may zero out an entry recorded by mistake; a fresh payment may not.
+        CheckConstraint(
+            "amount_cents > 0 OR (corrects_payment_id IS NOT NULL AND amount_cents = 0)",
+            name="ck_invoice_payments_amount",
+        ),
+        CheckConstraint(
+            "(corrects_payment_id IS NULL) = (correction_reason IS NULL)",
+            name="ck_invoice_payments_correction_reason",
+        ),
         CheckConstraint(
             "payer_type IN ('client', 'insurer')", name="ck_invoice_payments_payer_type"
         ),
@@ -1577,6 +1585,37 @@ class InvoicePayment(Base):
     reference: Mapped[str | None] = mapped_column(Text)
     collected_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # #67: a correction is a new row superseding the entry it names; the original is never
+    # touched. Unique, so an entry is superseded at most once — correcting again means
+    # correcting the correction. `balances()` counts only rows nothing supersedes.
+    corrects_payment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("invoice_payments.id", ondelete="CASCADE"), unique=True
+    )
+    correction_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class InvoiceRefund(Base):
+    """Money actually returned to the client (#67) — admin/owner-approved, append-only, never a
+    side effect of a correction. The cap (refunds never exceed received money across the
+    invoice's replacement lineage) is enforced by `billing/payments.py::record_refund` under a
+    `SELECT ... FOR UPDATE` on every invoice in the lineage."""
+
+    __tablename__ = "invoice_refunds"
+    __table_args__ = (
+        CheckConstraint("amount_cents > 0", name="ck_invoice_refunds_amount"),
+        Index("ix_invoice_refunds_invoice", "invoice_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    invoice_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoices.id", ondelete="CASCADE"))
+    amount_cents: Mapped[int] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(Text)
+    approved_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    refunded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 

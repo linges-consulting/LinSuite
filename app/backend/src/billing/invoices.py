@@ -144,6 +144,7 @@ class InvoiceOut(BaseModel):
     pending_insurer_cents: int
     client_outstanding_cents: int
     checkout_complete: bool
+    refunded_cents: int
 
 
 class InvoiceSummaryOut(BaseModel):
@@ -157,6 +158,7 @@ class InvoiceSummaryOut(BaseModel):
     pending_insurer_cents: int
     client_outstanding_cents: int
     checkout_complete: bool
+    refunded_cents: int
 
 
 def _line_out(line: InvoiceLine) -> InvoiceLineOut:

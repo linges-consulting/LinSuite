@@ -88,6 +88,7 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     # voided in place; a correction is a new row, #67's job.
     "invoice_payments": ("SELECT", "INSERT"),
     "invoice_balance_authorizations": ("SELECT", "INSERT"),
+    "invoice_refunds": ("SELECT", "INSERT"),  # #67
 }
 # The purge role reads and deletes everywhere and writes nowhere — except the fact of its own
 # purge, which ADR-0001 §6 puts in the purge transaction (0024, pre-flight D11).
@@ -123,6 +124,7 @@ TRIGGERS = (
     ("commission_postings", "commission_postings_no_rewrite"),
     ("invoice_payments", "invoice_payments_no_rewrite"),
     ("invoice_balance_authorizations", "invoice_balance_authorizations_no_rewrite"),
+    ("invoice_refunds", "invoice_refunds_no_rewrite"),
 )
 
 
