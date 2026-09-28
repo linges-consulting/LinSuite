@@ -70,6 +70,11 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "invoice_lines": ("SELECT", "INSERT"),
     "invoice_line_discounts": ("SELECT", "INSERT"),
     "invoice_line_taxes": ("SELECT", "INSERT"),
+    # #66, 0055: the payment ledger and the admin/owner balance-exception record are both
+    # financial records, append-only for the same reason `invoice_lines` is — never edited or
+    # voided in place; a correction is a new row, #67's job.
+    "invoice_payments": ("SELECT", "INSERT"),
+    "invoice_balance_authorizations": ("SELECT", "INSERT"),
 }
 # The purge role reads and deletes everywhere and writes nowhere — except the fact of its own
 # purge, which ADR-0001 §6 puts in the purge transaction (0024, pre-flight D11).
@@ -98,6 +103,8 @@ TRIGGERS = (
     ("invoice_lines", "invoice_lines_no_rewrite"),
     ("invoice_line_discounts", "invoice_line_discounts_no_rewrite"),
     ("invoice_line_taxes", "invoice_line_taxes_no_rewrite"),
+    ("invoice_payments", "invoice_payments_no_rewrite"),
+    ("invoice_balance_authorizations", "invoice_balance_authorizations_no_rewrite"),
 )
 
 

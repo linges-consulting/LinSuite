@@ -16,6 +16,7 @@ reasoning.
 """
 
 import uuid
+from dataclasses import asdict
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
@@ -41,6 +42,7 @@ from billing.models import (
     InvoiceLineDiscount,
     InvoiceLineTax,
 )
+from billing.payments import balance, balances
 from core.audit import record_event
 from core.db import SessionDep
 
@@ -96,6 +98,12 @@ class InvoiceOut(BaseModel):
     issued_at: datetime
     issued_by: str
     lines: list[InvoiceLineOut]
+    # #66: derived every time from the payment ledger, never a stored flag — see
+    # `billing/payments.py::Balance`.
+    outstanding_cents: int
+    pending_insurer_cents: int
+    client_outstanding_cents: int
+    checkout_complete: bool
 
 
 class InvoiceSummaryOut(BaseModel):
@@ -105,6 +113,10 @@ class InvoiceSummaryOut(BaseModel):
     status: str
     grand_total_cents: int
     issued_at: datetime
+    outstanding_cents: int
+    pending_insurer_cents: int
+    client_outstanding_cents: int
+    checkout_complete: bool
 
 
 def _line_out(line: InvoiceLine) -> InvoiceLineOut:
@@ -137,7 +149,7 @@ def _line_out(line: InvoiceLine) -> InvoiceLineOut:
     )
 
 
-def _invoice_out(invoice: Invoice) -> InvoiceOut:
+async def _invoice_out(db: SessionDep, invoice: Invoice) -> InvoiceOut:
     return InvoiceOut(
         id=str(invoice.id),
         business_id=invoice.business_id,
@@ -156,6 +168,7 @@ def _invoice_out(invoice: Invoice) -> InvoiceOut:
         issued_at=invoice.issued_at,
         issued_by=str(invoice.issued_by),
         lines=[_line_out(line) for line in invoice.lines],
+        **asdict(await balance(db, invoice)),
     )
 
 
@@ -315,15 +328,24 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
 
     invoice = await db.get(Invoice, invoice.id, populate_existing=True)
     assert invoice is not None
-    return _invoice_out(invoice)
+    return await _invoice_out(db, invoice)
 
 
 # --- reading --------------------------------------------------------------------------------
 
 
 @router.get("/invoices")
-async def list_invoices(_: BillViewer, db: SessionDep) -> dict[str, list[InvoiceSummaryOut]]:
-    invoices = await db.scalars(select(Invoice).order_by(Invoice.invoice_number))
+async def list_invoices(
+    _: BillViewer, db: SessionDep, customer_id: uuid.UUID | None = None
+) -> dict[str, list[InvoiceSummaryOut]]:
+    """The billing list for manual outstanding-balance follow-up (#66's own acceptance
+    criterion); `customer_id` narrows it to one client's own invoice history — the same
+    endpoint, not a second one, since the shape a client's history needs is identical."""
+    stmt = select(Invoice).order_by(Invoice.invoice_number)
+    if customer_id is not None:
+        stmt = stmt.where(Invoice.customer_id == customer_id)
+    invoices = list(await db.scalars(stmt))
+    by_id = await balances(db, invoices)
     return {
         "invoices": [
             InvoiceSummaryOut(
@@ -333,6 +355,7 @@ async def list_invoices(_: BillViewer, db: SessionDep) -> dict[str, list[Invoice
                 status=i.status,
                 grand_total_cents=i.grand_total_cents,
                 issued_at=i.issued_at,
+                **asdict(by_id[i.id]),
             )
             for i in invoices
         ]
@@ -342,4 +365,4 @@ async def list_invoices(_: BillViewer, db: SessionDep) -> dict[str, list[Invoice
 @router.get("/invoices/{invoice_id}")
 async def get_invoice(invoice_id: uuid.UUID, _: BillViewer, db: SessionDep) -> InvoiceOut:
     invoice = await _load_invoice(db, invoice_id)
-    return _invoice_out(invoice)
+    return await _invoice_out(db, invoice)
