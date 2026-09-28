@@ -130,6 +130,15 @@ CAPABILITIES: tuple[Capability, ...] = (
         "Add walk-in clients to the queue, see who is waiting, and mark them as gone.",
         "Queue",
     ),
+    # M4's billing family (m4.md): the first ticket that needs it names it, and every later
+    # billing ticket (discounts, tax components, invoices) reuses this exact key rather than
+    # inventing a near-duplicate.
+    Capability(
+        "billing.manage",
+        "Define packages, bundles and other billing configuration.",
+        "Billing",
+        requires_admin_mode=True,
+    ),
 )
 
 BY_KEY: dict[str, Capability] = {c.key: c for c in CAPABILITIES}
