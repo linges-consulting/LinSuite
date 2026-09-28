@@ -26,13 +26,18 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.capabilities import Requires
 from auth.models import User
 from billing.bill_review import BillViewer
-from billing.models import Invoice, InvoiceBalanceAuthorization, InvoicePayment
+from billing.models import (
+    Invoice,
+    InvoiceBalanceAuthorization,
+    InvoicePayment,
+    InvoicePaymentTransfer,
+)
 from core.audit import record_event
 from core.db import SessionDep
 
@@ -65,15 +70,16 @@ class Balance:
     checkout_complete: bool
 
 
-async def balances(db: AsyncSession, invoices: list[Invoice]) -> dict[uuid.UUID, Balance]:
-    """Batched: two queries regardless of list length (the billing list's own reader)."""
-    ids = [i.id for i in invoices]
-    if not ids:
-        return {}
+async def ledger_sums(
+    db: AsyncSession, ids: list[uuid.UUID]
+) -> dict[uuid.UUID, tuple[int, int, int]]:
+    """`(received, pending, received_insurer)` per invoice, net of #68's payment transfers —
+    a transfer moves an original's sums onto its replacement, so money is counted on exactly
+    one invoice. Invoices with no ledger activity are absent (read as zeros)."""
     amount = InvoicePayment.amount_cents
     received = InvoicePayment.status == "received"
-    sums = {
-        row[0]: row[1:]
+    sums: dict[uuid.UUID, list[int]] = {
+        row[0]: list(row[1:])
         for row in await db.execute(
             select(
                 InvoicePayment.invoice_id,
@@ -87,6 +93,32 @@ async def balances(db: AsyncSession, invoices: list[Invoice]) -> dict[uuid.UUID,
             .group_by(InvoicePayment.invoice_id)
         )
     }
+    transfers = await db.scalars(
+        select(InvoicePaymentTransfer).where(
+            or_(
+                InvoicePaymentTransfer.from_invoice_id.in_(ids),
+                InvoicePaymentTransfer.to_invoice_id.in_(ids),
+            )
+        )
+    )
+    for t in transfers:
+        moved = (t.received_cents, t.pending_insurer_cents, t.received_insurer_cents)
+        for invoice_id, sign in ((t.from_invoice_id, -1), (t.to_invoice_id, 1)):
+            acc = sums.setdefault(invoice_id, [0, 0, 0])
+            for i, cents in enumerate(moved):
+                acc[i] += sign * cents
+    return {k: (v[0], v[1], v[2]) for k, v in sums.items()}
+
+
+async def balances(db: AsyncSession, invoices: list[Invoice]) -> dict[uuid.UUID, Balance]:
+    """Batched: three queries regardless of list length (the billing list's own reader).
+
+    A cancelled invoice (#68) bills nothing: its balance is only whatever money it still holds
+    (negative = a credit) until its replacement's issue transfers that money away."""
+    ids = [i.id for i in invoices]
+    if not ids:
+        return {}
+    sums = await ledger_sums(db, ids)
     excepted = set(
         await db.scalars(
             select(InvoiceBalanceAuthorization.invoice_id)
@@ -97,7 +129,8 @@ async def balances(db: AsyncSession, invoices: list[Invoice]) -> dict[uuid.UUID,
     out = {}
     for invoice in invoices:
         received_all, pending, received_insurer = sums.get(invoice.id, (0, 0, 0))
-        outstanding = invoice.grand_total_cents - received_all
+        billed = invoice.grand_total_cents if invoice.status == "issued" else 0
+        outstanding = billed - received_all
         pending_insurer = max(pending - received_insurer, 0)
         client_outstanding = outstanding - pending_insurer
         out[invoice.id] = Balance(
@@ -140,6 +173,19 @@ class PaymentOut(BaseModel):
     reference: str | None
     collected_by: str
     recorded_at: datetime
+
+
+class PaymentTransferOut(BaseModel):
+    """#68's transfer history: money carried from a cancelled original to its replacement."""
+
+    id: str
+    from_invoice_id: str
+    to_invoice_id: str
+    received_cents: int
+    received_insurer_cents: int
+    pending_insurer_cents: int
+    transferred_by: str
+    transferred_at: datetime
 
 
 class AuthorizeBalanceIn(BaseModel):
@@ -244,14 +290,39 @@ async def record_payment(
 @router.get("/{invoice_id}/payments")
 async def list_payments(
     invoice_id: uuid.UUID, _: BillViewer, db: SessionDep
-) -> dict[str, list[PaymentOut]]:
+) -> dict[str, list[PaymentOut] | list[PaymentTransferOut]]:
     await _load_invoice(db, invoice_id)
     payments = await db.scalars(
         select(InvoicePayment)
         .where(InvoicePayment.invoice_id == invoice_id)
         .order_by(InvoicePayment.recorded_at)
     )
-    return {"payments": [_payment_out(p) for p in payments]}
+    transfers = await db.scalars(
+        select(InvoicePaymentTransfer)
+        .where(
+            or_(
+                InvoicePaymentTransfer.from_invoice_id == invoice_id,
+                InvoicePaymentTransfer.to_invoice_id == invoice_id,
+            )
+        )
+        .order_by(InvoicePaymentTransfer.transferred_at)
+    )
+    return {
+        "payments": [_payment_out(p) for p in payments],
+        "transfers": [
+            PaymentTransferOut(
+                id=str(t.id),
+                from_invoice_id=str(t.from_invoice_id),
+                to_invoice_id=str(t.to_invoice_id),
+                received_cents=t.received_cents,
+                received_insurer_cents=t.received_insurer_cents,
+                pending_insurer_cents=t.pending_insurer_cents,
+                transferred_by=str(t.transferred_by),
+                transferred_at=t.transferred_at,
+            )
+            for t in transfers
+        ],
+    }
 
 
 # --- authorizing the outstanding-balance exception (billing.manage, Admin Mode) ----------------

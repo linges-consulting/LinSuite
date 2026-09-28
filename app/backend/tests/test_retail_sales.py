@@ -52,6 +52,7 @@ async def claimed_instance(client):
         # reference below ("children before parents", `test_invoice_issue.py`'s own ordering).
         await purge.execute(text("DELETE FROM retail_invoice_lines"))
         await purge.execute(text("DELETE FROM retail_invoices"))
+        await purge.execute(text("DELETE FROM invoice_payment_transfers"))  # #68
         await purge.execute(text("DELETE FROM commission_postings"))  # #69
         await purge.execute(text("DELETE FROM invoice_line_taxes"))
         await purge.execute(text("DELETE FROM invoice_line_discounts"))

@@ -28,6 +28,7 @@ async def claimed_instance(client):
             await purge.execute(text("DELETE FROM audit_events"))
             await purge.execute(text("DELETE FROM erasure_requests"))
             await purge.execute(text("DELETE FROM form_links"))
+            await purge.execute(text("DELETE FROM invoice_payment_transfers"))  # #68
             await purge.execute(text("DELETE FROM commission_postings"))
             await purge.execute(text("DELETE FROM invoice_line_taxes"))
             await purge.execute(text("DELETE FROM invoice_line_discounts"))

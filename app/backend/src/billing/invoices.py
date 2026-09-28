@@ -27,12 +27,14 @@ Administrator-only, Admin Mode).
 import base64
 import uuid
 from dataclasses import asdict
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import exists, select
+from sqlalchemy.orm import aliased
 
 from auth.capabilities import Requires
 from billing.bill_review import (
@@ -61,8 +63,9 @@ from billing.models import (
     InvoiceLine,
     InvoiceLineDiscount,
     InvoiceLineTax,
+    InvoicePaymentTransfer,
 )
-from billing.payments import balance, balances
+from billing.payments import balance, balances, ledger_sums
 from core.access_log import LogAccess
 from core.audit import record_event
 from core.db import SessionDep
@@ -137,6 +140,11 @@ class InvoiceOut(BaseModel):
     grand_total_cents: int
     issued_at: datetime
     issued_by: str
+    # #68 lineage, queryable both ways: what this invoice replaced / what replaced it.
+    replaces_invoice_id: str | None
+    replaced_by_invoice_id: str | None
+    cancelled_at: datetime | None
+    cancel_reason: str | None
     lines: list[InvoiceLineOut]
     # #66: derived every time from the payment ledger, never a stored flag — see
     # `billing/payments.py::Balance`.
@@ -187,6 +195,10 @@ def _line_out(line: InvoiceLine) -> InvoiceLineOut:
     )
 
 
+def _str_or_none(value: uuid.UUID | None) -> str | None:
+    return str(value) if value is not None else None
+
+
 async def _invoice_out(db: SessionDep, invoice: Invoice) -> InvoiceOut:
     return InvoiceOut(
         id=str(invoice.id),
@@ -208,6 +220,12 @@ async def _invoice_out(db: SessionDep, invoice: Invoice) -> InvoiceOut:
         grand_total_cents=invoice.grand_total_cents,
         issued_at=invoice.issued_at,
         issued_by=str(invoice.issued_by),
+        replaces_invoice_id=_str_or_none(invoice.replaces_invoice_id),
+        replaced_by_invoice_id=_str_or_none(
+            await db.scalar(select(Invoice.id).where(Invoice.replaces_invoice_id == invoice.id))
+        ),
+        cancelled_at=invoice.cancelled_at,
+        cancel_reason=invoice.cancel_reason,
         lines=[_line_out(line) for line in invoice.lines],
         **asdict(await balance(db, invoice)),
     )
@@ -275,6 +293,16 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
         override_applied_cents if override_applied_cents is not None else computed.grand_total_cents
     )
 
+    # #68: a draft reopened by cancelling its invoice replaces that (not-yet-replaced) invoice.
+    successor = aliased(Invoice)
+    replaces = await db.scalar(
+        select(Invoice).where(
+            Invoice.service_bill_id == bill.id,
+            Invoice.status == "cancelled",
+            ~exists().where(successor.replaces_invoice_id == Invoice.id),
+        )
+    )
+
     invoice_number = await allocate_invoice_number(db, business_id=business.id)
 
     invoice = Invoice(
@@ -291,9 +319,40 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
         override_reason=override_reason,
         grand_total_cents=grand_total_cents,
         issued_by=actor.id,
+        replaces_invoice_id=replaces.id if replaces is not None else None,
     )
     db.add(invoice)
     await db.flush()
+
+    if replaces is not None:
+        # Carry every cent the original holds (its own payments plus anything it inherited)
+        # onto the replacement — never charged again, never counted twice. An increase is then
+        # an ordinary new payment; a decrease leaves a credit for #67's approved refund.
+        received, pending, received_insurer = (await ledger_sums(db, [replaces.id])).get(
+            replaces.id, (0, 0, 0)
+        )
+        db.add(
+            InvoicePaymentTransfer(
+                from_invoice_id=replaces.id,
+                to_invoice_id=invoice.id,
+                received_cents=received,
+                received_insurer_cents=received_insurer,
+                pending_insurer_cents=pending,
+                transferred_by=actor.id,
+            )
+        )
+        record_event(
+            db,
+            "invoice.payments_transferred",
+            target_type="invoice",
+            target_id=str(invoice.id),
+            actor_user_id=actor.id,
+            metadata={
+                "from_invoice_id": str(replaces.id),
+                "received_cents": received,
+                "pending_insurer_cents": pending,
+            },
+        )
 
     # Discount definitions frozen at this exact moment — one more query, never a live re-join
     # once this transaction commits (module section in `billing/models.py`).
@@ -396,6 +455,7 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
             "service_bill_id": str(bill_id),
             "invoice_number": invoice_number,
             "grand_total_cents": grand_total_cents,
+            "replaces_invoice_id": str(replaces.id) if replaces is not None else None,
         },
     )
     await db.commit()
@@ -409,6 +469,100 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
     invoice = await db.get(Invoice, invoice.id, populate_existing=True)
     assert invoice is not None
     return await _invoice_out(db, invoice)
+
+
+# --- cancel & replace (#68) -------------------------------------------------------------------
+
+
+class CancelInvoiceIn(BaseModel):
+    reason: Annotated[str, Field(min_length=1, max_length=2000)]
+
+
+class CancelledOut(BaseModel):
+    invoice: InvoiceOut
+    # The replacement draft: the original's own bill, reopened with its lines, discount
+    # selection and (still-valid) override intact. Edit it on the bill review screen, then
+    # `POST /bills/{id}/issue` issues the replacement.
+    replacement_bill_id: str
+
+
+@router.post("/invoices/{invoice_id}/cancel")
+async def cancel_invoice(
+    invoice_id: uuid.UUID, payload: CancelInvoiceIn, actor: BillViewer, db: SessionDep
+) -> CancelledOut:
+    """Voidable cancel (CLAUDE.md): the original keeps its number and every frozen row; only
+    the issued -> cancelled transition `invoices_voidable_guard` permits is written. The row
+    lock makes a retry wait for, then observe, the first call — which it returns unchanged, so
+    one lineage and one set of effects either way."""
+    invoice = await db.scalar(
+        select(Invoice)
+        .where(Invoice.id == invoice_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="No such invoice.")
+    if invoice.service_bill_id is None:
+        raise HTTPException(
+            status_code=422, detail="Only a service invoice can be cancelled and replaced."
+        )
+
+    if invoice.status == "issued":
+        now = datetime.now(UTC)
+        invoice.status = "cancelled"
+        invoice.cancelled_at = now
+        invoice.cancelled_by = actor.id
+        invoice.cancel_reason = payload.reason
+
+        # Commission: reverse what the original earned, dated today (#69's own shape); the
+        # replacement posts its own at issue, so the two are never counted together.
+        earned = await db.scalars(
+            select(CommissionPosting).where(
+                CommissionPosting.invoice_id == invoice.id, CommissionPosting.kind == "earned"
+            )
+        )
+        for posting in list(earned):
+            db.add(
+                CommissionPosting(
+                    invoice_line_id=posting.invoice_line_id,
+                    invoice_id=invoice.id,
+                    staff_id=posting.staff_id,
+                    kind="reversal",
+                    commission_rate_bp=posting.commission_rate_bp,
+                    basis_cents=posting.basis_cents,
+                    amount_cents=-posting.amount_cents,
+                    reverses_posting_id=posting.id,
+                )
+            )
+
+        # Reopen the bill as the replacement draft. Completion is not re-run, so no stock or
+        # package credit moves. An override on an issued bill was valid at issue (issue refuses
+        # a stale one) and nothing edits an issued bill, so it stays authorized for the same
+        # content; any later edit to the draft invalidates it the usual way.
+        bill = await _load_bill(db, invoice.service_bill_id)
+        bill.status = "draft"
+        bill.updated_at = now
+        if bill.manual_override_cents is not None:
+            bill.override_applied_revision = now
+
+        record_event(
+            db,
+            "invoice.cancelled",
+            target_type="invoice",
+            target_id=str(invoice.id),
+            actor_user_id=actor.id,
+            metadata={
+                "invoice_number": invoice.invoice_number,
+                "reason": payload.reason,
+                "service_bill_id": str(bill.id),
+            },
+        )
+        await db.commit()
+        invoice = await _load_invoice(db, invoice_id)
+
+    return CancelledOut(
+        invoice=await _invoice_out(db, invoice), replacement_bill_id=str(invoice.service_bill_id)
+    )
 
 
 # --- reading --------------------------------------------------------------------------------
