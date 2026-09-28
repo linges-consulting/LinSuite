@@ -167,12 +167,16 @@ async def add_account(email: str, password_hash: str, *, role: str | None = None
 
 
 async def wipe_document_keys() -> None:
-    """Clear `documents`, `form_submissions` and `customer_document_keys`, so a fixture can
-    delete its customers.
+    """Clear `documents`, `form_submissions`, `session_notes`, `customer_document_keys` and
+    `business_document_keys`, so a fixture can delete its customers and its business.
 
     Neither runtime role may do this wholesale — the app role holds no DELETE and the purge
     role is refused by the trigger for any client under a retention hold (migration 0024) —
-    so it runs as the schema owner, the one role the trigger lets through. Tests only."""
+    so it runs as the schema owner, the one role the trigger lets through. Tests only.
+
+    `business_document_keys` (#55, migration 0044) FKs to `businesses.id`, and `claimed_
+    instance`'s `wipe()` deletes `businesses` every test — the one role that guard's trigger
+    lets through is this same schema owner, so it has to go here too, ahead of that delete."""
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -183,5 +187,6 @@ async def wipe_document_keys() -> None:
             await conn.execute(text("DELETE FROM form_submissions"))  # so does theirs
             await conn.execute(text("DELETE FROM session_notes"))
             await conn.execute(text("DELETE FROM customer_document_keys"))
+            await conn.execute(text("DELETE FROM business_document_keys"))
     finally:
         await owner.dispose()

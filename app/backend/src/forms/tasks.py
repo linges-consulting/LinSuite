@@ -106,6 +106,7 @@ async def _render_submission(submission_id: uuid.UUID) -> None:
             await store_document(
                 db,
                 key=key,
+                key_owner="customer",
                 customer_id=submission.customer_id,
                 kind="form_submission",
                 source_id=submission.id,

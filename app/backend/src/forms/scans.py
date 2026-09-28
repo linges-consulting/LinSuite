@@ -161,6 +161,7 @@ async def upload_scan(
         await store_document(
             db,
             key=key,
+            key_owner="customer",
             customer_id=customer_id,
             kind="form_submission",
             source_id=payload.submission_id,
