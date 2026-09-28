@@ -83,6 +83,11 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     # The commission ledger (#69, 0057): append-only, a correction is a second row
     # (`kind="reversal"`), never an UPDATE of an existing one.
     "commission_postings": ("SELECT", "INSERT"),
+    # #66, 0058: the payment ledger and the admin/owner balance-exception record are both
+    # financial records, append-only for the same reason `invoice_lines` is — never edited or
+    # voided in place; a correction is a new row, #67's job.
+    "invoice_payments": ("SELECT", "INSERT"),
+    "invoice_balance_authorizations": ("SELECT", "INSERT"),
 }
 # The purge role reads and deletes everywhere and writes nowhere — except the fact of its own
 # purge, which ADR-0001 §6 puts in the purge transaction (0024, pre-flight D11).
@@ -116,6 +121,8 @@ TRIGGERS = (
     ("retail_invoices", "retail_invoices_voidable_guard"),
     ("retail_invoice_lines", "retail_invoice_lines_no_rewrite"),
     ("commission_postings", "commission_postings_no_rewrite"),
+    ("invoice_payments", "invoice_payments_no_rewrite"),
+    ("invoice_balance_authorizations", "invoice_balance_authorizations_no_rewrite"),
 )
 
 

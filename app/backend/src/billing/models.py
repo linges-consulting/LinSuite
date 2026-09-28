@@ -1481,3 +1481,128 @@ class CommissionPosting(Base):
     # "reversal" — never backdated to the original invoice (CLAUDE.md "in the period they
     # occur"). What the report's date-range filter reads.
     posted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ---------------------------------------------------------------------------------------------
+#
+# ## manual payment ledger + checkout gate (#66, M4 spec #54 stories 34-42)
+#
+# Recording manual payments (cash, e-transfer, external card, insurer) against an *issued*
+# invoice (#65), and the gate that decides whether checkout can complete. Two new tables, both
+# children of `invoices`, neither ever revisiting an already-frozen invoice's own money columns.
+#
+# **Outstanding balance is never a stored flag — CLAUDE.md's own instruction, and this
+# ticket's own acceptance criterion.** There is no `is_paid` column anywhere in this module.
+# `billing/payments.py::outstanding_cents`/`is_checkout_complete` compute it live, every time,
+# from `invoice_payments` (`grand_total_cents` minus the sum of every *received* payment —
+# a `pending` insurer row never counts) and from whether an `InvoiceBalanceAuthorization` row
+# exists for the invoice. The gate checks the *client* portion only — still-pending approved
+# insurer money stays visibly outstanding but never blocks checkout (spec #54). "Checkout
+# complete" is exactly that predicate, not a second stored
+# state: `is_checkout_complete(db, invoice) -> bool` in `billing/payments.py` is the one place
+# a later ticket (#70's receipt-release gate, most directly) should import and call rather than
+# re-deriving any part of this — see that module's own docstring for the exact shape.
+#
+# **`InvoicePayment`**: append-only (migration 0058's unconditional shape, `invoice_lines`'s
+# own precedent) — a payment entry is a financial record like an invoice line, never edited or
+# voided in place. A correction is a new entry, #67's job. `payer_type`/`method` are locked
+# together by a DB constraint (`method = 'insurer'` if and only if `payer_type = 'insurer'`) so
+# the two facts the acceptance criteria ask recorded separately can never disagree, without
+# actually letting them vary independently — in this app's simplified model (CLAUDE.md: no
+# direct-billing integration) an insurer payment has exactly one method. `status` is `pending`
+# only for an insurer row: an externally-approved-but-unpaid amount gets recorded the moment
+# it's approved (so it's visible for follow-up) without ever counting as money collected; when
+# it actually arrives, a *second*, `status = 'received'` row records that — approval alone
+# never flips the first row, because nothing here is ever edited in place. `collected_by` is
+# always the authenticated caller's own id, never client-supplied, the same integrity rule
+# `BillOverrideRequest.requested_by` already follows.
+#
+# **`InvoiceBalanceAuthorization`**: the admin/owner exception — deliberately not
+# `BillOverrideRequest`'s (#64) staff-request/admin-decide two-step, since the ticket asks for
+# "a single admin action with a reason". One `billing.manage` (Admin Mode) call creates the
+# row directly; its mere existence for an invoice is what the gate checks, nothing about its
+# `outstanding_cents_at_authorization` (kept only as the audit trail's own record of what was
+# actually authorized) is re-read by the gate itself. No staleness guard the way #64's needs
+# one: `grand_total_cents` is frozen at issue and payments only ever accumulate, so the balance
+# an authorization was granted against can only shrink afterward, never grow past what an
+# admin/owner actually saw.
+#
+# **Capabilities, both reused, no new key.** `billing.view` (front-desk checkout) records
+# payments — recording a payment is checkout, the same call #65's own issue route already
+# made for issuing the invoice being paid. `billing.manage` (Admin Mode) authorizes the
+# outstanding-balance exception — deciding to let money go uncollected is an administrative
+# decision in exactly the shape `bill_authority.py`'s own `AdminReviewer` already gates (#64's
+# staff-request decision), never front-desk-reachable.
+#
+# ---------------------------------------------------------------------------------------------
+
+PAYER_TYPES = ("client", "insurer")
+PAYMENT_STATUSES = ("pending", "received")
+PAYMENT_METHODS = ("cash", "e_transfer", "card", "insurer")
+
+
+class InvoicePayment(Base):
+    """One recorded manual payment against an issued invoice. See the module section above
+    for the full schema/append-only rationale; `billing/payments.py` is the only writer."""
+
+    __tablename__ = "invoice_payments"
+    __table_args__ = (
+        CheckConstraint("amount_cents > 0", name="ck_invoice_payments_amount"),
+        CheckConstraint(
+            "payer_type IN ('client', 'insurer')", name="ck_invoice_payments_payer_type"
+        ),
+        CheckConstraint("status IN ('pending', 'received')", name="ck_invoice_payments_status"),
+        CheckConstraint(
+            "method IN ('cash', 'e_transfer', 'card', 'insurer')", name="ck_invoice_payments_method"
+        ),
+        CheckConstraint(
+            "(payer_type = 'insurer') = (method = 'insurer')",
+            name="ck_invoice_payments_payer_method_match",
+        ),
+        CheckConstraint(
+            "status = 'received' OR payer_type = 'insurer'",
+            name="ck_invoice_payments_pending_only_insurer",
+        ),
+        Index("ix_invoice_payments_invoice", "invoice_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    invoice_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoices.id", ondelete="CASCADE"))
+    payer_type: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'received'"))
+    method: Mapped[str] = mapped_column(Text)
+    amount_cents: Mapped[int] = mapped_column(Integer)
+    reference: Mapped[str | None] = mapped_column(Text)
+    collected_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class InvoiceBalanceAuthorization(Base):
+    """One admin/owner action authorizing an invoice to complete checkout with money still
+    outstanding, with a recorded reason. See the module section above — its mere existence for
+    an invoice is what `billing/payments.py::is_checkout_complete` checks; append-only
+    (migration 0058), same unconditional shape as `InvoicePayment`."""
+
+    __tablename__ = "invoice_balance_authorizations"
+    __table_args__ = (
+        CheckConstraint(
+            "outstanding_cents_at_authorization > 0",
+            name="ck_invoice_balance_authorizations_outstanding",
+        ),
+        Index("ix_invoice_balance_authorizations_invoice", "invoice_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    invoice_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoices.id", ondelete="CASCADE"))
+    authorized_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    reason: Mapped[str] = mapped_column(Text)
+    outstanding_cents_at_authorization: Mapped[int] = mapped_column(Integer)
+    authorized_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

@@ -23,6 +23,7 @@ from billing.commission_report import router as commission_report_router
 from billing.invoices import router as invoices_router
 from billing.package_purchase import router as package_purchase_router
 from billing.packages import router as package_definitions_router
+from billing.payments import router as invoice_payments_router
 from billing.retail_sales import router as retail_sales_router
 from billing.routes import router as discounts_router
 from billing.tax_routes import router as tax_router
@@ -327,4 +328,10 @@ api.include_router(retail_sales_router)
 # own issue endpoint does, in the same transaction. This is the report: what every staff member
 # has earned, `commission.view`, Administrator-only, Admin Mode.
 api.include_router(commission_report_router)
+# Manual payment ledger + checkout gate (#66): `POST/GET /invoices/{id}/payments` (`billing.
+# view`, Staff Mode) records split cash/e-transfer/card/insurer payments; `POST/GET /invoices/
+# {id}/balance-exceptions` (`billing.manage`, Admin Mode) authorizes an outstanding balance.
+# Outstanding balance and checkout-complete are derived, never stored — see `billing/payments.
+# py`'s own docstring.
+api.include_router(invoice_payments_router)
 app.include_router(api)
