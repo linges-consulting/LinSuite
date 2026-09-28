@@ -17,6 +17,7 @@ from auth.passwords import router as passwords_router
 from auth.roles import router as roles_router
 from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
+from billing.routes import router as discounts_router
 from core.config import get_settings
 from core.db import SessionDep, get_engine, session_scope
 from core.errors import (
@@ -241,6 +242,9 @@ api.include_router(hours_router)
 api.include_router(time_off_router)
 api.include_router(closures_router)
 api.include_router(services_router)
+# Settings → Billing: discount definitions (`billing.manage`, Admin Mode). No application
+# logic mounted here yet — #63 is what will resolve these against a real bill.
+api.include_router(discounts_router)
 # The read side of the catalog, on its own prefix: `/admin` is administration, `/catalog` is
 # what the availability engine and the booking screen read with no capability at all.
 api.include_router(catalog_router)

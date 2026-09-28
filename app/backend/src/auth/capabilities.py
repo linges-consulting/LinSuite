@@ -130,6 +130,17 @@ CAPABILITIES: tuple[Capability, ...] = (
         "Add walk-in clients to the queue, see who is waiting, and mark them as gone.",
         "Queue",
     ),
+    # The first M4 capability (#58). Discount definitions today; every later billing-admin
+    # surface (tax components #57, package/bundle definitions #60, and anything else M4 puts
+    # behind an administrator-only settings screen) reuses this exact key rather than minting
+    # a near-duplicate — m4.md's own instruction. A `billing.view` for staff-facing reads
+    # (bill review, #63) is a separate key for whichever ticket first needs one.
+    Capability(
+        "billing.manage",
+        "Define discounts, tax rates and other billing configuration.",
+        "Administration",
+        requires_admin_mode=True,
+    ),
 )
 
 BY_KEY: dict[str, Capability] = {c.key: c for c in CAPABILITIES}
