@@ -56,9 +56,11 @@ try (network failure, a 5xx). `is_permanent_status`/`is_permanent_smtp_error` ar
 classifiers underneath — S2-testable on their own, no `httpx`/`smtplib` involved.
 """
 
+import base64
 import logging
 import smtplib
 from collections.abc import Callable
+from dataclasses import dataclass
 from email.message import EmailMessage
 from typing import TYPE_CHECKING, Protocol
 
@@ -126,19 +128,55 @@ def _raise_for_delivery(response: httpx.Response) -> None:
         raise
 
 
+@dataclass(frozen=True)
+class EmailAttachment:
+    """One file to attach to an email (#70: invoice/treatment-receipt PDFs). Bytes in memory —
+    small documents (a handful of pages at most), never a stream: the same "one shot, not
+    chunked" shape every provider adapter already sends its `text`/`html` body as."""
+
+    filename: str
+    content: bytes
+    content_type: str = "application/pdf"
+
+
 class NotificationProvider(Protocol):
-    def send_email(self, to: str, subject: str, text: str, html: str | None = None) -> None:
-        """Deliver, or raise. Retries are the caller's business (`notifications/tasks.py`)."""
+    def send_email(
+        self,
+        to: str,
+        subject: str,
+        text: str,
+        html: str | None = None,
+        attachments: list[EmailAttachment] | None = None,
+    ) -> None:
+        """Deliver, or raise. Retries are the caller's business (`notifications/tasks.py`).
+        `attachments` is optional and keyword-compatible with every pre-#70 caller (password
+        reset, MFA codes, the trigger dispatch table) — none of them pass it, and it defaults
+        to no attachment."""
 
     def send_sms(self, to: str, text: str) -> None:
         """Deliver, or raise. Retries are the caller's business (`notifications/tasks.py`)."""
 
 
 class ConsoleProvider:
-    def send_email(self, to: str, subject: str, text: str, html: str | None = None) -> None:
+    def send_email(
+        self,
+        to: str,
+        subject: str,
+        text: str,
+        html: str | None = None,
+        attachments: list[EmailAttachment] | None = None,
+    ) -> None:
         # The body is logged in full and on purpose: an unconfigured deployment still has to
         # be able to complete a password reset, and the link is the only way to do that.
         log.info("notifications: email to %s — %s\n%s", to, subject, text)
+        if attachments:
+            # Names only, never the bytes — unlike the plain-text body above, an attachment is
+            # routinely a client-linked financial document (#70), not a reset link.
+            log.info(
+                "notifications: %d attachment(s): %s",
+                len(attachments),
+                ", ".join(a.filename for a in attachments),
+            )
 
     def send_sms(self, to: str, text: str) -> None:
         log.info("notifications: sms to %s — %s", to, text)
@@ -160,7 +198,14 @@ class ResendProvider:
         self._from_address = from_address
         self._client = client
 
-    def send_email(self, to: str, subject: str, text: str, html: str | None = None) -> None:
+    def send_email(
+        self,
+        to: str,
+        subject: str,
+        text: str,
+        html: str | None = None,
+        attachments: list[EmailAttachment] | None = None,
+    ) -> None:
         payload: dict[str, object] = {
             "from": self._from_address,
             "to": [to],
@@ -169,6 +214,14 @@ class ResendProvider:
         }
         if html is not None:
             payload["html"] = html
+        if attachments:
+            # Resend's own attachment shape: base64 content, not raw bytes — the payload is
+            # JSON, the same reason `notifications/tasks.py::send_email` base64-encodes an
+            # attachment before it can even reach this call.
+            payload["attachments"] = [
+                {"filename": a.filename, "content": base64.b64encode(a.content).decode()}
+                for a in attachments
+            ]
         headers = {"Authorization": f"Bearer {self._api_key}"}
         if self._client is not None:
             response = self._client.post(_RESEND_ENDPOINT, json=payload, headers=headers)
@@ -202,7 +255,14 @@ class SmtpProvider:
         self._from_address = from_address
         self._smtp_cls = smtp_cls
 
-    def send_email(self, to: str, subject: str, text: str, html: str | None = None) -> None:
+    def send_email(
+        self,
+        to: str,
+        subject: str,
+        text: str,
+        html: str | None = None,
+        attachments: list[EmailAttachment] | None = None,
+    ) -> None:
         message = EmailMessage()
         message["Subject"] = subject
         message["From"] = self._from_address
@@ -210,6 +270,14 @@ class SmtpProvider:
         message.set_content(text)
         if html is not None:
             message.add_alternative(html, subtype="html")
+        for attachment in attachments or []:
+            maintype, _, subtype = attachment.content_type.partition("/")
+            message.add_attachment(
+                attachment.content,
+                maintype=maintype or "application",
+                subtype=subtype or "octet-stream",
+                filename=attachment.filename,
+            )
 
         smtp_cls = self._smtp_cls or smtplib.SMTP
         try:
