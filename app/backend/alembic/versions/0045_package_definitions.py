@@ -1,8 +1,8 @@
 """Package & bundle definitions (#60): admin-configured prepaid credit for one or more
 services.
 
-Revision ID: 0044
-Revises: 0043
+Revision ID: 0045
+Revises: 0044
 Create Date: 2026-09-28
 
 Two tables, the same shape as `0012_services.py`'s `services`/`service_staff` pair.
@@ -20,8 +20,9 @@ It FKs to `services` only, never to a product: CLAUDE.md is explicit that no mix
 service/product package and no retail credit bundle may be representable, and there is no
 column here a product id could go in.
 
-New capability `billing.manage` (Administrator only, Admin Mode) gates the whole admin
-surface, the same shape 0012 gave `catalog.manage`.
+Reuses `billing.manage` (Administrator only, Admin Mode) — seeded by `0044_discounts.py`,
+the sibling M4 Wave 1 ticket integrated just before this one; both independently needed the
+same capability, merged to one grant at integration rather than two competing inserts.
 
 Grants are inherited from 0001's ALTER DEFAULT PRIVILEGES; nothing is repeated here.
 """
@@ -31,8 +32,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0044"
-down_revision: str | None = "0043"
+revision: str = "0045"
+down_revision: str | None = "0044"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -83,15 +84,8 @@ def upgrade() -> None:
         sa.CheckConstraint("credits >= 1", name="ck_package_definition_services_credits"),
     )
 
-    op.execute(
-        "INSERT INTO role_capabilities (role_id, capability) "
-        "SELECT id, 'billing.manage' FROM roles WHERE name = 'Administrator' AND is_system "
-        "ON CONFLICT DO NOTHING"
-    )
-
 
 def downgrade() -> None:
-    op.execute("DELETE FROM role_capabilities WHERE capability = 'billing.manage'")
     op.drop_table("package_definition_services")
     op.drop_index("ux_package_definitions_name", table_name="package_definitions")
     op.drop_table("package_definitions")

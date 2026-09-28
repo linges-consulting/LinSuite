@@ -130,12 +130,15 @@ CAPABILITIES: tuple[Capability, ...] = (
         "Add walk-in clients to the queue, see who is waiting, and mark them as gone.",
         "Queue",
     ),
-    # M4's billing family (m4.md): the first ticket that needs it names it, and every later
-    # billing ticket (discounts, tax components, invoices) reuses this exact key rather than
-    # inventing a near-duplicate.
+    # M4's billing family (m4.md): the first tickets that needed it (#58 discounts, #60
+    # packages/bundles) both named it independently in parallel Wave 1 worktrees — merged to
+    # one entry at integration. Every later billing-admin surface (tax components #57, and
+    # anything else M4 puts behind an administrator-only settings screen) reuses this exact
+    # key rather than minting a near-duplicate. A `billing.view` for staff-facing reads (bill
+    # review, #63) is a separate key for whichever ticket first needs one.
     Capability(
         "billing.manage",
-        "Define packages, bundles and other billing configuration.",
+        "Define packages, bundles, discounts, tax rates and other billing configuration.",
         "Billing",
         requires_admin_mode=True,
     ),
