@@ -75,3 +75,5 @@ export const NOTE_APPOINTMENTS = ['note-appointments'] as const
  *  `enable_walk_in_queue` is off (the server's whole-surface 404) — `lib/nav.ts`'s gate and
  *  the queue screen itself both read that shape off the same query, one fetch either way. */
 export const QUEUE = ['queue'] as const
+/** Settings → Billing → Tax: components and their effective-dated rates (#57). */
+export const TAX_COMPONENTS = ['tax-components'] as const

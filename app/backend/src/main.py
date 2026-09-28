@@ -17,6 +17,7 @@ from auth.passwords import router as passwords_router
 from auth.roles import router as roles_router
 from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
+from billing.routes import router as billing_router
 from core.config import get_settings
 from core.db import SessionDep, get_engine, session_scope
 from core.errors import (
@@ -276,4 +277,7 @@ api.include_router(public_booking_router)
 api.include_router(business_router)
 api.include_router(notification_settings_router)
 api.include_router(branding_router)
+# Settings → Billing → Tax: tax components and their effective-dated rates (`billing.manage`,
+# Admin Mode, #57).
+api.include_router(billing_router)
 app.include_router(api)

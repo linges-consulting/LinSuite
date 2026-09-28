@@ -130,6 +130,16 @@ CAPABILITIES: tuple[Capability, ...] = (
         "Add walk-in clients to the queue, see who is waiting, and mark them as gone.",
         "Queue",
     ),
+    # M4's own billing family (m4.md: "pick names once, in the first ticket that needs
+    # them"). Configuring tax components, discount definitions and package/bundle definitions
+    # (#57/#58/#60) is business configuration in the same sense `catalog.manage` already is —
+    # administrative, never front-desk work.
+    Capability(
+        "billing.manage",
+        "Configure tax components and rates, discounts and other billing definitions.",
+        "Administration",
+        requires_admin_mode=True,
+    ),
 )
 
 BY_KEY: dict[str, Capability] = {c.key: c for c in CAPABILITIES}
