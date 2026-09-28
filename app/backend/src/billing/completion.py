@@ -17,13 +17,18 @@ from billing.models import ServiceBill, ServiceBillLine
 from scheduling.models import Appointment
 
 
-async def record_draft_bill_line(db: AsyncSession, appointment: Appointment) -> None:
+async def record_draft_bill_line(
+    db: AsyncSession, appointment: Appointment, *, prepaid_cents: int | None = None
+) -> None:
     """Finds the visit's open draft by `booking_group_id` and appends to it, or starts a new
     one — for an ungrouped appointment (`booking_group_id is None`) that is always a fresh
     bill, since there is no shared tag for a second appointment to ever match it by. A visit
     whose existing bill has moved past `draft` (#65 sets that) is not matched either: the
     `status == "draft"` filter is what makes a later sibling completion open a new draft
-    rather than append to a document that's supposed to be immutable once issued."""
+    rather than append to a document that's supposed to be immutable once issued.
+
+    `prepaid_cents` (#72): the redeemed credit's frozen session value — the line's price
+    becomes that value and is marked settled by it, instead of the appointment's own price."""
     bill_id = None
     if appointment.booking_group_id is not None:
         bill_id = await db.scalar(
@@ -57,7 +62,8 @@ async def record_draft_bill_line(db: AsyncSession, appointment: Appointment) -> 
             appointment_id=appointment.id,
             service_id=appointment.service_id,
             staff_id=appointment.staff_id,
-            price_cents=appointment.price_cents,
+            price_cents=appointment.price_cents if prepaid_cents is None else prepaid_cents,
+            prepaid_cents=prepaid_cents or 0,
             commission_rate_bp=appointment.staff.commission_rate_services_bp,
         )
     )

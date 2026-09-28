@@ -89,6 +89,9 @@ class BillLineOut(BaseModel):
     discounted_cents: int
     tax: LineTaxOut
     line_total_cents: int
+    # #72: a redeemed package credit's frozen session value; the line is already settled by
+    # it (no discount, no second tax), so it is never a new amount to collect.
+    prepaid_cents: int
 
 
 class DiscountChoiceOut(BaseModel):
@@ -115,6 +118,8 @@ class BillOut(BaseModel):
     tax_totals_by_component: dict[str, int]
     tax_total_cents: int
     grand_total_cents: int
+    # #72: the part of `grand_total_cents` package credits already settled.
+    prepaid_total_cents: int
     # #64: an admin/owner-authorized exception (staff-request approval or inline admin edit),
     # reported alongside the ordinarily-computed total rather than replacing it — see
     # `billing/models.py::ServiceBill`'s own "bill review authority" section for why this is a
@@ -237,10 +242,15 @@ async def _compute(
     for line in bill.lines:
         service = services.get(line.service_id)
         member = staff_by_id.get(line.staff_id)
+        # #72: a prepaid line gets no discount (the purchase already set its price) and no
+        # tax (the purchase invoice already carried it).
+        prepaid = line.prepaid_cents > 0
         eligibility_checked = [
             d
             for d in enabled_discounts
-            if d.id in selected_ids and is_eligible(_eligibility_of(d), "service", line.service_id)
+            if not prepaid
+            and d.id in selected_ids
+            and is_eligible(_eligibility_of(d), "service", line.service_id)
         ]
         if eligibility_checked:
             inputs = [
@@ -263,7 +273,7 @@ async def _compute(
         else:
             discounted_cents = line.price_cents
 
-        line_tax = compute_line_tax(discounted_cents, components, TAX_CONVENTION)
+        line_tax = compute_line_tax(discounted_cents, [] if prepaid else components, TAX_CONVENTION)
         line_taxes.append(line_tax)
         subtotal_cents += line.price_cents
         discount_total_cents += line.price_cents - discounted_cents
@@ -284,6 +294,7 @@ async def _compute(
                     total_cents=line_tax.total_cents,
                 ),
                 line_total_cents=line_tax.total_cents,
+                prepaid_cents=line.prepaid_cents,
             )
         )
 
@@ -327,6 +338,7 @@ async def _compute(
         tax_totals_by_component=tax_totals,
         tax_total_cents=tax_total_cents,
         grand_total_cents=grand_total_cents,
+        prepaid_total_cents=sum(line.prepaid_cents for line in bill.lines),
         override_total_cents=bill.manual_override_cents,
         override_reason=bill.manual_override_reason,
         bill_override_requests_enabled=business.enable_bill_override_requests,

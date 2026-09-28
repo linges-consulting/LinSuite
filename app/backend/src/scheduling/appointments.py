@@ -61,6 +61,7 @@ from auth.capabilities import ADMIN, BY_KEY, Requires
 from auth.models import User
 from auth.session import ClaimsDep
 from billing.completion import record_draft_bill_line
+from billing.redemption import redeem_credit
 from core.audit import record_event
 from core.db import SessionDep
 from core.errors import CAPABILITY_REQUIRED, Forbidden
@@ -1149,8 +1150,18 @@ async def _clear_queue_entry(db: AsyncSession, appointment_id: uuid.UUID) -> Non
     )
 
 
+class CompleteIn(BaseModel):
+    # #72: the package purchase staff selected to pay for this visit, if any.
+    package_purchase_id: uuid.UUID | None = None
+
+
 @router.post("/{appointment_id}/complete", response_model=AppointmentOut)
-async def complete_appointment(appointment_id: uuid.UUID, actor: Scheduler, db: SessionDep):
+async def complete_appointment(
+    appointment_id: uuid.UUID,
+    actor: Scheduler,
+    db: SessionDep,
+    payload: CompleteIn | None = None,
+):
     """The one explicit, recorded event later phases hang behaviour on (module docstring;
     CLAUDE.md "package credits deduct on completion"). Only from `confirmed`."""
     appointment = await _lock(db, appointment_id)
@@ -1158,6 +1169,11 @@ async def complete_appointment(appointment_id: uuid.UUID, actor: Scheduler, db: 
         raise HTTPException(status_code=404, detail="No such appointment.")
     if appointment.status != "confirmed":
         return invalid_transition(appointment.status)
+    # #72: redeem the selected credit in this same transaction; any refusal raises before
+    # anything commits, leaving the appointment `confirmed`.
+    prepaid_cents = None
+    if payload is not None and payload.package_purchase_id is not None:
+        prepaid_cents = await redeem_credit(db, appointment, payload.package_purchase_id, actor.id)
     appointment.status = "completed"
     appointment.completed_at = datetime.now(UTC)
     record_event(
@@ -1173,7 +1189,7 @@ async def complete_appointment(appointment_id: uuid.UUID, actor: Scheduler, db: 
     # commission rate is snapshotted onto it now, at completion, not later at invoice issue
     # (#54's explicit M4 reversal of the older assumption). Never on cancel or no-show, which
     # never reach this line.
-    await record_draft_bill_line(db, appointment)
+    await record_draft_bill_line(db, appointment, prepaid_cents=prepaid_cents)
     await db.commit()
     await cache.bump()
     return _out(await _load(db, appointment.id))
