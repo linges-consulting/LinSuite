@@ -8,10 +8,9 @@ this module — only completion spends a credit (CLAUDE.md "package credits dedu
 completion").
 
 **Eligible** = the appointment's own customer (packages are non-transferable), credits
-activated (#71: the purchase invoice is fully paid), the purchase invoice still `issued`, a
-credit for the appointment's service with one left, and not past `expires_at` in the
-business's timezone. `_eligible` is the one place that rule lives — #73's cancelled
-entitlement belongs there too.
+activated (#71: the purchase invoice is fully paid), not voided by a refund (#73,
+`package_credit_voids`), a credit for the appointment's service with one left, and not past
+`expires_at` in the business's timezone. `_eligible` is the one place that rule lives.
 
 **Race safety.** The purchase row is locked `FOR UPDATE` before counting what is left, so a
 second completion racing for the last credit waits, recounts, and gets a clean 409. The
@@ -31,7 +30,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.capabilities import Requires
@@ -39,8 +38,8 @@ from auth.models import User
 from billing.allocation import allocate_bundle_price
 from billing.bill_review import _business, _today_in
 from billing.models import (
-    Invoice,
     PackageCreditRedemption,
+    PackageCreditVoid,
     PackagePurchase,
     PackagePurchaseCredit,
 )
@@ -78,12 +77,11 @@ async def _eligible(
     query = (
         select(PackagePurchase, PackagePurchaseCredit)
         .join(PackagePurchaseCredit)
-        .join(Invoice, Invoice.package_purchase_id == PackagePurchase.id)
         .where(
             PackagePurchase.customer_id == appointment.customer_id,
             PackagePurchase.credits_activated,
             (PackagePurchase.expires_at.is_(None)) | (PackagePurchase.expires_at >= today),
-            Invoice.status == "issued",
+            ~exists().where(PackageCreditVoid.package_purchase_id == PackagePurchase.id),
             PackagePurchaseCredit.service_id == appointment.service_id,
         )
         .order_by(PackagePurchase.purchased_at)
@@ -125,7 +123,7 @@ async def redeem_credit(
             status_code=422,
             detail=(
                 "This package can't be used for this appointment — it must belong to this "
-                "client, be fully paid, unexpired and include this service."
+                "client, be fully paid, not refunded, unexpired and include this service."
             ),
         )
     eligible = found[0]

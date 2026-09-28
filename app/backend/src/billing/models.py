@@ -1755,3 +1755,19 @@ class PackageCreditRedemption(Base):
     redeemed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class PackageCreditVoid(Base):
+    """A package purchase's unspent credits cancelled by a refund (#73, migration 0062). One
+    row per purchase, append-only; its existence makes every remaining credit unredeemable
+    (`billing/redemption.py::_eligible`, and the redemption insert guard in the database).
+    Credits already redeemed stay redeemed — voiding only reaches what is left."""
+
+    __tablename__ = "package_credit_voids"
+
+    package_purchase_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("package_purchases.id", ondelete="RESTRICT"), primary_key=True
+    )
+    reason: Mapped[str] = mapped_column(Text)
+    voided_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    voided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

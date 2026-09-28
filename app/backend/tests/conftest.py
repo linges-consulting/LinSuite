@@ -185,6 +185,7 @@ async def wipe_document_keys() -> None:
         async with owner.begin() as conn:
             # #72: append-only, and it holds appointments/users/package credits by FK.
             await conn.execute(text("DELETE FROM package_credit_redemptions"))
+            await conn.execute(text("DELETE FROM package_credit_voids"))  # #73
             await conn.execute(text("DELETE FROM documents"))  # their FK holds the keys
             await conn.execute(text("DELETE FROM form_submissions"))  # so does theirs
             await conn.execute(text("DELETE FROM session_notes"))

@@ -28,6 +28,7 @@ from billing.bill_review import BillViewer, _applicable_components, _business, _
 from billing.invoice_numbering import allocate_invoice_number
 from billing.models import (
     Invoice,
+    PackageCreditVoid,
     PackageDefinition,
     PackagePurchase,
     PackagePurchaseCredit,
@@ -79,6 +80,8 @@ class PackagePurchaseOut(BaseModel):
     purchased_at: datetime
     credits_activated: bool
     activated_at: datetime | None
+    # #73: set once a refund voided the unspent credits; none are redeemable after it.
+    credits_voided_at: datetime | None = None
     credits: list[PackagePurchaseCreditOut]
     invoice_id: str
     invoice_number: int
@@ -244,4 +247,10 @@ async def get_package_purchase(
         raise HTTPException(status_code=404, detail="No such package purchase.")
     invoice = await db.scalar(select(Invoice).where(Invoice.package_purchase_id == purchase_id))
     assert invoice is not None  # always created in the same transaction as the purchase
-    return _out(purchase, invoice)
+    out = _out(purchase, invoice)
+    out.credits_voided_at = await db.scalar(
+        select(PackageCreditVoid.voided_at).where(
+            PackageCreditVoid.package_purchase_id == purchase_id
+        )
+    )
+    return out

@@ -33,7 +33,8 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import exists, select
+from sqlalchemy import ColumnElement, exists, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from auth.capabilities import Requires
@@ -493,6 +494,63 @@ class CancelledOut(BaseModel):
     replacement_bill_id: str
 
 
+def cancel_issued(db: AsyncSession, invoice: Invoice, actor_id: uuid.UUID, reason: str) -> datetime:
+    """The one issued -> cancelled write `invoices_voidable_guard` permits, plus its audit
+    event. The caller holds the invoice's row lock, checked `status == "issued"`, and commits.
+    Shared by the #68 cancel route and #73's package refund."""
+    now = datetime.now(UTC)
+    invoice.status = "cancelled"
+    invoice.cancelled_at = now
+    invoice.cancelled_by = actor_id
+    invoice.cancel_reason = reason
+    record_event(
+        db,
+        "invoice.cancelled",
+        target_type="invoice",
+        target_id=str(invoice.id),
+        actor_user_id=actor_id,
+        metadata={
+            "invoice_number": invoice.invoice_number,
+            "reason": reason,
+            "service_bill_id": str(invoice.service_bill_id) if invoice.service_bill_id else None,
+            "package_purchase_id": (
+                str(invoice.package_purchase_id) if invoice.package_purchase_id else None
+            ),
+        },
+    )
+    return now
+
+
+async def reverse_commission(db: AsyncSession, *where: ColumnElement[bool]) -> int:
+    """Post a `reversal` for every matching `earned` posting not already reversed (a posting is
+    reversed at most once, whichever of #68's cancel or #73's refund gets there first). Dated
+    today, never backdated (#69). Returns how many were reversed; does not commit."""
+    reversal = aliased(CommissionPosting)
+    earned = list(
+        await db.scalars(
+            select(CommissionPosting).where(
+                CommissionPosting.kind == "earned",
+                ~exists().where(reversal.reverses_posting_id == CommissionPosting.id),
+                *where,
+            )
+        )
+    )
+    for posting in earned:
+        db.add(
+            CommissionPosting(
+                invoice_line_id=posting.invoice_line_id,
+                invoice_id=posting.invoice_id,
+                staff_id=posting.staff_id,
+                kind="reversal",
+                commission_rate_bp=posting.commission_rate_bp,
+                basis_cents=posting.basis_cents,
+                amount_cents=-posting.amount_cents,
+                reverses_posting_id=posting.id,
+            )
+        )
+    return len(earned)
+
+
 @router.post("/invoices/{invoice_id}/cancel")
 async def cancel_invoice(
     invoice_id: uuid.UUID, payload: CancelInvoiceIn, actor: BillViewer, db: SessionDep
@@ -515,32 +573,10 @@ async def cancel_invoice(
         )
 
     if invoice.status == "issued":
-        now = datetime.now(UTC)
-        invoice.status = "cancelled"
-        invoice.cancelled_at = now
-        invoice.cancelled_by = actor.id
-        invoice.cancel_reason = payload.reason
-
+        now = cancel_issued(db, invoice, actor.id, payload.reason)
         # Commission: reverse what the original earned, dated today (#69's own shape); the
         # replacement posts its own at issue, so the two are never counted together.
-        earned = await db.scalars(
-            select(CommissionPosting).where(
-                CommissionPosting.invoice_id == invoice.id, CommissionPosting.kind == "earned"
-            )
-        )
-        for posting in list(earned):
-            db.add(
-                CommissionPosting(
-                    invoice_line_id=posting.invoice_line_id,
-                    invoice_id=invoice.id,
-                    staff_id=posting.staff_id,
-                    kind="reversal",
-                    commission_rate_bp=posting.commission_rate_bp,
-                    basis_cents=posting.basis_cents,
-                    amount_cents=-posting.amount_cents,
-                    reverses_posting_id=posting.id,
-                )
-            )
+        await reverse_commission(db, CommissionPosting.invoice_id == invoice.id)
 
         # Reopen the bill as the replacement draft. Completion is not re-run, so no stock or
         # package credit moves. An override on an issued bill was valid at issue (issue refuses
@@ -551,19 +587,6 @@ async def cancel_invoice(
         bill.updated_at = now
         if bill.manual_override_cents is not None:
             bill.override_applied_revision = now
-
-        record_event(
-            db,
-            "invoice.cancelled",
-            target_type="invoice",
-            target_id=str(invoice.id),
-            actor_user_id=actor.id,
-            metadata={
-                "invoice_number": invoice.invoice_number,
-                "reason": payload.reason,
-                "service_bill_id": str(bill.id),
-            },
-        )
         await db.commit()
         invoice = await _load_invoice(db, invoice_id)
 
