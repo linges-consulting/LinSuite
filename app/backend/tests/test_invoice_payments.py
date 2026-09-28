@@ -57,6 +57,7 @@ async def claimed_instance(client):
             # fixture does for its four tables).
             await purge.execute(text("DELETE FROM invoice_balance_authorizations"))
             await purge.execute(text("DELETE FROM invoice_payments"))
+            await purge.execute(text("DELETE FROM invoice_payment_transfers"))  # #68
             await purge.execute(text("DELETE FROM commission_postings"))  # #69
             await purge.execute(text("DELETE FROM invoice_line_taxes"))
             await purge.execute(text("DELETE FROM invoice_line_discounts"))

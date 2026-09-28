@@ -757,7 +757,15 @@ class Invoice(Base):
     __tablename__ = "invoices"
     __table_args__ = (
         UniqueConstraint("business_id", "invoice_number", name="uq_invoices_business_number"),
-        UniqueConstraint("service_bill_id", name="uq_invoices_service_bill_id"),
+        # #68: one *live* invoice per bill — a cancelled predecessor stays beside its
+        # replacement (migration 0059); and an original is replaced at most once.
+        Index(
+            "ux_invoices_service_bill_live",
+            "service_bill_id",
+            unique=True,
+            postgresql_where=text("status = 'issued'"),
+        ),
+        UniqueConstraint("replaces_invoice_id", name="uq_invoices_replaces_invoice_id"),
         UniqueConstraint("package_purchase_id", name="uq_invoices_package_purchase_id"),
         CheckConstraint("status IN ('issued', 'cancelled')", name="ck_invoices_status"),
         CheckConstraint(
@@ -838,7 +846,10 @@ class InvoiceLine(Base):
         CheckConstraint(
             "commission_rate_bp BETWEEN 0 AND 10000", name="ck_invoice_lines_commission_bp"
         ),
-        UniqueConstraint("service_bill_line_id", name="uq_invoice_lines_service_bill_line_id"),
+        # Per invoice, not global (#68): a replacement freezes the same bill lines again.
+        UniqueConstraint(
+            "invoice_id", "service_bill_line_id", name="uq_invoice_lines_invoice_bill_line"
+        ),
         Index("ix_invoice_lines_invoice", "invoice_id"),
     )
 
@@ -1604,5 +1615,38 @@ class InvoiceBalanceAuthorization(Base):
     reason: Mapped[str] = mapped_column(Text)
     outstanding_cents_at_authorization: Mapped[int] = mapped_column(Integer)
     authorized_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class InvoicePaymentTransfer(Base):
+    """Cancel & replace (#68): the original's whole ledger position — received, received from
+    an insurer, pending insurer — carried onto its replacement at the replacement's issue, so
+    money already collected is never charged again nor counted twice. One row per replacement
+    (both ends unique); append-only (migration 0059). The payment rows themselves stay on the
+    original, never edited — `billing/payments.py::balances()` nets these sums in and out."""
+
+    __tablename__ = "invoice_payment_transfers"
+    __table_args__ = (
+        UniqueConstraint("from_invoice_id", name="uq_invoice_payment_transfers_from"),
+        UniqueConstraint("to_invoice_id", name="uq_invoice_payment_transfers_to"),
+        CheckConstraint(
+            "received_cents >= 0 AND received_insurer_cents >= 0 AND pending_insurer_cents >= 0",
+            name="ck_invoice_payment_transfers_amounts",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    from_invoice_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("invoices.id", ondelete="RESTRICT")
+    )
+    to_invoice_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoices.id", ondelete="RESTRICT"))
+    received_cents: Mapped[int] = mapped_column(Integer)
+    received_insurer_cents: Mapped[int] = mapped_column(Integer)
+    pending_insurer_cents: Mapped[int] = mapped_column(Integer)
+    transferred_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    transferred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

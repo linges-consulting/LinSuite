@@ -53,6 +53,7 @@ async def claimed_instance(client):
             await purge.execute(text("DELETE FROM form_links"))
             # #69's commission ledger references `invoice_lines`/`invoices` with `ON DELETE
             # RESTRICT` too — must go before them, same "children before parents" rule.
+            await purge.execute(text("DELETE FROM invoice_payment_transfers"))  # #68
             await purge.execute(text("DELETE FROM commission_postings"))
             # #65's own append-only/voidable tables — purge-role-bypassed (migration 0054),
             # and must go before `service_bills`/`appointments`/`services`/`staff`/`customers`

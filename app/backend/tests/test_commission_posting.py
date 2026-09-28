@@ -42,6 +42,7 @@ async def claimed_instance(client):
             # Children before parents (`ON DELETE RESTRICT` all the way down): the commission
             # ledger references `invoice_lines`/`invoices`, both of which #65's own tables
             # already reference `service_bills`/`appointments`/etc.
+            await purge.execute(text("DELETE FROM invoice_payment_transfers"))  # #68
             await purge.execute(text("DELETE FROM commission_postings"))
             await purge.execute(text("DELETE FROM invoice_line_taxes"))
             await purge.execute(text("DELETE FROM invoice_line_discounts"))
