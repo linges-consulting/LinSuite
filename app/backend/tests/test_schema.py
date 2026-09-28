@@ -70,6 +70,11 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "invoice_lines": ("SELECT", "INSERT"),
     "invoice_line_discounts": ("SELECT", "INSERT"),
     "invoice_line_taxes": ("SELECT", "INSERT"),
+    # Voidable-adjacent (#71, 0055): UPDATE stays granted for the one permitted activation
+    # transition `package_purchases_activation_guard` checks for; DELETE never does.
+    "package_purchases": ("SELECT", "INSERT", "UPDATE"),
+    # Frozen credit-grant rows: append-only, same shape as `invoice_lines` (#71, 0055).
+    "package_purchase_credits": ("SELECT", "INSERT"),
 }
 # The purge role reads and deletes everywhere and writes nowhere — except the fact of its own
 # purge, which ADR-0001 §6 puts in the purge transaction (0024, pre-flight D11).
@@ -98,6 +103,8 @@ TRIGGERS = (
     ("invoice_lines", "invoice_lines_no_rewrite"),
     ("invoice_line_discounts", "invoice_line_discounts_no_rewrite"),
     ("invoice_line_taxes", "invoice_line_taxes_no_rewrite"),
+    ("package_purchases", "package_purchases_activation_guard"),
+    ("package_purchase_credits", "package_purchase_credits_no_rewrite"),
 )
 
 

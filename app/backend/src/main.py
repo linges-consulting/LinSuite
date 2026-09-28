@@ -20,6 +20,7 @@ from auth.setup import router as setup_router
 from billing.bill_authority import router as bill_authority_router
 from billing.bill_review import router as bill_review_router
 from billing.invoices import router as invoices_router
+from billing.package_purchase import router as package_purchase_router
 from billing.packages import router as package_definitions_router
 from billing.routes import router as discounts_router
 from billing.tax_routes import router as tax_router
@@ -312,4 +313,8 @@ api.include_router(bill_authority_router)
 # issued, immutable invoice (`billing.view`, Staff Mode — checkout, not an admin action), plus
 # `GET /invoices`/`GET /invoices/{id}` to read one back from its own frozen snapshot.
 api.include_router(invoices_router)
+# Package/bundle purchase (#71): `POST /packages/{id}/purchase` issues an invoice through the
+# exact same machinery as #65 — same counter, same `Invoice` table (`billing.view`, Staff
+# Mode). Credits are frozen but never activated here; see `billing/package_purchase.py`.
+api.include_router(package_purchase_router)
 app.include_router(api)

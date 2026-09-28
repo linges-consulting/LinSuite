@@ -82,7 +82,13 @@ class InvoiceOut(BaseModel):
     id: str
     business_id: int
     invoice_number: int
-    service_bill_id: str
+    # Exactly one of these two is set (#71, `ck_invoices_source_xor`) — a service invoice has
+    # `service_bill_id` and empty `lines`; a package-purchase invoice has `package_purchase_id`
+    # and empty `lines` (its own frozen shape is read via `GET /packages/purchases/{id}`,
+    # `billing/package_purchase.py` — kept off this endpoint so `InvoiceOut` does not have to
+    # duplicate that module's response shape here).
+    service_bill_id: str | None
+    package_purchase_id: str | None
     customer_id: str
     status: str
     computed_subtotal_cents: int
@@ -142,7 +148,10 @@ def _invoice_out(invoice: Invoice) -> InvoiceOut:
         id=str(invoice.id),
         business_id=invoice.business_id,
         invoice_number=invoice.invoice_number,
-        service_bill_id=str(invoice.service_bill_id),
+        service_bill_id=str(invoice.service_bill_id) if invoice.service_bill_id else None,
+        package_purchase_id=(
+            str(invoice.package_purchase_id) if invoice.package_purchase_id else None
+        ),
         customer_id=str(invoice.customer_id),
         status=invoice.status,
         computed_subtotal_cents=invoice.computed_subtotal_cents,
