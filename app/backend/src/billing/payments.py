@@ -32,7 +32,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.capabilities import Requires
 from auth.models import User
 from billing.bill_review import BillViewer
-from billing.models import Invoice, InvoiceBalanceAuthorization, InvoicePayment
+from billing.models import (
+    Invoice,
+    InvoiceBalanceAuthorization,
+    InvoiceLine,
+    InvoicePayment,
+    PackagePurchase,
+)
+from billing.package_purchase import activate_credits
 from core.audit import record_event
 from core.db import SessionDep
 
@@ -57,16 +64,19 @@ class Balance:
       the pending insurer portion. This is what the checkout gate checks (spec #54: pending
       insurer money does not by itself block checkout once the client portion is settled).
     - `checkout_complete`: client portion settled, or an admin/owner exception exists.
+    - `prepaid_cents` (#72): the part of `grand_total_cents` redeemed package credits already
+      settled (`InvoiceLine.prepaid_cents`) — never owed, never counted as a payment.
     """
 
     outstanding_cents: int
     pending_insurer_cents: int
     client_outstanding_cents: int
     checkout_complete: bool
+    prepaid_cents: int = 0
 
 
 async def balances(db: AsyncSession, invoices: list[Invoice]) -> dict[uuid.UUID, Balance]:
-    """Batched: two queries regardless of list length (the billing list's own reader)."""
+    """Batched: three queries regardless of list length (the billing list's own reader)."""
     ids = [i.id for i in invoices]
     if not ids:
         return {}
@@ -94,10 +104,20 @@ async def balances(db: AsyncSession, invoices: list[Invoice]) -> dict[uuid.UUID,
             .distinct()
         )
     )
+    prepaid_by_invoice = dict(
+        (
+            await db.execute(
+                select(InvoiceLine.invoice_id, func.sum(InvoiceLine.prepaid_cents))
+                .where(InvoiceLine.invoice_id.in_(ids))
+                .group_by(InvoiceLine.invoice_id)
+            )
+        ).all()
+    )
     out = {}
     for invoice in invoices:
         received_all, pending, received_insurer = sums.get(invoice.id, (0, 0, 0))
-        outstanding = invoice.grand_total_cents - received_all
+        prepaid = prepaid_by_invoice.get(invoice.id, 0)
+        outstanding = invoice.grand_total_cents - prepaid - received_all
         pending_insurer = max(pending - received_insurer, 0)
         client_outstanding = outstanding - pending_insurer
         out[invoice.id] = Balance(
@@ -105,6 +125,7 @@ async def balances(db: AsyncSession, invoices: list[Invoice]) -> dict[uuid.UUID,
             pending_insurer_cents=pending_insurer,
             client_outstanding_cents=client_outstanding,
             checkout_complete=client_outstanding <= 0 or invoice.id in excepted,
+            prepaid_cents=prepaid,
         )
     return out
 
@@ -237,6 +258,15 @@ async def record_payment(
             "amount_cents": payload.amount_cents,
         },
     )
+    # #71/#72: a package purchase's credits activate the moment its invoice is fully paid —
+    # money actually received, never a pending insurer allocation or a balance exception.
+    if (
+        invoice.package_purchase_id is not None
+        and (await balance(db, invoice)).outstanding_cents <= 0
+    ):
+        purchase = await db.get(PackagePurchase, invoice.package_purchase_id)
+        assert purchase is not None
+        await activate_credits(db, purchase)
     await db.commit()
     return _payment_out(payment)
 

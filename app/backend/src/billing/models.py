@@ -125,6 +125,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     SmallInteger,
@@ -473,6 +474,10 @@ class ServiceBillLine(Base):
     __table_args__ = (
         CheckConstraint("price_cents >= 0", name="ck_service_bill_lines_price"),
         CheckConstraint(
+            "prepaid_cents >= 0 AND prepaid_cents <= price_cents",
+            name="ck_service_bill_lines_prepaid",
+        ),
+        CheckConstraint(
             "commission_rate_bp BETWEEN 0 AND 10000", name="ck_service_bill_lines_commission_bp"
         ),
     )
@@ -492,6 +497,10 @@ class ServiceBillLine(Base):
     # The snapshot this whole ticket exists for: `Staff.commission_rate_services_bp` *at
     # completion*, never re-read at invoice issue (#65) or report time (#69).
     commission_rate_bp: Mapped[int] = mapped_column(Integer)
+    # #72: non-zero only when completion redeemed a package credit for this visit — then
+    # `price_cents` *is* that credit's frozen per-session value and this equals it: a prepaid
+    # settlement, never a new amount to collect (no discount, no second tax on it).
+    prepaid_cents: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -836,6 +845,10 @@ class InvoiceLine(Base):
     __table_args__ = (
         CheckConstraint("price_cents >= 0", name="ck_invoice_lines_price"),
         CheckConstraint(
+            "prepaid_cents >= 0 AND prepaid_cents <= line_total_cents",
+            name="ck_invoice_lines_prepaid",
+        ),
+        CheckConstraint(
             "commission_rate_bp BETWEEN 0 AND 10000", name="ck_invoice_lines_commission_bp"
         ),
         UniqueConstraint("service_bill_line_id", name="uq_invoice_lines_service_bill_line_id"),
@@ -860,6 +873,9 @@ class InvoiceLine(Base):
     pretax_cents: Mapped[int] = mapped_column(Integer)
     tax_cents: Mapped[int] = mapped_column(Integer)
     line_total_cents: Mapped[int] = mapped_column(Integer)
+    # #72: frozen off `ServiceBillLine.prepaid_cents` — the part of `line_total_cents` a
+    # redeemed package credit already settled. `billing/payments.py::balances` subtracts it.
+    prepaid_cents: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     discounts: Mapped[list["InvoiceLineDiscount"]] = relationship(lazy="selectin")
@@ -1604,5 +1620,55 @@ class InvoiceBalanceAuthorization(Base):
     reason: Mapped[str] = mapped_column(Text)
     outstanding_cents_at_authorization: Mapped[int] = mapped_column(Integer)
     authorized_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class PackageCreditRedemption(Base):
+    """One package credit spent on one completed appointment (#72) — the append-only
+    redemption ledger (migration 0059). Written only by `billing/redemption.py::redeem_credit`,
+    inside `complete_appointment`'s own transaction. Remaining credits for a
+    `PackagePurchaseCredit` = its `credits_total` minus its rows here; never a stored counter.
+
+    `sequence` is this credit's 1-based spend number: unique per `(package_purchase_id,
+    service_id)` and, by the insert trigger, never past `credits_total` nor against an
+    unactivated purchase — so the database alone makes the last credit unspendable twice.
+    `value_cents` is the frozen per-session share of the credit's `allocated_price_cents`
+    (`allocate_bundle_price` across `credits_total` equal weights), the attributable value the
+    visit's bill line, invoice line, receipt and commission all carry."""
+
+    __tablename__ = "package_credit_redemptions"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["package_purchase_id", "service_id"],
+            [
+                "package_purchase_credits.package_purchase_id",
+                "package_purchase_credits.service_id",
+            ],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("sequence >= 1", name="ck_package_credit_redemptions_sequence"),
+        CheckConstraint("value_cents >= 0", name="ck_package_credit_redemptions_value"),
+        UniqueConstraint(
+            "package_purchase_id",
+            "service_id",
+            "sequence",
+            name="uq_package_credit_redemptions_sequence",
+        ),
+        UniqueConstraint("appointment_id", name="uq_package_credit_redemptions_appointment"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    package_purchase_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    service_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    sequence: Mapped[int] = mapped_column(SmallInteger)
+    appointment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("appointments.id", ondelete="RESTRICT")
+    )
+    value_cents: Mapped[int] = mapped_column(Integer)
+    redeemed_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    redeemed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

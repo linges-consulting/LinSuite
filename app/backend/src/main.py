@@ -24,6 +24,7 @@ from billing.invoices import router as invoices_router
 from billing.package_purchase import router as package_purchase_router
 from billing.packages import router as package_definitions_router
 from billing.payments import router as invoice_payments_router
+from billing.redemption import router as package_credits_router
 from billing.retail_sales import router as retail_sales_router
 from billing.routes import router as discounts_router
 from billing.tax_routes import router as tax_router
@@ -334,4 +335,6 @@ api.include_router(commission_report_router)
 # Outstanding balance and checkout-complete are derived, never stored — see `billing/payments.
 # py`'s own docstring.
 api.include_router(invoice_payments_router)
+# #72: what an appointment could redeem on completion (`schedule.manage`).
+api.include_router(package_credits_router)
 app.include_router(api)

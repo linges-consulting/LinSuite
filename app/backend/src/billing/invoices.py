@@ -110,6 +110,7 @@ class InvoiceLineOut(BaseModel):
     pretax_cents: int
     tax_cents: int
     line_total_cents: int
+    prepaid_cents: int
     discounts: list[InvoiceLineDiscountOut]
     taxes: list[InvoiceLineTaxOut]
 
@@ -144,6 +145,7 @@ class InvoiceOut(BaseModel):
     pending_insurer_cents: int
     client_outstanding_cents: int
     checkout_complete: bool
+    prepaid_cents: int
 
 
 class InvoiceSummaryOut(BaseModel):
@@ -157,6 +159,7 @@ class InvoiceSummaryOut(BaseModel):
     pending_insurer_cents: int
     client_outstanding_cents: int
     checkout_complete: bool
+    prepaid_cents: int
 
 
 def _line_out(line: InvoiceLine) -> InvoiceLineOut:
@@ -170,6 +173,7 @@ def _line_out(line: InvoiceLine) -> InvoiceLineOut:
         pretax_cents=line.pretax_cents,
         tax_cents=line.tax_cents,
         line_total_cents=line.line_total_cents,
+        prepaid_cents=line.prepaid_cents,
         discounts=[
             InvoiceLineDiscountOut(
                 discount_id=str(d.discount_id),
@@ -322,6 +326,7 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
             pretax_cents=line_out.tax.pretax_cents,
             tax_cents=line_out.tax.tax_cents,
             line_total_cents=line_out.line_total_cents,
+            prepaid_cents=bill_line.prepaid_cents,
         )
         db.add(invoice_line)
         await db.flush()

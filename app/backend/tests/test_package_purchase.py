@@ -54,6 +54,7 @@ async def claimed_instance(client):
             # #71's own guarded tables, purge-role-bypassed (migration 0055) — must go before
             # `invoices`/`package_definitions`/`customers`/`services` below, all of which they
             # reference with `ON DELETE RESTRICT`.
+            await purge.execute(text("DELETE FROM package_credit_redemptions"))  # #72
             await purge.execute(text("DELETE FROM package_purchase_credits"))
             await purge.execute(text("DELETE FROM commission_postings"))  # #69
             await purge.execute(text("DELETE FROM invoice_line_taxes"))

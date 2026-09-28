@@ -292,7 +292,12 @@ def render_receipt_html(
         address_lines=_address_lines(business),
         receipt_number=receipt_number(invoice, ordinal),
         service_date=appointment.starts_at.astimezone(zone).strftime("%Y-%m-%d"),
-        payment_status=payment_status_label(invoice),
+        # #72: a redeemed visit was settled by its package credit, not a payment on this date.
+        payment_status=(
+            "Prepaid (package credit)"
+            if (line.prepaid_cents or 0) > 0
+            else payment_status_label(invoice)
+        ),
         show_clinical=show_clinical_fields(business),
         taxes=taxes,
         money=money,
