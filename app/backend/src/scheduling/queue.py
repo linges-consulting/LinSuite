@@ -52,6 +52,21 @@ below, per waiting entry — see that function's own docstring for the wiring de
 `queue_wait.py`'s module docstring for why. `QueueEntryOut.estimated_wait_minutes` is the field
 name Task 8 reads; it is `None` for a non-`waiting` entry and for every other endpoint's own
 single-entry response.
+
+**Essential-form gaps** (Task 7, #12): `forms/compliance.py::_compliance` — real, on `main`
+since M2, called directly (not a stub) — is wired into `list_queue` too, the same way Task 6's
+estimate is: computed fresh on every read, never cached at add-time, so a form completed
+between two polls of the display disappears on the very next `GET`. `QueueEntryOut.
+compliance_gaps` is the field name Task 8 reads: `list[ComplianceEntry]` (`forms.compliance`'s
+own schema, reused rather than a second one) for every entry `list_queue` returns — `[]` for a
+customer with no essential-form gaps, **and also `[]` for a `bare_name` entry with no
+`customer_id` at all**, mirroring `_compliance`'s own "nothing to report" shape for a compliant
+customer (an empty list, never a status) rather than inventing a third shape for "no chart to
+check". `None` for every other endpoint's own single-entry response (`add`/`abandon`/`start`)
+— same "not computed here" convention `estimated_wait_minutes` already uses; only the list
+endpoint has already paid for the one bulk query per request. One `_compliance` call per
+`GET`, batched over every entry's distinct `customer_id` in the response (never one call per
+entry — `_compliance`'s own module docstring: "no N+1").
 """
 
 import uuid
@@ -72,6 +87,7 @@ from core.audit import record_event
 from core.db import SessionDep
 from customers.models import Customer
 from customers.routes import CustomerIn, create_customer
+from forms.compliance import ComplianceEntry, _compliance
 from notifications.triggers import load_business
 from scheduling import cache
 from scheduling._admin_forms import refuse
@@ -175,9 +191,17 @@ class QueueEntryOut(BaseModel):
     # a non-`waiting` entry (nothing left to wait for) and for every other endpoint's own
     # single-entry response (`add`/`abandon`/`start`).
     estimated_wait_minutes: int | None
+    # Phase 7 Task 7: `forms.compliance.ComplianceEntry` list, recomputed on every `list_queue`
+    # read (module docstring above) — `[]` for no gaps *or* for a `bare_name` entry with no
+    # chart to check, `None` for every other endpoint's own single-entry response.
+    compliance_gaps: list[ComplianceEntry] | None
 
 
-def _out(entry: QueueEntry, estimated_wait_minutes: int | None = None) -> QueueEntryOut:
+def _out(
+    entry: QueueEntry,
+    estimated_wait_minutes: int | None = None,
+    compliance_gaps: list[ComplianceEntry] | None = None,
+) -> QueueEntryOut:
     return QueueEntryOut(
         id=str(entry.id),
         status=entry.status,
@@ -202,6 +226,7 @@ def _out(entry: QueueEntry, estimated_wait_minutes: int | None = None) -> QueueE
         bare_name=entry.bare_name,
         bare_phone=entry.bare_phone,
         estimated_wait_minutes=estimated_wait_minutes,
+        compliance_gaps=compliance_gaps,
     )
 
 
@@ -294,6 +319,7 @@ async def list_queue(_: Manager, db: SessionDep, include_abandoned: bool = False
     check, which only ever makes the estimate a little optimistic, never wrong in a way that
     blocks anything (it feeds a display number, not a gate)."""
     await _feature_gate(db)
+    zone = await business_zone(db)
     # `arrived_at` then `id` — the same tie-break `customers/routes.py::find_customers` uses,
     # so two entries that land in the same instant never swap places between requests.
     query = select(QueueEntry).order_by(QueueEntry.arrived_at, QueueEntry.id)
@@ -326,7 +352,25 @@ async def list_queue(_: Manager, db: SessionDep, include_abandoned: bool = False
         estimates[entry.id] = round(wait.total_seconds() / 60)
         ahead.append(timedelta(minutes=entry.requested_service.duration_minutes))
 
-    return QueueOut(entries=[_out(e, estimates.get(e.id)) for e in entries])
+    # Task 7: one bulk `_compliance` call for the whole response, over every distinct
+    # `customer_id` among the entries returned — never one call per entry. A `bare_name` entry
+    # has no `customer_id` to look up at all, so it never enters this batch; its gaps are `[]`
+    # below, the same "nothing to report" shape a compliant customer's `.get(...)` miss gets.
+    customer_ids = {e.customer_id for e in entries if e.customer_id is not None}
+    gaps_by_customer = (
+        await _compliance(db, list(customer_ids), now=now, zone=str(zone)) if customer_ids else {}
+    )
+
+    return QueueOut(
+        entries=[
+            _out(
+                e,
+                estimates.get(e.id),
+                gaps_by_customer.get(e.customer_id, []) if e.customer_id is not None else [],
+            )
+            for e in entries
+        ]
+    )
 
 
 @router.post("/{entry_id}/abandon", response_model=QueueEntryOut)

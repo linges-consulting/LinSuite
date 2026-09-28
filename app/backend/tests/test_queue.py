@@ -11,6 +11,8 @@ from sqlalchemy import text
 
 from core.db import get_purge_engine, session_scope
 from tests.conftest import wipe_document_keys
+from tests.test_form_compliance import _essential_template, _sign_v1
+from tests.test_forms import _wipe_forms
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -32,6 +34,12 @@ QUEUE = "/api/queue-entries"
 
 @pytest.fixture(autouse=True)
 async def claimed_instance(client):
+    # Task 7's own tests are the first thing in this file to touch form templates — wiped the
+    # same way `tests/test_forms.py`'s own fixture does (owner-role delete; `form_templates`/
+    # `form_template_versions`/`form_submissions` are immutable to the app role), both before
+    # and after, so a template created here never leaks into another file's compliance test.
+    await _wipe_forms()
+
     async def wipe():
         async with get_purge_engine().begin() as purge:
             await purge.execute(text("DELETE FROM audit_events"))
@@ -76,6 +84,7 @@ async def claimed_instance(client):
         await db.commit()
     client.cookies.clear()
     yield
+    await _wipe_forms()
 
 
 # --- helpers ----------------------------------------------------------------------------------
@@ -486,3 +495,72 @@ async def test_a_non_waiting_entry_carries_no_wait_estimate(client):
     full_list = await client.get(QUEUE, params={"include_abandoned": "true"})
     entry = next(e for e in full_list.json()["entries"] if e["id"] == entry_id)
     assert entry["estimated_wait_minutes"] is None
+
+
+# --- essential-form gaps (Task 7) ----------------------------------------------------------------
+
+
+async def test_a_missing_essential_form_shows_as_a_gap_and_clears_once_signed(client):
+    """The literal acceptance criterion: computed live at every `list_queue` read, never cached
+    at add-time — signing the form between two `GET`s changes the second read's answer."""
+    await as_admin(client)
+    await enable_queue(client)
+    service = await make_service(client)
+    template = await _essential_template(client)  # applies_to_all=True — no appointment needed
+    customer_id = await make_customer(client)
+    await client.post(QUEUE, json={"customer_id": customer_id, "requested_service_id": service})
+
+    before = await client.get(QUEUE)
+    assert before.json()["entries"][0]["compliance_gaps"] == [
+        {"template_id": template["id"], "name": template["name"], "status": "missing"}
+    ]
+
+    await _sign_v1(client, customer_id, template["id"])
+
+    after = await client.get(QUEUE)
+    assert after.json()["entries"][0]["compliance_gaps"] == []
+
+
+async def test_a_fully_compliant_customers_entry_shows_no_gaps(client):
+    await as_admin(client)
+    await enable_queue(client)
+    service = await make_service(client)
+    template = await _essential_template(client)
+    customer_id = await make_customer(client)
+    await _sign_v1(client, customer_id, template["id"])
+
+    await client.post(QUEUE, json={"customer_id": customer_id, "requested_service_id": service})
+    listed = await client.get(QUEUE)
+    assert listed.json()["entries"][0]["compliance_gaps"] == []
+
+
+async def test_a_bare_name_entry_has_no_chart_and_shows_the_same_empty_shape_as_compliant(client):
+    """No `customer_id` at all to check — mirrors `_compliance`'s own "nothing to report" shape
+    for a compliant customer (an empty list), never a third shape for "no chart to check"."""
+    await as_admin(client)
+    await enable_queue(client)
+    service = await make_service(client)
+    await _essential_template(client)  # a real gap exists for anyone with a chart to check
+
+    await client.post(QUEUE, json={"bare_name": "Walk-in Jamie", "requested_service_id": service})
+    listed = await client.get(QUEUE)
+    assert listed.json()["entries"][0]["compliance_gaps"] == []
+
+
+async def test_single_entry_responses_do_not_compute_compliance_gaps(client):
+    """Same "not computed here" convention `estimated_wait_minutes` already uses — only
+    `list_queue` has paid for the one bulk `_compliance` query."""
+    await as_admin(client)
+    await enable_queue(client)
+    service = await make_service(client)
+    await _essential_template(client)
+    customer_id = await make_customer(client)
+
+    added = await client.post(
+        QUEUE, json={"customer_id": customer_id, "requested_service_id": service}
+    )
+    assert added.json()["compliance_gaps"] is None
+
+    entry_id = added.json()["id"]
+    abandoned = await client.post(f"{QUEUE}/{entry_id}/abandon", json={})
+    assert abandoned.json()["compliance_gaps"] is None
