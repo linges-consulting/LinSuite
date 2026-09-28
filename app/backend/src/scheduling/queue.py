@@ -46,6 +46,12 @@ one), gated by `queue_eligibility.can_start` (Task 4) before ever touching it �
 implementation of the physical/advisory checks either. `cache.bump()` *is* called there, once
 the new `Appointment` actually commits — the one write in this file that changes bookability;
 add/list/abandon still never call it, unchanged from Task 2.
+
+**Wait estimate** (Task 6, `scheduling/queue_wait.py::estimate_wait`) is wired into `list_queue`
+below, per waiting entry — see that function's own docstring for the wiring decision and
+`queue_wait.py`'s module docstring for why. `QueueEntryOut.estimated_wait_minutes` is the field
+name Task 8 reads; it is `None` for a non-`waiting` entry and for every other endpoint's own
+single-entry response.
 """
 
 import uuid
@@ -82,6 +88,7 @@ from scheduling.appointments import _out as _appointment_out
 from scheduling.availability import ServiceSpec
 from scheduling.models import Appointment, AppointmentResource, Closure, QueueEntry, Service, Staff
 from scheduling.queue_eligibility import can_start
+from scheduling.queue_wait import estimate_wait
 from scheduling.services import catalog_entry
 from scheduling.slots import active_resources, busy_intervals, staff_specs, unbookable
 from scheduling.time_off import business_zone
@@ -162,9 +169,15 @@ class QueueEntryOut(BaseModel):
     # Phase 7 Task 5: set once `start` converts this entry — Task 8's display screen reads it
     # to link through to the appointment (session notes, treatment receipt, and so on).
     appointment_id: str | None
+    # Phase 7 Task 6: an **estimate**, never a promise — `scheduling/queue_wait.py`'s own
+    # module docstring on why this is worded this way. Only ever set by `list_queue`, which is
+    # the one place with enough context (who else is ahead) to compute it cheaply; `None` for
+    # a non-`waiting` entry (nothing left to wait for) and for every other endpoint's own
+    # single-entry response (`add`/`abandon`/`start`).
+    estimated_wait_minutes: int | None
 
 
-def _out(entry: QueueEntry) -> QueueEntryOut:
+def _out(entry: QueueEntry, estimated_wait_minutes: int | None = None) -> QueueEntryOut:
     return QueueEntryOut(
         id=str(entry.id),
         status=entry.status,
@@ -188,6 +201,7 @@ def _out(entry: QueueEntry) -> QueueEntryOut:
         appointment_id=str(entry.appointment_id) if entry.appointment_id is not None else None,
         bare_name=entry.bare_name,
         bare_phone=entry.bare_phone,
+        estimated_wait_minutes=estimated_wait_minutes,
     )
 
 
@@ -261,7 +275,24 @@ class QueueOut(BaseModel):
 @router.get("", response_model=QueueOut)
 async def list_queue(_: Manager, db: SessionDep, include_abandoned: bool = False):
     """Oldest arrival first — first in, first served. Abandoned entries are left out unless
-    `include_abandoned` is set (module docstring's own documented call)."""
+    `include_abandoned` is set (module docstring's own documented call).
+
+    **Task 6's wait estimate** is computed here, per waiting entry, since this is the one place
+    that already has every waiting entry in arrival order — exactly what "how many are ahead of
+    me" needs. For each waiting entry: "entries ahead" is every other waiting entry that arrived
+    earlier (the list is already in that order, so this is just the ones already iterated);
+    "available staff" is a plain headcount — this entry's requested service's active eligible
+    staff (`Service.eligible_staff`, the same set `services.py::_catalog_out` reads for
+    `staff_ids`) who are not busy *right now* (`scheduling/slots.py::busy_intervals`, the exact
+    query `compute()`/`start_queue_entry` already use, asked about the single instant `now`
+    rather than a window — one appointment overlapping this instant is "mid-appointment or
+    in-service on another queue conversion right now", since a converted queue entry already is
+    a real `Appointment` by the time it is `in_service`). Deliberately **not**
+    `queue_eligibility.can_start`'s shift/time-off/closure machinery — Task 6's own brief calls
+    for a headcount here, not a second eligibility engine; a staff member off-shift right now
+    who nonetheless has no clashing appointment is counted as "available" by this cheaper
+    check, which only ever makes the estimate a little optimistic, never wrong in a way that
+    blocks anything (it feeds a display number, not a gate)."""
     await _feature_gate(db)
     # `arrived_at` then `id` — the same tie-break `customers/routes.py::find_customers` uses,
     # so two entries that land in the same instant never swap places between requests.
@@ -269,7 +300,33 @@ async def list_queue(_: Manager, db: SessionDep, include_abandoned: bool = False
     if not include_abandoned:
         query = query.where(QueueEntry.status != "abandoned")
     entries = list(await db.scalars(query))
-    return QueueOut(entries=[_out(e) for e in entries])
+
+    waiting = [e for e in entries if e.status == "waiting"]
+    now = datetime.now(UTC)
+    # One query for the whole response, not one per entry: every staff id eligible for any
+    # waiting entry's service, asked in a single `busy_intervals` call about the single instant
+    # `now` (a zero-width window — its own `starts < window[1] and ends > window[0]` collapses
+    # to "does an occupying appointment cover this instant").
+    all_eligible_ids = {
+        link.staff_id
+        for entry in waiting
+        for link in entry.requested_service.eligible_staff
+        if link.staff.active
+    }
+    staff_busy, _resource_busy = await busy_intervals(db, all_eligible_ids, [], (now, now))
+
+    estimates: dict[uuid.UUID, int] = {}
+    ahead: list[timedelta] = []
+    for entry in waiting:
+        eligible_ids = {
+            link.staff_id for link in entry.requested_service.eligible_staff if link.staff.active
+        }
+        available = sum(1 for s in eligible_ids if s not in staff_busy)
+        wait = estimate_wait(ahead, available)
+        estimates[entry.id] = round(wait.total_seconds() / 60)
+        ahead.append(timedelta(minutes=entry.requested_service.duration_minutes))
+
+    return QueueOut(entries=[_out(e, estimates.get(e.id)) for e in entries])
 
 
 @router.post("/{entry_id}/abandon", response_model=QueueEntryOut)

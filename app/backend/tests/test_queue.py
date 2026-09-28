@@ -113,12 +113,32 @@ async def enable_queue(client) -> None:
     assert resp.status_code == 200, resp.text
 
 
-async def make_service(client, **overrides) -> str:
+async def make_service(client, staff_ids: list[str] | None = None, **overrides) -> str:
     body = {"name": "Haircut", "duration_minutes": 30, "price_cents": 4000}
     body.update(overrides)
     created = await client.post(SERVICES, json=body)
     assert created.status_code == 201, created.text
-    return created.json()["id"]
+    service_id = created.json()["id"]
+    if staff_ids is not None:
+        linked = await client.put(f"{SERVICES}/{service_id}/staff", json={"staff_ids": staff_ids})
+        assert linked.status_code == 200, linked.text
+    return service_id
+
+
+async def add_staff(client, email: str, password: str) -> str:
+    """A second staff account, purely as a body eligible to deliver a service — Task 6's
+    "available staff count" needs more than one candidate to prove the split arithmetic."""
+    from core.security import hash_password
+    from tests.conftest import add_account
+
+    await add_account(email, await hash_password(password))
+    roster = await client.get("/api/admin/staff")
+    return next(row["id"] for row in roster.json()["staff"] if row["email"] == email)
+
+
+async def me_staff_id(client) -> str:
+    roster = await client.get("/api/admin/staff")
+    return next(row["id"] for row in roster.json()["staff"] if row["email"] == EMAIL)
 
 
 async def make_customer(client, **overrides) -> str:
@@ -398,3 +418,71 @@ async def test_abandoning_an_unknown_entry_is_a_404(client):
     await enable_queue(client)
     resp = await client.post(f"{QUEUE}/00000000-0000-0000-0000-000000000000/abandon", json={})
     assert resp.status_code == 404
+
+
+# --- wait estimate (Task 6) ---------------------------------------------------------------------
+
+
+async def test_the_first_waiting_entry_has_a_zero_minute_estimate(client):
+    await as_admin(client)
+    await enable_queue(client)
+    me = await me_staff_id(client)
+    service = await make_service(client, staff_ids=[me])
+
+    # `add`'s own single-entry response has no view of who else is ahead of it — only the list
+    # endpoint computes this (module docstring's own documented call).
+    added = await client.post(QUEUE, json={"bare_name": "Jo", "requested_service_id": service})
+    assert added.json()["estimated_wait_minutes"] is None
+
+    listed = await client.get(QUEUE)
+    assert listed.json()["entries"][0]["estimated_wait_minutes"] == 0
+
+
+async def test_the_estimate_splits_remaining_service_time_across_available_staff(client):
+    await as_admin(client)
+    await enable_queue(client)
+    me = await me_staff_id(client)
+    colleague = await add_staff(client, "colleague@cedar.example", "correct horse battery 2")
+    # 30-minute service, two eligible staff, neither with any conflicting appointment: the
+    # literal arithmetic `test_queue_wait.py::test_split_across_available_staff` already pins.
+    service = await make_service(client, staff_ids=[me, colleague], duration_minutes=30)
+
+    await client.post(QUEUE, json={"bare_name": "First", "requested_service_id": service})
+    await client.post(QUEUE, json={"bare_name": "Second", "requested_service_id": service})
+    await client.post(QUEUE, json={"bare_name": "Third", "requested_service_id": service})
+
+    listed = await client.get(QUEUE)
+    estimates = [e["estimated_wait_minutes"] for e in listed.json()["entries"]]
+    assert estimates == [0, 15, 30]
+
+
+async def test_zero_eligible_staff_still_returns_a_finite_floored_estimate(client):
+    """No staff assigned to the service at all — `available_staff_count` is 0, floored to 1
+    (`queue_wait.py`'s own documented choice) rather than raising or reporting an instant "0"
+    wait for someone who is, in fact, second in an unstaffed line."""
+    await as_admin(client)
+    await enable_queue(client)
+    service = await make_service(client, staff_ids=[], duration_minutes=30)
+
+    await client.post(QUEUE, json={"bare_name": "First", "requested_service_id": service})
+    await client.post(QUEUE, json={"bare_name": "Second", "requested_service_id": service})
+
+    listed = await client.get(QUEUE)
+    estimates = [e["estimated_wait_minutes"] for e in listed.json()["entries"]]
+    assert estimates == [0, 30]
+
+
+async def test_a_non_waiting_entry_carries_no_wait_estimate(client):
+    await as_admin(client)
+    await enable_queue(client)
+    me = await me_staff_id(client)
+    service = await make_service(client, staff_ids=[me])
+    added = await client.post(QUEUE, json={"bare_name": "Gone", "requested_service_id": service})
+    entry_id = added.json()["id"]
+
+    abandoned = await client.post(f"{QUEUE}/{entry_id}/abandon", json={})
+    assert abandoned.json()["estimated_wait_minutes"] is None
+
+    full_list = await client.get(QUEUE, params={"include_abandoned": "true"})
+    entry = next(e for e in full_list.json()["entries"] if e["id"] == entry_id)
+    assert entry["estimated_wait_minutes"] is None
