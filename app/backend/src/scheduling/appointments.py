@@ -51,7 +51,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import Range
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -76,7 +76,7 @@ from scheduling.availability import (
     waive_handover,
 )
 from scheduling.clock import localize
-from scheduling.models import Appointment, AppointmentResource, Staff
+from scheduling.models import Appointment, AppointmentResource, QueueEntry, Staff
 from scheduling.services import CatalogServiceOut, RequirementOut, catalog_entry
 from scheduling.slots import Computed, ResourceRow, check_range, compute, unbookable, utc
 from scheduling.time_off import business_zone
@@ -1134,7 +1134,15 @@ def _cancel(
 @router.post("/{appointment_id}/complete", response_model=AppointmentOut)
 async def complete_appointment(appointment_id: uuid.UUID, actor: Scheduler, db: SessionDep):
     """The one explicit, recorded event later phases hang behaviour on (module docstring;
-    CLAUDE.md "package credits deduct on completion"). Only from `confirmed`."""
+    CLAUDE.md "package credits deduct on completion"). Only from `confirmed`.
+
+    **Phase 7 Task 5 (#12)**: an appointment a walk-in queue entry converted into
+    (`scheduling/queue.py::start_queue_entry`) carries that entry's id on
+    `queue_entries.appointment_id`. Completing it is also that entry's own "done" — m3.md's own
+    text — so any still-`in_service` entry pointing here is flipped in the same transaction. A
+    plain, unconditional `UPDATE` rather than a load-then-save: there is at most one such row
+    (a queue entry converts once, guarded by its own `waiting`-only transition), and an
+    ordinary appointment with no queue entry at all touches zero rows, silently."""
     appointment = await _lock(db, appointment_id)
     if appointment is None:
         raise HTTPException(status_code=404, detail="No such appointment.")
@@ -1149,6 +1157,11 @@ async def complete_appointment(appointment_id: uuid.UUID, actor: Scheduler, db: 
         target_id=str(appointment.id),
         actor_user_id=actor.id,
         metadata={},
+    )
+    await db.execute(
+        update(QueueEntry)
+        .where(QueueEntry.appointment_id == appointment.id, QueueEntry.status == "in_service")
+        .values(status="done")
     )
     await db.commit()
     await cache.bump()

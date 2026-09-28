@@ -40,20 +40,24 @@ entry has nothing left to act on. `?include_abandoned=true` shows the full histo
 case that wants it (Task 8's "abandoned is recordable and countable" — countable via this flag
 plus a status filter, not a second endpoint).
 
-No conversion to `in_service`/`done` here — that is Task 5's `POST /queue-entries/{id}/start`,
-a call into the same `offered_slot`/`assign_resources` primitives staff and public booking
-already use. `cache.bump()` is not called from this file: nothing here changes bookability
-(the availability cache only reflects `Appointment`/resource state), the same as a `Customer`
-create/update never bumping it either.
+**Conversion to `in_service`/`done`** is Task 5's `POST /queue-entries/{id}/start` (below): the
+fourth call site of `assign_resources` (staff booking, public booking, public reschedule, this
+one), gated by `queue_eligibility.can_start` (Task 4) before ever touching it — never a fourth
+implementation of the physical/advisory checks either. `cache.bump()` *is* called there, once
+the new `Appointment` actually commits — the one write in this file that changes bookability;
+add/list/abandon still never call it, unchanged from Task 2.
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import Range
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.capabilities import Requires
@@ -61,9 +65,26 @@ from auth.models import User
 from core.audit import record_event
 from core.db import SessionDep
 from customers.models import Customer
+from customers.routes import CustomerIn, create_customer
 from notifications.triggers import load_business
-from scheduling.appointments import invalid_transition
-from scheduling.models import QueueEntry, Service, Staff
+from scheduling import cache
+from scheduling._admin_forms import refuse
+from scheduling.appointments import (
+    AppointmentOut,
+    _is_slot_taken,
+    assign_resources,
+    customer_suppressed,
+    invalid_transition,
+    slot_taken,
+)
+from scheduling.appointments import _load as _load_appointment
+from scheduling.appointments import _out as _appointment_out
+from scheduling.availability import ServiceSpec
+from scheduling.models import Appointment, AppointmentResource, Closure, QueueEntry, Service, Staff
+from scheduling.queue_eligibility import can_start
+from scheduling.services import catalog_entry
+from scheduling.slots import active_resources, busy_intervals, staff_specs, unbookable
+from scheduling.time_off import business_zone
 
 router = APIRouter(prefix="/queue-entries", tags=["queue"])
 
@@ -138,6 +159,9 @@ class QueueEntryOut(BaseModel):
     customer: CustomerRef | None
     bare_name: str | None
     bare_phone: str | None
+    # Phase 7 Task 5: set once `start` converts this entry — Task 8's display screen reads it
+    # to link through to the appointment (session notes, treatment receipt, and so on).
+    appointment_id: str | None
 
 
 def _out(entry: QueueEntry) -> QueueEntryOut:
@@ -161,6 +185,7 @@ def _out(entry: QueueEntry) -> QueueEntryOut:
         )
         if entry.customer is not None
         else None,
+        appointment_id=str(entry.appointment_id) if entry.appointment_id is not None else None,
         bare_name=entry.bare_name,
         bare_phone=entry.bare_phone,
     )
@@ -268,3 +293,230 @@ async def abandon_queue_entry(entry_id: uuid.UUID, actor: Manager, db: SessionDe
     )
     await db.commit()
     return _out(await _load(db, entry.id))
+
+
+# --- start: conversion to an appointment (Task 5, #12) --------------------------------------
+
+
+def not_eligible(reason: str) -> JSONResponse:
+    """Every staff candidate `can_start` was asked about refused — busy, or outside shift with
+    no override path (unlike a scheduled booking's dialog, a walk-in start is immediate: there
+    is no human on the other end confirming past an advisory rule for it, so this endpoint
+    never accepts `override`). Same 422 shape as `scheduling.appointments.not_offered`, with
+    `can_start`'s own `Eligibility.reason` beside it (`queue_eligibility.STAFF_BUSY` or one of
+    `availability.ADVISORY_RULES`) — "a clear 422 naming the reason" (m3.md's own text)."""
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": "This walk-in cannot be started right now.",
+            "code": "not_eligible",
+            "reason": reason,
+        },
+    )
+
+
+def resource_unavailable() -> JSONResponse:
+    """`can_start` never checks resources at all, deliberately (its own module docstring) —
+    this is the one place a walk-in's room/device requirement is actually asked, through the
+    same `assign_resources` every other booking path uses. Reachable even when every staff
+    candidate was otherwise eligible: `can_start` and a resource claim are two different
+    questions, same as they are for a scheduled booking."""
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": "No free room or device for this service right now.",
+            "code": "resource_unavailable",
+        },
+    )
+
+
+class QueueStartOut(BaseModel):
+    """What Task 8's queue display screen reads back from a successful start: the queue entry
+    itself, now `in_service` and carrying `appointment_id`, and the real `Appointment` it
+    became — the exact shape `POST /api/appointments` itself returns, so nothing downstream
+    needs a second appointment schema for a walk-in's."""
+
+    queue_entry: QueueEntryOut
+    appointment: AppointmentOut
+
+
+@router.post("/{entry_id}/start", status_code=201, response_model=QueueStartOut)
+async def start_queue_entry(entry_id: uuid.UUID, actor: Manager, db: SessionDep):
+    """A waiting entry becomes an ordinary `Appointment`, `starts_at=now` — the fourth call
+    site of `assign_resources` (staff booking, public booking, public reschedule, this one),
+    never a fourth implementation of it. `queue_eligibility.can_start` (Task 4) is the
+    eligibility gate, asked before any of it: staff concurrency (physical, never overridable)
+    first, then the shift/time-off/closure/horizon rules (advisory) second — **no override
+    path here**, unlike `book_appointment`'s dialog: a walk-in start is immediate, and nobody
+    is being asked to confirm past an advisory rule for it.
+
+    `preferred_staff_id` set means exactly that person or refusal; unset means "any eligible
+    staff who can start it right now" — tried in the same lowest-`sort_order`-then-
+    `display_name` order `book_appointment`'s own "any available" resolution already uses,
+    the first one `can_start` accepts wins.
+
+    A bare-name entry (no `customer_id`) gets a real `Customer` created here, inline — the same
+    no-actor `create_customer` shape the public booking route already uses for its own
+    no-signed-in-caller identity. `Appointment.customer_id` is `NOT NULL` (unlike the public
+    route's own `created_by_user_id`), so this is the first point one has to exist for a walk-in
+    that never gave more than a name; the name is split on its first space (a single word
+    becomes both first and last) since Task 2's quick-create only ever collected one free-text
+    field, never a first/last pair.
+    """
+    business = await load_business(db)
+    if not business.enable_walk_in_queue:
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    entry = await _lock(db, entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="No such queue entry.")
+    if entry.status != "waiting":
+        return invalid_transition(entry.status)
+
+    service = await catalog_entry(db, entry.requested_service_id)
+    if not service.bookable:
+        return unbookable(service)
+
+    eligible = [uuid.UUID(s) for s in service.staff_ids]
+    if entry.preferred_staff_id is not None:
+        if entry.preferred_staff_id not in eligible:
+            raise refuse("preferred_staff_id", "That staff member cannot deliver this service.")
+        candidates = [entry.preferred_staff_id]
+    else:
+        # The same lowest-`sort_order`-then-`display_name` tie-break `book_appointment`'s own
+        # "any available" resolution already uses — tried in this order until one is eligible.
+        candidates = list(
+            await db.scalars(
+                select(Staff.id)
+                .where(Staff.id.in_(eligible))
+                .order_by(Staff.sort_order, Staff.display_name, Staff.id)
+            )
+        )
+
+    zone = await business_zone(db)
+    now = datetime.now(UTC)
+    today = now.astimezone(zone).date()
+    # The one span this whole request is about: `can_start`'s own arithmetic (buffer before,
+    # duration, buffer after), computed once here so the busy-interval query and the
+    # eligibility check ask about exactly the same instant.
+    span = (
+        now - timedelta(minutes=service.buffer_before_minutes),
+        now + timedelta(minutes=service.duration_minutes + service.buffer_after_minutes),
+    )
+    horizon_ends_on = today + timedelta(days=business.booking_horizon_days)
+    closures = frozenset(await db.scalars(select(Closure.date).where(Closure.date == today)))
+
+    resources = await active_resources(db)
+    specs = await staff_specs(db, candidates, span)
+    staff_busy, resource_busy = await busy_intervals(
+        db, candidates, [r.id for r in resources], span
+    )
+
+    staff_id: uuid.UUID | None = None
+    reason: str | None = None
+    for candidate in candidates:
+        eligibility = can_start(
+            staff=specs[candidate],
+            service=ServiceSpec(
+                duration_minutes=service.duration_minutes,
+                buffer_before_minutes=service.buffer_before_minutes,
+                buffer_after_minutes=service.buffer_after_minutes,
+            ),
+            timezone=str(zone),
+            now=now,
+            staff_busy=staff_busy.get(candidate, ()),
+            closures=closures,
+            horizon_ends_on=horizon_ends_on,
+        )
+        if eligibility.eligible:
+            staff_id = candidate
+            break
+        reason = reason or eligibility.reason
+    if staff_id is None:
+        return not_eligible(reason or "no_staff_available")
+
+    claimed = assign_resources(service.requirements, resources, resource_busy, span)
+    if claimed is None:
+        return resource_unavailable()
+
+    if entry.customer_id is not None:
+        # FOR KEY SHARE: the same erasure-race discipline every other booking path takes
+        # (`scheduling.appointments.customer_suppressed`'s own docstring).
+        customer = await db.get(
+            Customer,
+            entry.customer_id,
+            with_for_update={"key_share": True},
+            populate_existing=True,
+        )
+        if customer is None:
+            raise HTTPException(status_code=404, detail="No such customer.")
+        if customer.suppressed_at is not None:
+            return customer_suppressed()
+    else:
+        first, _, last = entry.bare_name.partition(" ")
+        customer = await create_customer(
+            db,
+            CustomerIn(first_name=first, last_name=last or first, phone=entry.bare_phone),
+            actor_id=None,
+        )
+
+    appointment = Appointment(
+        customer_id=customer.id,
+        staff_id=staff_id,
+        service_id=uuid.UUID(service.id),
+        starts_at=now,
+        ends_at=now + timedelta(minutes=service.duration_minutes),
+        # The snapshot, same rule every other booking path follows (`Service`'s own SNAPSHOT
+        # CONTRACT).
+        duration_minutes=service.duration_minutes,
+        buffer_before_minutes=service.buffer_before_minutes,
+        buffer_after_minutes=service.buffer_after_minutes,
+        price_cents=service.price_cents,
+        status="confirmed",
+        created_by_user_id=actor.id,
+        resources=[
+            AppointmentResource(
+                resource_id=r.id, kind=r.kind, period=Range(span[0], span[1], bounds="[)")
+            )
+            for r in claimed
+        ],
+    )
+    db.add(appointment)
+    try:
+        await db.flush()
+    except DBAPIError as error:
+        await db.rollback()
+        if not _is_slot_taken(error):
+            raise
+        return slot_taken()
+
+    entry.status = "in_service"
+    entry.appointment_id = appointment.id
+    record_event(
+        db,
+        "appointment.booked",
+        target_type="appointment",
+        target_id=str(appointment.id),
+        actor_user_id=actor.id,
+        metadata={
+            "service_id": service.id,
+            "staff_id": str(staff_id),
+            "customer_id": str(customer.id),
+            "source": "walk_in_queue",
+        },
+    )
+    record_event(
+        db,
+        "queue.entry_started",
+        target_type="queue_entry",
+        target_id=str(entry.id),
+        actor_user_id=actor.id,
+        metadata={"appointment_id": str(appointment.id)},
+    )
+    await db.commit()
+    await cache.bump()
+
+    return QueueStartOut(
+        queue_entry=_out(await _load(db, entry.id)),
+        appointment=_appointment_out(await _load_appointment(db, appointment.id)),
+    )

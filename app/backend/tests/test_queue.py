@@ -153,8 +153,10 @@ async def test_every_queue_route_404s_while_the_toggle_is_off(client):
         await client.get(QUEUE),
         await client.post(QUEUE, json={"bare_name": "Walk-in Jo", "requested_service_id": service}),
         await client.post(f"{QUEUE}/00000000-0000-0000-0000-000000000000/abandon", json={}),
+        # Task 5: `start` is gated the same way as add/list/abandon.
+        await client.post(f"{QUEUE}/00000000-0000-0000-0000-000000000000/start", json={}),
     ]
-    assert [r.status_code for r in refusals] == [404, 404, 404]
+    assert [r.status_code for r in refusals] == [404, 404, 404, 404]
 
 
 async def test_the_toggle_is_off_by_default_and_the_route_appears_once_it_is_on(client):

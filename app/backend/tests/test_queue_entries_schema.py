@@ -27,6 +27,7 @@ _COLUMNS = (
     "preferred_staff_id",
     "arrived_at",
     "status",
+    "appointment_id",
 )
 
 
@@ -104,6 +105,30 @@ async def test_migration_0041_round_trips(database):
 
     await _upgrade_to("head")
     assert await _bare_phone_present()
+
+
+async def _appointment_id_present() -> bool:
+    async with session_scope() as db:
+        return bool(
+            await db.scalar(
+                text(
+                    "SELECT count(*) > 0 FROM information_schema.columns "
+                    "WHERE table_name = 'queue_entries' AND column_name = 'appointment_id'"
+                )
+            )
+        )
+
+
+async def test_migration_0043_round_trips(database):
+    """`appointment_id` (Phase 7 Task 5, #12) — added on top of 0042's table."""
+    assert await _appointment_id_present()
+
+    await _downgrade_to("0042")
+    assert await _table_present()  # the table itself survives, just not this column
+    assert not await _appointment_id_present()
+
+    await _upgrade_to("head")
+    assert await _appointment_id_present()
 
 
 async def test_enable_walk_in_queue_defaults_off(database):

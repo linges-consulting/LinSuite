@@ -294,6 +294,60 @@ class ResourceRow:
     name: str
 
 
+async def staff_specs(
+    db: SessionDep, staff_ids: Iterable[uuid.UUID], window: Interval
+) -> dict[uuid.UUID, StaffSpec]:
+    """Each of `staff_ids`' own shift matrix, time off and concurrency limit, in the engine's
+    shape — the one place this is read off the database, shared by `compute` (the whole-day
+    grid, `window` its date range) and `scheduling/queue.py::start_queue_entry` (one walk-in's
+    instant start, `window` its narrow buffered span) — Phase 7 Task 5's own reuse of this
+    loader rather than a second copy of the same three queries."""
+    staff_ids = list(staff_ids)
+    limits = dict(
+        (
+            await db.execute(
+                select(Staff.id, Staff.max_concurrent_appointments).where(Staff.id.in_(staff_ids))
+            )
+        ).all()  # type: ignore[arg-type]
+    )
+    hours: dict[uuid.UUID, dict[int, list[tuple[int, int]]]] = {s: {} for s in staff_ids}
+    for row in await db.execute(
+        select(
+            WorkingHours.staff_id,
+            WorkingHours.weekday,
+            WorkingHours.start_minute,
+            WorkingHours.end_minute,
+        ).where(WorkingHours.staff_id.in_(staff_ids))
+    ):
+        hours[row.staff_id].setdefault(row.weekday, []).append((row.start_minute, row.end_minute))
+    time_off: dict[uuid.UUID, list[Interval]] = {s: [] for s in staff_ids}
+    for row in await db.execute(
+        select(TimeOff.staff_id, TimeOff.starts_at, TimeOff.ends_at).where(
+            TimeOff.staff_id.in_(staff_ids),
+            TimeOff.ends_at > window[0],
+            TimeOff.starts_at < window[1],
+        )
+    ):
+        time_off[row.staff_id].append((row.starts_at, row.ends_at))
+    return {
+        s: StaffSpec(id=s, hours=hours[s], time_off=time_off[s], max_concurrent=limits.get(s, 1))
+        for s in staff_ids
+    }
+
+
+async def active_resources(db: SessionDep) -> list[ResourceRow]:
+    """Every active space or device, in the order "any" requirement picks from — the one
+    place this is read, shared by `compute` and `scheduling/queue.py::start_queue_entry`."""
+    return [
+        ResourceRow(id=row.id, kind=row.kind, sort_order=row.sort_order, name=row.name)
+        for row in await db.execute(
+            select(Resource.id, Resource.kind, Resource.sort_order, Resource.name)
+            .where(Resource.active)
+            .order_by(Resource.sort_order, Resource.name)
+        )
+    ]
+
+
 @dataclass(frozen=True)
 class Computed:
     """Everything `compute` read and what the engine made of it. Booking wants the day's
@@ -351,41 +405,8 @@ async def compute(
         localize(datetime.combine(to + timedelta(days=1), time.min), zone),
     )
 
-    limits = dict(
-        (
-            await db.execute(
-                select(Staff.id, Staff.max_concurrent_appointments).where(Staff.id.in_(staff_ids))
-            )
-        ).all()  # type: ignore[arg-type]
-    )
-    hours: dict[uuid.UUID, dict[int, list[tuple[int, int]]]] = {s: {} for s in staff_ids}
-    for row in await db.execute(
-        select(
-            WorkingHours.staff_id,
-            WorkingHours.weekday,
-            WorkingHours.start_minute,
-            WorkingHours.end_minute,
-        ).where(WorkingHours.staff_id.in_(staff_ids))
-    ):
-        hours[row.staff_id].setdefault(row.weekday, []).append((row.start_minute, row.end_minute))
-    time_off: dict[uuid.UUID, list[Interval]] = {s: [] for s in staff_ids}
-    for row in await db.execute(
-        select(TimeOff.staff_id, TimeOff.starts_at, TimeOff.ends_at).where(
-            TimeOff.staff_id.in_(staff_ids),
-            TimeOff.ends_at > window[0],
-            TimeOff.starts_at < window[1],
-        )
-    ):
-        time_off[row.staff_id].append((row.starts_at, row.ends_at))
-
-    resources = [
-        ResourceRow(id=row.id, kind=row.kind, sort_order=row.sort_order, name=row.name)
-        for row in await db.execute(
-            select(Resource.id, Resource.kind, Resource.sort_order, Resource.name)
-            .where(Resource.active)
-            .order_by(Resource.sort_order, Resource.name)
-        )
-    ]
+    specs = await staff_specs(db, staff_ids, window)
+    resources = await active_resources(db)
     closures = set(
         await db.scalars(select(Closure.date).where(Closure.date >= from_, Closure.date <= to))
     )
@@ -400,10 +421,6 @@ async def compute(
 
     now = datetime.now(UTC)
     horizon_ends_on = now.astimezone(zone).date() + timedelta(days=business.booking_horizon_days)
-    specs = {
-        s: StaffSpec(id=s, hours=hours[s], time_off=time_off[s], max_concurrent=limits.get(s, 1))
-        for s in staff_ids
-    }
     days = bookable_slots(
         timezone=business.timezone,
         granularity_minutes=business.slot_granularity_minutes,
