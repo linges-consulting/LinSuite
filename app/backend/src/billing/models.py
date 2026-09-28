@@ -1388,3 +1388,96 @@ class RetailInvoiceLine(Base):
     # `Staff.commission_rate_retail_bp`, read fresh and frozen at issue — module section above.
     commission_rate_bp: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ---------------------------------------------------------------------------------------------
+#
+# ## commission posting + report (#69, M4 spec #54 stories 94, 97-100)
+#
+# One append-only ledger entry per invoice line, posted in the same transaction as invoice
+# issue (`billing/invoices.py::issue_invoice`) — "one more thing before the commit," the exact
+# shape `billing/completion.py::record_draft_bill_line`/`scheduling/appointments.py
+# ::_clear_queue_entry` already established. The rate is always `InvoiceLine.commission_rate_bp`
+# (itself frozen off `ServiceBillLine.commission_rate_bp` at completion, #59) — never
+# `Staff.commission_rate_services_bp` read live. The basis is `billing/commission.py::
+# commission_basis_cents`'s own formula, reading `InvoiceLineDiscount.commission_basis` per
+# applied discount, never the live `Discount` row — see that module's docstring for the exact
+# composition rule.
+#
+# **Append-only, `stock_movements`/`invoice_lines`'s exact shape** (CLAUDE.md, refunds: "post
+# as dated reversing entries in the period they occur, not by rewriting the original
+# posting"). The app role may only INSERT and SELECT (migration 0057's grant + trigger pair).
+# A correction is never an `UPDATE` of `amount_cents` — it is a second row, `kind="reversal"`,
+# a negative `amount_cents`, and its own `posted_at` (the date the reversal actually happens,
+# never backdated to the original invoice's date) — the shape #67/#68/#73 (payment
+# correction/refund, cancel & replace, package refunds) are expected to follow once they exist.
+# `reverses_posting_id` is a self-FK for a reversal to name what it corrects; #69 never writes
+# it (every row this ticket posts is `kind="earned"`), it exists only so a later reversal has
+# somewhere to point.
+#
+# **Package-service commission constraint, restated here for whoever reads the schema first**
+# (full reasoning in `billing/commission.py`'s own docstring): `staff_id` is always copied from
+# `InvoiceLine.staff_id` — the appointment's own delivering staff member — never inferred from
+# who sold a package. #72 (credit redemption at completion) must keep `ServiceBillLine.staff_id`
+# pointed at the delivering staff member for this to keep holding.
+#
+# **Capability: `commission.view`, new, Administrator-only, Admin Mode** — `audit.view`'s own
+# shape (#22): commission data is sensitive (m4.md's own note already suggested this exact
+# key). Never granted to the seeded Staff role. No staff-facing payload in this app (bill
+# review, the roster, an issued invoice's own line output) may include a commission rate,
+# basis or computed amount — see `tests/test_commission_leakage.py`.
+#
+# ---------------------------------------------------------------------------------------------
+
+COMMISSION_POSTING_KINDS = ("earned", "reversal")
+
+
+class CommissionPosting(Base):
+    """One append-only ledger entry: what one staff member earned in commission on one invoice
+    line. See the module section above for the full design — the composition formula lives in
+    `billing/commission.py`, not here; this table only stores what that formula returned."""
+
+    __tablename__ = "commission_postings"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN (" + ", ".join(f"'{k}'" for k in COMMISSION_POSTING_KINDS) + ")",
+            name="ck_commission_postings_kind",
+        ),
+        CheckConstraint(
+            "commission_rate_bp BETWEEN 0 AND 10000", name="ck_commission_postings_rate_bp"
+        ),
+        CheckConstraint("basis_cents >= 0", name="ck_commission_postings_basis"),
+        CheckConstraint(
+            "(kind = 'earned' AND amount_cents >= 0) OR (kind = 'reversal' AND amount_cents <= 0)",
+            name="ck_commission_postings_amount_sign",
+        ),
+        Index("ix_commission_postings_staff_posted", "staff_id", "posted_at"),
+        Index("ix_commission_postings_invoice", "invoice_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    invoice_line_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("invoice_lines.id", ondelete="RESTRICT")
+    )
+    invoice_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoices.id", ondelete="RESTRICT"))
+    # The delivering staff member — always `InvoiceLine.staff_id`, never a package seller.
+    staff_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("staff.id", ondelete="RESTRICT"))
+    kind: Mapped[str] = mapped_column(String(16), server_default=text("'earned'"))
+    # Copied straight off `InvoiceLine.commission_rate_bp` — never re-read live.
+    commission_rate_bp: Mapped[int] = mapped_column(Integer)
+    # `billing/commission.py::commission_basis_cents`'s own output, frozen.
+    basis_cents: Mapped[int] = mapped_column(Integer)
+    # Positive for an "earned" posting, negative for a "reversal" — never zero-clamped or
+    # rewritten; see the module section above.
+    amount_cents: Mapped[int] = mapped_column(Integer)
+    # Null for an "earned" posting; set on a "reversal" to the posting it corrects. Not read by
+    # anything #69 builds — kept for #67/#68/#73 to find "what does this correct."
+    reverses_posting_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("commission_postings.id", ondelete="RESTRICT")
+    )
+    # The ledger date: issue time for an "earned" posting, the actual reversal date for a
+    # "reversal" — never backdated to the original invoice (CLAUDE.md "in the period they
+    # occur"). What the report's date-range filter reads.
+    posted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -55,6 +55,7 @@ async def claimed_instance(client):
             # `invoices`/`package_definitions`/`customers`/`services` below, all of which they
             # reference with `ON DELETE RESTRICT`.
             await purge.execute(text("DELETE FROM package_purchase_credits"))
+            await purge.execute(text("DELETE FROM commission_postings"))  # #69
             await purge.execute(text("DELETE FROM invoice_line_taxes"))
             await purge.execute(text("DELETE FROM invoice_line_discounts"))
             await purge.execute(text("DELETE FROM invoice_lines"))

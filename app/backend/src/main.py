@@ -19,6 +19,7 @@ from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
 from billing.bill_authority import router as bill_authority_router
 from billing.bill_review import router as bill_review_router
+from billing.commission_report import router as commission_report_router
 from billing.invoices import router as invoices_router
 from billing.package_purchase import router as package_purchase_router
 from billing.packages import router as package_definitions_router
@@ -322,4 +323,8 @@ api.include_router(package_purchase_router)
 # Always its own invoice, never combined with a service invoice — a separate table pair and a
 # separate router, sharing only the `business_invoice_counters` numbering series.
 api.include_router(retail_sales_router)
+# Commission posting (#69) has no route of its own — it is one more thing `invoices_router`'s
+# own issue endpoint does, in the same transaction. This is the report: what every staff member
+# has earned, `commission.view`, Administrator-only, Admin Mode.
+api.include_router(commission_report_router)
 app.include_router(api)

@@ -13,6 +13,15 @@ three functions), called one final time, with the result frozen rather than mere
 front-desk-reachable call #63 already made for the rest of this screen. Reading an issued
 invoice is gated the same way. See the module section in `billing/models.py` for the full
 reasoning.
+
+**Commission is posted here too (#69), one more thing in the same transaction before commit** —
+the exact shape `billing/completion.py::record_draft_bill_line`/`scheduling/appointments.py
+::_clear_queue_entry` already established. `InvoiceLineOut`/`InvoiceLineDiscountOut` deliberately
+carry no `commission_rate_bp`/`commission_basis` — this route is reachable in Staff Mode with no
+admin window (`billing.view`), and commission data is never staff-facing (CLAUDE.md; #69's own
+acceptance criterion, checked directly in `tests/test_commission_leakage.py`). Read it from
+`GET /admin/reports/commission` instead (`billing/commission_report.py`, `commission.view`,
+Administrator-only, Admin Mode).
 """
 
 import base64
@@ -35,11 +44,17 @@ from billing.bill_review import (
     _persisted_selection,
     _today_in,
 )
+from billing.commission import (
+    CommissionDiscountInput,
+    commission_amount_cents,
+    commission_basis_cents,
+)
 from billing.documents import render_invoice_documents
 from billing.invoice_numbering import allocate_invoice_number
 from billing.keys import business_key
 from billing.models import (
     BillOverrideRequest,
+    CommissionPosting,
     Discount,
     Invoice,
     InvoiceLine,
@@ -68,10 +83,12 @@ _ViewInvoiceDocs = Depends(Requires("billing.view"))
 
 
 class InvoiceLineDiscountOut(BaseModel):
+    # Deliberately no `commission_basis` — this route is Staff-Mode-reachable (`billing.view`,
+    # no admin window) and commission data is never staff-facing (CLAUDE.md; #69). Read the
+    # commission-basis choice via `GET /admin/reports/commission` (`commission.view`) instead.
     discount_id: str
     discount_name: str
     discount_kind: str
-    commission_basis: str
 
 
 class InvoiceLineTaxOut(BaseModel):
@@ -81,12 +98,12 @@ class InvoiceLineTaxOut(BaseModel):
 
 
 class InvoiceLineOut(BaseModel):
+    # Deliberately no `commission_rate_bp` — see `InvoiceLineDiscountOut`'s own note above.
     id: str
     appointment_id: str
     service_id: str
     staff_id: str
     price_cents: int
-    commission_rate_bp: int
     discounted_cents: int
     pretax_cents: int
     tax_cents: int
@@ -137,7 +154,6 @@ def _line_out(line: InvoiceLine) -> InvoiceLineOut:
         service_id=str(line.service_id),
         staff_id=str(line.staff_id),
         price_cents=line.price_cents,
-        commission_rate_bp=line.commission_rate_bp,
         discounted_cents=line.discounted_cents,
         pretax_cents=line.pretax_cents,
         tax_cents=line.tax_cents,
@@ -147,7 +163,6 @@ def _line_out(line: InvoiceLine) -> InvoiceLineOut:
                 discount_id=str(d.discount_id),
                 discount_name=d.discount_name,
                 discount_kind=d.discount_kind,
-                commission_basis=d.commission_basis,
             )
             for d in line.discounts
         ],
@@ -298,10 +313,12 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
         db.add(invoice_line)
         await db.flush()
 
+        applied_discounts = []
         for discount_id_str in line_out.applied_discount_ids:
             discount = discounts_by_id.get(uuid.UUID(discount_id_str))
             if discount is None:  # pragma: no cover — defensive; _compute already validated this
                 continue
+            applied_discounts.append(discount)
             db.add(
                 InvoiceLineDiscount(
                     invoice_line_id=invoice_line.id,
@@ -311,6 +328,37 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
                     commission_basis=discount.commission_basis,
                 )
             )
+
+        # #69: commission, posted in this same transaction — the rate is always
+        # `bill_line.commission_rate_bp` (snapshotted at completion, #59, never re-read live),
+        # the basis is `billing/commission.py`'s own formula against the *live* `Discount`
+        # rows fetched above (still live at this exact moment, before they are frozen onto
+        # `InvoiceLineDiscount` a few lines up) — see that module's docstring for why the live
+        # rows, not the frozen ones, are what the formula needs. `staff_id` is always
+        # `bill_line.staff_id` — the delivering staff member, never inferred from a package
+        # sale (module docstring; #72's own constraint).
+        commission_discounts = [
+            CommissionDiscountInput(
+                id=d.id,
+                kind=d.kind,
+                stackable=d.stackable,
+                percentage_bp=d.percentage_bp,
+                amount_cents=d.amount_cents,
+                commission_basis=d.commission_basis,
+            )
+            for d in applied_discounts
+        ]
+        basis_cents = commission_basis_cents(bill_line.price_cents, commission_discounts)
+        db.add(
+            CommissionPosting(
+                invoice_line_id=invoice_line.id,
+                invoice_id=invoice.id,
+                staff_id=bill_line.staff_id,
+                commission_rate_bp=bill_line.commission_rate_bp,
+                basis_cents=basis_cents,
+                amount_cents=commission_amount_cents(basis_cents, bill_line.commission_rate_bp),
+            )
+        )
 
         for code, amount_cents in line_out.tax.component_cents.items():
             db.add(
