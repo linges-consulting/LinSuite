@@ -179,3 +179,40 @@ async def test_a_transient_failure_is_not_recorded_as_permanent(client, fail_nex
 
     resp = await client.get(f"{PROFILE}/{customer_id}")
     assert resp.json()["notification_failures"] == []
+
+
+# --- attachments (#70) -------------------------------------------------------------------------
+
+
+async def test_send_email_decodes_a_base64_attachment_for_the_provider(sent_emails):
+    # `attachments` on the task is JSON-safe (module docstring's own reasoning for why the
+    # `business` row is refetched here rather than passed through `.delay(...)`); this is the
+    # one place the base64 wrapper `billing/invoices.py`'s email routes build gets unwrapped
+    # back into the `EmailAttachment` the provider protocol actually takes.
+    import base64
+
+    send_email.delay(
+        "client@example.com",
+        "Invoice #1",
+        "Your invoice is attached.",
+        attachments=[
+            {
+                "filename": "invoice-1.pdf",
+                "content_b64": base64.b64encode(b"%PDF-1.7 body").decode(),
+                "content_type": "application/pdf",
+            }
+        ],
+    )
+
+    assert len(sent_emails) == 1
+    [attachment] = sent_emails[0].attachments
+    assert attachment.filename == "invoice-1.pdf"
+    assert attachment.content == b"%PDF-1.7 body"
+    assert attachment.content_type == "application/pdf"
+
+
+async def test_send_email_without_attachments_is_unaffected(sent_emails):
+    send_email.delay("client@example.com", "subject", "body")
+
+    assert len(sent_emails) == 1
+    assert sent_emails[0].attachments == ()

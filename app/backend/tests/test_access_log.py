@@ -65,6 +65,11 @@ LOGGED = {
     # A completed form's answers, signature included (#47). Its list is metadata: not here.
     ("GET", "/api/customers/{customer_id}/forms/{submission_id}"),
     ("GET", "/api/customers/{customer_id}/forms/{submission_id}/pdf"),
+    # Client-linked financial documents (#70): opening one to print, or to email it, is a read.
+    ("GET", "/api/customers/{customer_id}/invoices/{invoice_id}/pdf"),
+    ("POST", "/api/customers/{customer_id}/invoices/{invoice_id}/email"),
+    ("GET", "/api/customers/{customer_id}/invoices/{invoice_id}/receipts/{line_id}/pdf"),
+    ("POST", "/api/customers/{customer_id}/invoices/{invoice_id}/receipts/{line_id}/email"),
 }
 # Customer-scoped GETs that deliberately do not log. Empty: nothing under a customer's path
 # is metadata yet (the access report itself will live under `/api/admin/...`).

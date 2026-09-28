@@ -13,9 +13,9 @@ plain `Exception` for the transient one — the provider raises whatever it's gi
 the same as a real adapter raises whatever `httpx`/`smtplib` gave it.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from notifications.providers import PROVIDERS
+from notifications.providers import PROVIDERS, EmailAttachment
 
 
 @dataclass(frozen=True)
@@ -24,6 +24,7 @@ class SentEmail:
     subject: str
     text: str
     html: str | None
+    attachments: tuple[EmailAttachment, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)
@@ -44,10 +45,21 @@ fail_sms_next: list[Exception] = []
 
 
 class RecordingProvider:
-    def send_email(self, to: str, subject: str, text: str, html: str | None = None) -> None:
+    def send_email(
+        self,
+        to: str,
+        subject: str,
+        text: str,
+        html: str | None = None,
+        attachments: list[EmailAttachment] | None = None,
+    ) -> None:
         if fail_email_next:
             raise fail_email_next.pop(0)
-        sent.append(SentEmail(to=to, subject=subject, text=text, html=html))
+        sent.append(
+            SentEmail(
+                to=to, subject=subject, text=text, html=html, attachments=tuple(attachments or ())
+            )
+        )
 
     def send_sms(self, to: str, text: str) -> None:
         if fail_sms_next:
