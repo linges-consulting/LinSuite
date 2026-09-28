@@ -1,7 +1,7 @@
-"""Tax components and effective-dated rates (#57); the `billing.manage` capability.
+"""Tax components and effective-dated rates (#57).
 
-Revision ID: 0044
-Revises: 0043
+Revision ID: 0047
+Revises: 0046
 Create Date: 2026-09-28
 
 Two tables. `tax_components` is the stable definition (a code, a name, and an optional
@@ -16,10 +16,9 @@ same shape `working_hours`/`time_off` use for a `staff_id`-scoped range, applied
 `component_id` and a *date* range instead: no two rates for one component may cover the same
 day.
 
-`billing.manage` reaches the Administrator role here, following 0022/0042's own precedent
-("a new capability reaches it here or not at all"). Not the Staff role: configuring tax
-components is business configuration in the same sense `catalog.manage` already is, never
-front-desk work.
+Reuses `billing.manage` (Administrator only, Admin Mode) — seeded by `0044_discounts.py`, the
+first-merged M4 Wave 1 ticket; #57 independently needed the same capability, merged to one
+grant at integration rather than three competing inserts (also claimed by #58, #60).
 """
 
 from collections.abc import Sequence
@@ -27,8 +26,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0044"
-down_revision: str | None = "0043"
+revision: str = "0047"
+down_revision: str | None = "0046"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -90,14 +89,7 @@ def upgrade() -> None:
         ["component_id", "effective_from"],
     )
 
-    op.execute(
-        "INSERT INTO role_capabilities (role_id, capability) "
-        "SELECT id, 'billing.manage' FROM roles WHERE name = 'Administrator' AND is_system "
-        "ON CONFLICT DO NOTHING"
-    )
-
 
 def downgrade() -> None:
-    op.execute("DELETE FROM role_capabilities WHERE capability = 'billing.manage'")
     op.drop_table("tax_component_rates")
     op.drop_table("tax_components")
