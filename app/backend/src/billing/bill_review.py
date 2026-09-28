@@ -419,6 +419,9 @@ async def apply_discounts(
     # silently shadowing whatever staff pick here next.
     bill.manual_override_cents = None
     bill.manual_override_reason = None
+    # #65's stale-approval checkpoint clears with the override it belongs to — see
+    # `billing/models.py`'s `## invoice issue (#65)` section.
+    bill.override_applied_revision = None
     # Bumped explicitly: unlike `ServiceBill`'s own row, this route never issues an `UPDATE`
     # against it otherwise (only `service_bill_discounts` changes) — SQLAlchemy's `onupdate`
     # only fires when the mapped row itself is written. `bill_authority.py`'s stale-approval

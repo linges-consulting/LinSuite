@@ -19,6 +19,7 @@ from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
 from billing.bill_authority import router as bill_authority_router
 from billing.bill_review import router as bill_review_router
+from billing.invoices import router as invoices_router
 from billing.packages import router as package_definitions_router
 from billing.routes import router as discounts_router
 from billing.tax_routes import router as tax_router
@@ -307,4 +308,8 @@ api.include_router(bill_review_router)
 # admin edit (own credentials, verified on the staff screen) — the two override paths on top
 # of #63's screen. Same `/bills` prefix as `bill_review_router`; no path collides.
 api.include_router(bill_authority_router)
+# Invoice issue (#65): `POST /bills/{id}/issue` turns a reviewed, approved draft into an
+# issued, immutable invoice (`billing.view`, Staff Mode — checkout, not an admin action), plus
+# `GET /invoices`/`GET /invoices/{id}` to read one back from its own frozen snapshot.
+api.include_router(invoices_router)
 app.include_router(api)

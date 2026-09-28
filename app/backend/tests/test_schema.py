@@ -63,6 +63,13 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     # The stock movement ledger is append-only; nothing purges it in v1, but the trigger
     # still lets the purge role through, same shape as `audit_events` (#61, 0050).
     "stock_movements": ("SELECT", "INSERT"),
+    # Voidable (#65, 0054): UPDATE stays granted — it is what reaches the one permitted
+    # cancel transition `invoices_voidable_guard` checks for — but DELETE never does.
+    "invoices": ("SELECT", "INSERT", "UPDATE"),
+    # Frozen invoice snapshot rows: append-only, same shape as `stock_movements` (#65, 0054).
+    "invoice_lines": ("SELECT", "INSERT"),
+    "invoice_line_discounts": ("SELECT", "INSERT"),
+    "invoice_line_taxes": ("SELECT", "INSERT"),
 }
 # The purge role reads and deletes everywhere and writes nowhere — except the fact of its own
 # purge, which ADR-0001 §6 puts in the purge transaction (0024, pre-flight D11).
@@ -87,6 +94,10 @@ TRIGGERS = (
     ("form_links", "form_links_guard"),
     ("form_submissions", "form_submissions_guard"),
     ("stock_movements", "stock_movements_no_rewrite"),
+    ("invoices", "invoices_voidable_guard"),
+    ("invoice_lines", "invoice_lines_no_rewrite"),
+    ("invoice_line_discounts", "invoice_line_discounts_no_rewrite"),
+    ("invoice_line_taxes", "invoice_line_taxes_no_rewrite"),
 )
 
 

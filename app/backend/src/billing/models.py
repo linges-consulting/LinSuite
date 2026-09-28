@@ -138,7 +138,7 @@ from sqlalchemy import (
 from sqlalchemy import (
     Date as DateColumn,
 )
-from sqlalchemy.dialects.postgresql import ExcludeConstraint
+from sqlalchemy.dialects.postgresql import JSONB, ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.db import Base
@@ -452,6 +452,13 @@ class ServiceBill(Base):
     # nothing that already reads that field changes meaning.
     manual_override_cents: Mapped[int | None] = mapped_column(Integer)
     manual_override_reason: Mapped[str | None] = mapped_column(Text)
+    # #65's own stale-approval checkpoint: stamped with the exact same `datetime.now(UTC)`
+    # value as `updated_at`, in the same statement, by both of #64's write sites (an approved
+    # `BillOverrideRequest` decision, an inline admin edit) — see `billing/models.py`'s
+    # `## invoice issue (#65)` section far below for the full mechanism. `None` whenever
+    # `manual_override_cents` is `None` (`bill_review.py::apply_discounts` clears both
+    # together); the two are otherwise always written together, never one without the other.
+    override_applied_revision: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ServiceBillLine(Base):
@@ -616,3 +623,273 @@ class BillOverrideRequest(Base):
     # Null until decided. Set on approval — equal to `requested_total_cents` when approved
     # "as-is", a different value when the admin/owner revised it. Never set on rejection.
     decided_total_cents: Mapped[int | None] = mapped_column(Integer)
+
+
+# ---------------------------------------------------------------------------------------------
+#
+# ## invoice issue (#65, M4 spec #54 stories 10-11, 29, 33)
+#
+# Turns a reviewed, approved draft `ServiceBill` into an issued, immutable `Invoice` — a new
+# table pair, deliberately, not `ServiceBill.status` flipping to `"issued"` with a parallel
+# snapshot table. Two reasons, both from CLAUDE.md directly: (1) "invoice" is the *voidable*
+# document class (never edited in place; cancel sets status + links a replacement) while
+# "service bill" is exactly the opposite on purpose (`ServiceBill`'s own docstring, above) —
+# one row cannot honestly be both at once as its own status flips underneath it; (2) reading an
+# issued invoice must never re-join `services`/`discounts`/`tax_components` live, which means
+# every line's resolved numbers need their own frozen columns/rows, not a second read path
+# grafted onto `service_bill_lines`. `ServiceBill`/`ServiceBillLine`/`ServiceBillDiscount` are
+# untouched by this ticket (bar the one `override_applied_revision` checkpoint column above) —
+# every route #63/#64 built keeps working exactly as before.
+#
+# **Gapless invoice numbering** (`business_invoice_counters`, `billing/invoice_numbering.py`):
+# a per-business counter *row*, never a `SEQUENCE` — a `SEQUENCE` still burns a value on a
+# rolled-back transaction, which is precisely the gap this ticket must never produce.
+# `allocate_invoice_number` locks the row (`SELECT ... FOR UPDATE`) and increments it in the
+# *same* transaction as the `Invoice` insert it numbers; a rollback anywhere in that
+# transaction rolls the counter back with it. The row lock is what serializes two concurrent
+# issue attempts on the same business — CLAUDE.md's "Concurrency: enforce in the DB, not app
+# locks," the same statement-is-the-lock philosophy `inventory/stock.py::record_movement`
+# already applies to `quantity_on_hand`, applied here to a counter instead of a quantity.
+# `uq_invoices_business_number` is the defense-in-depth unique index on top, the same role
+# `ex_tax_component_rates_no_overlap` plays beside `TaxComponentRate`'s own effective-dating
+# discipline — the lock should already make a collision impossible; the constraint is what
+# turns "should" into "does," and what a migration, an import or a stray script can't defeat.
+#
+# **Snapshot contract, exact shape.** At issue, `billing/invoices.py` calls `bill_review.py`'s
+# own `_compute` one final time (never reimplements its math — the same rule `bill_review.py`'s
+# own docstring already states for itself) against whatever `service_bill_discounts` currently
+# holds, and freezes every number it returns:
+#
+# - `InvoiceLine` — one row per `ServiceBillLine`, `price_cents`/`commission_rate_bp` copied
+#   straight off it (already themselves frozen at completion time, #59); `discounted_cents`/
+#   `pretax_cents`/`tax_cents`/`line_total_cents` copied off that line's `_compute`-computed
+#   `BillLineOut`/`LineTax`. `service_id`/`staff_id`/`appointment_id` are carried for display
+#   only — an FK to a never-hard-deleted table, never read back into a money calculation.
+# - `InvoiceLineDiscount` — one row per discount that actually applied to that line
+#   (`BillLineOut.applied_discount_ids`), `discount_name`/`discount_kind`/`commission_basis`
+#   copied off the live `Discount` row *at this exact moment* (never re-read after). This is
+#   the "commission-basis choice each applied discount carried" the ticket asks frozen — #69
+#   reads `commission_basis` off here, never off `discounts.commission_basis`, so a later rate
+#   or basis change on the definition can never rewrite an already-earned commission.
+# - `InvoiceLineTax` — one row per tax component that taxed that line, `component_code` a
+#   frozen `Text` copy (not an FK to `tax_components.id` — independence from the live table is
+#   the point), `rate_bp` the exact resolved rate `_compute`'s own `_applicable_components` (and
+#   under it, `tax.py::resolve_rate_bp`) used, `amount_cents` the component's contribution to
+#   that line (`LineTax.component_cents[code]`). A component at `rate_bp == 0` still gets a row,
+#   the same "never dropped, just zero" rule `tax.py::LineTax` already states for itself.
+#
+# **The override total, reported alongside, never conflated** (mirrors `BillOut`'s own shape):
+# `Invoice.computed_grand_total_cents` is always the ordinarily-computed number (subtotal minus
+# discounts plus tax, summed off the frozen lines); `Invoice.override_applied_cents`/
+# `override_reason` are non-null only when an admin/owner-authorized override (#64) was
+# authoritative at issue, copied off `ServiceBill.manual_override_cents`/`manual_override_
+# reason`; `Invoice.grand_total_cents` is the one number actually billed — `override_applied_
+# cents` when present, `computed_grand_total_cents` otherwise. The per-line/discount/tax
+# snapshot rows always hold the *computed* breakdown regardless of an override, because an
+# override is a single absolute total for the whole bill with no per-line shape of its own
+# (`BillOverrideRequest`'s own docstring, above) — there is no honest way to re-derive a
+# per-line breakdown from one arbitrary number, so this ticket does not invent one. A reader
+# who needs "what was actually charged" reads `grand_total_cents`; a reader who needs "what the
+# system computed, and why" reads the frozen lines plus `computed_grand_total_cents`.
+#
+# **Refusal conditions, all checked in `billing/invoices.py` before any number is frozen or any
+# invoice number allocated:**
+#
+# 1. A `pending` `BillOverrideRequest` exists for this bill — undecided, so nothing about
+#    whether its ask is authorized is known yet.
+# 2. `bill.manual_override_cents is not None and bill.override_applied_revision != bill.
+#    updated_at` — a *stale* override: it was authorized once, but the bill has moved on since
+#    (typically a sibling appointment completing into the same visit, `billing/completion.py`,
+#    which bumps `updated_at` without touching the override fields at all) without being
+#    redecided. Also covers "authorized but the checkpoint was never actually stamped"
+#    (`override_applied_revision is None` while `manual_override_cents` is set) — the ticket's
+#    "required admin authorization... hasn't actually happened" case; unreachable through the
+#    two existing write paths today (both always stamp the checkpoint in the same statement as
+#    the override fields), kept as a direct read of "was this actually authorized" rather than
+#    an inference from those paths staying correct.
+# 3. The bill is not `status == "draft"` (already issued, or — unreachable today, but checked —
+#    some other status) or has no lines at all.
+#
+# **Capability: `billing.view`, reused, not a new key.** Issuing is checkout, not an admin
+# action — the same front-desk-reachable call #63 already made for the rest of this screen
+# (`billing.view`'s own docstring: "front-desk work... the same call `queue.manage`/`forms.
+# issue` already make"). Reading an issued invoice is gated the same way. Nothing here needs
+# `billing.manage`/Admin Mode: by the time a bill reaches issue, either nothing exceptional
+# ever happened to it, or whatever did was already authorized through #64's own admin-gated
+# paths — issue itself only checks that authorization is still valid, it does not grant one.
+#
+# ---------------------------------------------------------------------------------------------
+
+INVOICE_STATUSES = ("issued", "cancelled")
+
+
+class BusinessInvoiceCounter(Base):
+    """The gapless numbering row (module section above). Exactly one row per business — in
+    this single-tenant deployment, exactly one row, `business_id == 1`, created lazily by
+    `billing/invoice_numbering.py::allocate_invoice_number` on the first invoice ever issued
+    (`billing/keys.py::business_key`'s own "created lazily on first call" precedent, #55).
+    Ordinary app-role DML — UPDATE is the whole point of this table, unlike every other new
+    table this ticket adds, so no grant is revoked and no trigger guards it."""
+
+    __tablename__ = "business_invoice_counters"
+    __table_args__ = (
+        CheckConstraint("next_number >= 1", name="ck_business_invoice_counters_next_number"),
+    )
+
+    business_id: Mapped[int] = mapped_column(Integer, ForeignKey("businesses.id"), primary_key=True)
+    # The number the *next* issued invoice will receive, not the last one issued — so a fresh
+    # row starts at 1 and the first invoice really is numbered 1.
+    next_number: Mapped[int] = mapped_column(Integer, server_default=text("1"))
+
+
+class Invoice(Base):
+    """One issued invoice — the voidable document class (CLAUDE.md), created once, at issue,
+    and never edited in place afterward except the one cancel transition
+    `invoices_voidable_guard` (migration 0054) permits. See the module section above for the
+    full snapshot contract and refusal conditions; `billing/invoices.py` is the only writer.
+
+    No `"draft"` status exists here — unlike `ServiceBill`, a row is never created except
+    already `"issued"`. `service_bill_id` is unique: one draft bill issues at most one invoice,
+    ever (re-issuing a `service_bills.status == "issued"` bill is refused before an invoice
+    number is even allocated).
+    """
+
+    __tablename__ = "invoices"
+    __table_args__ = (
+        UniqueConstraint("business_id", "invoice_number", name="uq_invoices_business_number"),
+        UniqueConstraint("service_bill_id", name="uq_invoices_service_bill_id"),
+        CheckConstraint("status IN ('issued', 'cancelled')", name="ck_invoices_status"),
+        CheckConstraint(
+            "(status = 'issued' AND cancelled_at IS NULL AND cancelled_by IS NULL "
+            "AND cancel_reason IS NULL) OR "
+            "(status = 'cancelled' AND cancelled_at IS NOT NULL AND cancelled_by IS NOT NULL "
+            "AND cancel_reason IS NOT NULL)",
+            name="ck_invoices_cancel_fields",
+        ),
+        CheckConstraint(
+            "(override_applied_cents IS NULL) = (override_reason IS NULL)",
+            name="ck_invoices_override_fields",
+        ),
+        Index("ix_invoices_customer", "customer_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    business_id: Mapped[int] = mapped_column(Integer, ForeignKey("businesses.id"))
+    invoice_number: Mapped[int] = mapped_column(Integer)
+    service_bill_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("service_bills.id", ondelete="RESTRICT")
+    )
+    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id", ondelete="RESTRICT"))
+    status: Mapped[str] = mapped_column(Text, server_default=text("'issued'"))
+    computed_subtotal_cents: Mapped[int] = mapped_column(Integer)
+    computed_discount_total_cents: Mapped[int] = mapped_column(Integer)
+    computed_tax_total_cents: Mapped[int] = mapped_column(Integer)
+    computed_grand_total_cents: Mapped[int] = mapped_column(Integer)
+    # `JSONB`, not `JSON` — the plain `json` type has no equality operator in Postgres, and
+    # `invoices_voidable_guard` (migration 0054) needs to compare this column bit-for-bit
+    # between `OLD`/`NEW` on the one permitted UPDATE.
+    tax_totals_by_component: Mapped[dict] = mapped_column(JSONB)
+    override_applied_cents: Mapped[int | None] = mapped_column(Integer)
+    override_reason: Mapped[str | None] = mapped_column(Text)
+    # The one number actually billed — see the module section above.
+    grand_total_cents: Mapped[int] = mapped_column(Integer)
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    issued_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    replaces_invoice_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("invoices.id"))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT")
+    )
+    cancel_reason: Mapped[str | None] = mapped_column(Text)
+
+    lines: Mapped[list["InvoiceLine"]] = relationship(lazy="selectin")
+
+
+class InvoiceLine(Base):
+    """One frozen line — see the module section above for exactly what is copied and why.
+    Append-only from the app role's own grant (migration 0054): even the invoice's own cancel
+    transition never touches a line."""
+
+    __tablename__ = "invoice_lines"
+    __table_args__ = (
+        CheckConstraint("price_cents >= 0", name="ck_invoice_lines_price"),
+        CheckConstraint(
+            "commission_rate_bp BETWEEN 0 AND 10000", name="ck_invoice_lines_commission_bp"
+        ),
+        UniqueConstraint("service_bill_line_id", name="uq_invoice_lines_service_bill_line_id"),
+        Index("ix_invoice_lines_invoice", "invoice_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    invoice_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoices.id", ondelete="CASCADE"))
+    service_bill_line_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("service_bill_lines.id", ondelete="RESTRICT")
+    )
+    appointment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("appointments.id", ondelete="RESTRICT")
+    )
+    service_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("services.id", ondelete="RESTRICT"))
+    staff_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("staff.id", ondelete="RESTRICT"))
+    price_cents: Mapped[int] = mapped_column(Integer)
+    commission_rate_bp: Mapped[int] = mapped_column(Integer)
+    discounted_cents: Mapped[int] = mapped_column(Integer)
+    pretax_cents: Mapped[int] = mapped_column(Integer)
+    tax_cents: Mapped[int] = mapped_column(Integer)
+    line_total_cents: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    discounts: Mapped[list["InvoiceLineDiscount"]] = relationship(lazy="selectin")
+    taxes: Mapped[list["InvoiceLineTax"]] = relationship(lazy="selectin")
+
+
+class InvoiceLineDiscount(Base):
+    """One predefined discount (#58) that applied to one frozen line, with the commission-
+    basis choice it carried at the moment of issue — #69 reads `commission_basis` from here,
+    never from the live `Discount` row. Composite key: one discount named twice against one
+    line is one application, `ServiceBillDiscount`'s own precedent."""
+
+    __tablename__ = "invoice_line_discounts"
+    __table_args__ = (
+        CheckConstraint(
+            "discount_kind IN ('percentage', 'fixed')", name="ck_invoice_line_discounts_kind"
+        ),
+        CheckConstraint(
+            "commission_basis IN ('reduces', 'absorbed')",
+            name="ck_invoice_line_discounts_commission_basis",
+        ),
+    )
+
+    invoice_line_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("invoice_lines.id", ondelete="CASCADE"), primary_key=True
+    )
+    discount_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("discounts.id", ondelete="RESTRICT"), primary_key=True
+    )
+    discount_name: Mapped[str] = mapped_column(Text)
+    discount_kind: Mapped[str] = mapped_column(Text)
+    commission_basis: Mapped[str] = mapped_column(Text)
+
+
+class InvoiceLineTax(Base):
+    """One tax component's frozen contribution to one line — `component_code` is a frozen
+    `Text` copy of `TaxComponent.code`, never an FK to `tax_components.id` (module section
+    above: independence from the live table is the point). `rate_bp` is the exact resolved
+    rate `tax.py::resolve_rate_bp` returned at issue; `amount_cents` is that component's own
+    share (`tax.py::LineTax.component_cents[code]`)."""
+
+    __tablename__ = "invoice_line_taxes"
+    __table_args__ = (
+        CheckConstraint("rate_bp BETWEEN 0 AND 10000", name="ck_invoice_line_taxes_rate_bp"),
+    )
+
+    invoice_line_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("invoice_lines.id", ondelete="CASCADE"), primary_key=True
+    )
+    component_code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    rate_bp: Mapped[int] = mapped_column(Integer)
+    amount_cents: Mapped[int] = mapped_column(Integer)
