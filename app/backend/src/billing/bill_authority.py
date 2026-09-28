@@ -280,9 +280,16 @@ async def decide_override_request(
         # Applied here, not in a second step: this *is* "staff can resume ordinary billing on
         # the same draft" (acceptance criterion) — there is no approved-but-unapplied state
         # left for a second stale window to open on.
+        now = datetime.now(UTC)
         bill.manual_override_cents = decided
         bill.manual_override_reason = payload.note or request.reason
-        bill.updated_at = datetime.now(UTC)
+        bill.updated_at = now
+        # #65's stale-approval checkpoint: the exact same instant as `updated_at` above, so
+        # issue can tell "the bill hasn't moved since this override was authorized"
+        # (`bill.override_applied_revision == bill.updated_at`) from "it has"
+        # (a sibling appointment completing into this bill afterward bumps `updated_at` again
+        # without touching this column).
+        bill.override_applied_revision = now
 
     await db.flush()
     record_event(
@@ -459,9 +466,12 @@ async def apply_inline_admin_edit(
         await _end_inline_admin(bill_id)
         raise _NO_INLINE_AUTHORITY
 
+    now = datetime.now(UTC)
     bill.manual_override_cents = payload.total_cents
     bill.manual_override_reason = payload.reason
-    bill.updated_at = datetime.now(UTC)
+    bill.updated_at = now
+    # #65's stale-approval checkpoint — see `decide_override_request`'s own comment above.
+    bill.override_applied_revision = now
     await db.flush()
 
     record_event(

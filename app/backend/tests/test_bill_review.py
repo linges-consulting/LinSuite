@@ -145,16 +145,21 @@ async def make_customer(client) -> str:
     return resp.json()["id"]
 
 
-async def complete_a_visit(client, *, price_cents: int = 12000) -> tuple[str, str]:
+async def complete_a_visit(
+    client, *, price_cents: int = 12000, service_name: str = "Swedish Massage"
+) -> tuple[str, str]:
     """Books, confirms and completes one appointment end to end — the only way #59's hook
-    ever creates a draft bill — and returns `(bill_id, service_id)`."""
+    ever creates a draft bill — and returns `(bill_id, service_id)`. `service_name` only
+    matters when calling this more than once in the same test (#65's concurrency test needs
+    two distinct bills): `ux_services_name` is unique, so a second default-named call would
+    otherwise collide."""
     me = await me_staff_id(client)
     resp = await client.put(
         f"{STAFF}/{me}/hours",
         json={"blocks": [{"weekday": 0, "start_minute": 540, "end_minute": 1020}]},
     )
     assert resp.status_code == 200, resp.text
-    service_id = await make_service(client, [me], price_cents=price_cents)
+    service_id = await make_service(client, [me], price_cents=price_cents, name=service_name)
     customer_id = await make_customer(client)
 
     monday = date.today() + timedelta(days=7 + (7 - date.today().weekday()) % 7)
