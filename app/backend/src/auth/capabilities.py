@@ -168,6 +168,14 @@ CAPABILITIES: tuple[Capability, ...] = (
         "See a visit's draft service bill and apply eligible discounts before checkout.",
         "Billing",
     ),
+    # #69: commission rates and amounts are never staff-facing (m4.md's own note; #54's
+    # acceptance criteria) — `audit.view`'s own shape, Administrator-only, Admin Mode.
+    Capability(
+        "commission.view",
+        "See what staff have earned in commission, and export the report.",
+        "Billing",
+        requires_admin_mode=True,
+    ),
 )
 
 BY_KEY: dict[str, Capability] = {c.key: c for c in CAPABILITIES}
