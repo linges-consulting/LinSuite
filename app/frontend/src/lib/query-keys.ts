@@ -84,3 +84,7 @@ export const TAX_COMPONENTS = ['tax-components'] as const
  *  across a discount toggle. */
 export const DRAFT_BILLS = ['draft-bills'] as const
 export const BILL = ['bill'] as const
+/** Bill review authority (#64): one bill's override requests, and its inline-admin window
+ *  status — both take the bill id after them. */
+export const OVERRIDE_REQUESTS = ['override-requests'] as const
+export const INLINE_ADMIN = ['inline-admin'] as const

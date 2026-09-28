@@ -441,6 +441,18 @@ class ServiceBill(Base):
         cascade="all, delete-orphan", lazy="selectin", passive_deletes=True
     )
 
+    # --- bill review authority (#64) --------------------------------------------------------
+    # An admin/owner-authorized exception to the computed `grand_total_cents` — either an
+    # approved `BillOverrideRequest` (staff-request path) or a direct inline admin edit
+    # (`billing/bill_authority.py`). Deliberately a single absolute final-total override, not
+    # a second per-line/tax calculation path beside `bill_review.py::_compute`: an owner
+    # authorizing an exception is authorizing a number, not asking the system to re-derive
+    # one under a different formula. `_compute` reports it alongside the ordinarily-computed
+    # total (`BillOut.override_total_cents`) rather than replacing `grand_total_cents`, so
+    # nothing that already reads that field changes meaning.
+    manual_override_cents: Mapped[int | None] = mapped_column(Integer)
+    manual_override_reason: Mapped[str | None] = mapped_column(Text)
+
 
 class ServiceBillLine(Base):
     """One completed appointment's contribution to its visit's bill. `appointment_id` is
@@ -506,3 +518,101 @@ class ServiceBillDiscount(Base):
         ForeignKey("discounts.id", ondelete="RESTRICT"), primary_key=True
     )
     applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ---------------------------------------------------------------------------------------------
+#
+# Bill review authority (#64, M4 spec #54 stories 9-17, 27-29): the two override paths for
+# whatever staff can't resolve on #63's bill review screen with a predefined, enabled discount.
+#
+# **(a) Staff-request review**, this table. **(b) Inline admin edit** has no ORM row of its
+# own — `billing/bill_authority.py` grants it as a short-lived Redis window (the same idle/
+# hard-limit shape `auth/modes.py::grant_admin` already uses, reused settings, new key
+# namespace scoped to one bill rather than one session) and applies it directly, attributing
+# the resulting `ServiceBill.manual_override_cents` write to the admin who authenticated —
+# never to the staff session whose screen it happened to be typed on.
+#
+# **Unifies "ad hoc discount" and "price override" as one number**: `requested_total_cents`/
+# `decided_total_cents` is a proposed absolute `grand_total_cents` for the whole bill, not a
+# second per-line calculation path beside `bill_review.py::_compute`. `kind` is kept only for
+# what the review screen displays ("discount requested" vs. "price override requested");
+# nothing that computes money reads it.
+#
+# **Stale-approval invalidation (the ticket's central requirement)**: `bill_revision_as_of`
+# pins `ServiceBill.updated_at` at the moment of request — this ticket's own "optimistic
+# concurrency" marker, the ticket body's own suggestion. `apply_discounts` (#63,
+# `bill_review.py`) and a sibling appointment completing (`billing/completion.py`) both now
+# bump `updated_at` explicitly for exactly this reason (neither touched the bill row itself
+# before #64: one only wrote `service_bill_discounts`, the other only inserted a
+# `ServiceBillLine`). `bill_authority.py`'s decision route refuses (409) to approve or reject
+# once `bill.updated_at` no longer matches what was pinned — a stale request must be
+# resubmitted against the bill's current state, never silently re-pointed at it.
+#
+# **Applied at approval, not in a second step.** Approving *is* "staff can resume ordinary
+# billing on the same draft" (the acceptance criterion): the decided total lands on
+# `ServiceBill.manual_override_cents` in the same transaction as the decision, so there is
+# never an approved-but-unapplied state for a second stale window to open on.
+#
+# ---------------------------------------------------------------------------------------------
+
+BILL_OVERRIDE_REQUEST_KINDS = ("discount", "price_override")
+BILL_OVERRIDE_REQUEST_STATUSES = ("pending", "approved", "rejected")
+
+
+class BillOverrideRequest(Base):
+    """One staff-submitted ask for an exceptional discount or price override on a draft bill,
+    pending, approved (as submitted or revised) or rejected by an admin/owner holding
+    `billing.manage` in Admin Mode. See the module section above for the design choices —
+    the unified total-override shape and the stale-approval guard — this table exists for.
+
+    No hard delete, and no `ON DELETE CASCADE` erasing it either: `bill_id` cascades with its
+    bill (a draft is genuinely gone once nothing points at it, same as `ServiceBillLine`), but
+    `requested_by`/`decided_by` are `RESTRICT` — the same call every other actor FK in this
+    app makes, so a request's own history is never explained by a row that no longer exists.
+    """
+
+    __tablename__ = "bill_override_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN (" + ", ".join(f"'{k}'" for k in BILL_OVERRIDE_REQUEST_KINDS) + ")",
+            name="ck_bill_override_requests_kind",
+        ),
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{s}'" for s in BILL_OVERRIDE_REQUEST_STATUSES) + ")",
+            name="ck_bill_override_requests_status",
+        ),
+        CheckConstraint(
+            "requested_total_cents >= 0", name="ck_bill_override_requests_requested_total"
+        ),
+        CheckConstraint(
+            "decided_total_cents IS NULL OR decided_total_cents >= 0",
+            name="ck_bill_override_requests_decided_total",
+        ),
+        # `list_override_requests`'s own lookup: every request for one bill, and the decision
+        # route's "is there already a pending one" question the review screen will ask.
+        Index("ix_bill_override_requests_bill_status", "bill_id", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    bill_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("service_bills.id", ondelete="CASCADE"))
+    requested_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    kind: Mapped[str] = mapped_column(String(16))
+    reason: Mapped[str] = mapped_column(Text)
+    # The staff member's ask: what they want the bill's final `grand_total_cents` to become.
+    requested_total_cents: Mapped[int] = mapped_column(Integer)
+    # `ServiceBill.updated_at` at the moment of request — the stale-approval guard's "as of".
+    bill_revision_as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    status: Mapped[str] = mapped_column(String(16), server_default=text("'pending'"))
+    decided_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT")
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decision_note: Mapped[str | None] = mapped_column(Text)
+    # Null until decided. Set on approval — equal to `requested_total_cents` when approved
+    # "as-is", a different value when the admin/owner revised it. Never set on rejection.
+    decided_total_cents: Mapped[int | None] = mapped_column(Integer)

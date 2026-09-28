@@ -2433,6 +2433,7 @@ export type Bill = {
   customer: BillRef
   booking_group_id: string | null
   created_at: string
+  updated_at: string
   lines: BillLine[]
   /** Every enabled discount eligible for at least one line — the picker's own choices, not
    *  only the ones currently applied. */
@@ -2442,6 +2443,12 @@ export type Bill = {
   tax_totals_by_component: Record<string, number>
   tax_total_cents: number
   grand_total_cents: number
+  /** An admin/owner-authorized exception (#64: an approved staff request, or a direct inline
+   *  admin edit) — reported alongside `grand_total_cents` rather than replacing it. */
+  override_total_cents: number | null
+  override_reason: string | null
+  bill_override_requests_enabled: boolean
+  inline_admin_bill_edit_enabled: boolean
 }
 
 export type BillSummary = {
@@ -2476,5 +2483,107 @@ export async function applyBillDiscounts(id: string, discountIds: string[]): Pro
     discount_ids: discountIds,
   })
   if (!res.ok) throw await failure(res, 'Could not apply these discounts')
+  return res.json()
+}
+
+// --- bill review authority (#64): staff-request review + inline admin edit ----------------
+
+export type OverrideRequest = {
+  id: string
+  bill_id: string
+  kind: 'discount' | 'price_override'
+  reason: string
+  requested_total_cents: number
+  requested_by_email: string
+  requested_at: string
+  bill_revision_as_of: string
+  status: 'pending' | 'approved' | 'rejected'
+  decided_by_email: string | null
+  decided_at: string | null
+  decision_note: string | null
+  decided_total_cents: number | null
+}
+
+export async function fetchOverrideRequests(billId: string): Promise<OverrideRequest[]> {
+  const res = await fetch(`/api/bills/${encodeURIComponent(billId)}/override-requests`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) throw await failure(res, 'Could not load the override requests')
+  return (await res.json()).requests
+}
+
+export async function requestBillOverride(
+  billId: string,
+  body: { kind: 'discount' | 'price_override'; requested_total_cents: number; reason: string },
+): Promise<OverrideRequest> {
+  const res = await send('POST', `/api/bills/${encodeURIComponent(billId)}/override-requests`, body)
+  if (!res.ok) throw await failure(res, 'Could not submit this request')
+  return res.json()
+}
+
+/** Approve as-is (omit `decided_total_cents`), revise (include it), or reject. A 409 means the
+ *  bill changed since the request was made — the stale-approval guard — and the caller should
+ *  tell staff to resubmit rather than retry the same decision. */
+export async function decideOverrideRequest(
+  billId: string,
+  requestId: string,
+  body: { decision: 'approved' | 'rejected'; decided_total_cents?: number; note?: string },
+): Promise<OverrideRequest> {
+  const res = await send(
+    'POST',
+    `/api/bills/${encodeURIComponent(billId)}/override-requests/${encodeURIComponent(requestId)}/decision`,
+    body,
+  )
+  if (!res.ok) throw await failure(res, 'Could not record this decision')
+  return res.json()
+}
+
+export type InlineAdminStatus = {
+  active: boolean
+  admin_email: string | null
+  hard_limit_at: string | null
+}
+
+export async function fetchInlineAdminStatus(billId: string): Promise<InlineAdminStatus> {
+  const res = await fetch(`/api/bills/${encodeURIComponent(billId)}/inline-admin`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) throw await failure(res, 'Could not check the inline admin status')
+  return res.json()
+}
+
+/** The admin/owner's own credentials, entered on the staff screen. `totp` is only sent when
+ *  the account is enrolled and the server asks for one (`mfa_required`). */
+export async function authenticateInlineAdmin(
+  billId: string,
+  body: { email: string; password: string; totp?: string },
+): Promise<InlineAdminStatus> {
+  const res = await send(
+    'POST',
+    `/api/bills/${encodeURIComponent(billId)}/inline-admin/authenticate`,
+    body,
+  )
+  if (!res.ok) throw await failure(res, 'Could not authenticate')
+  return res.json()
+}
+
+/** Ends inline authority early — called when staff navigate away from the bill while it is
+ *  still active, so it never outlives the visit to the screen it was granted on. */
+export async function releaseInlineAdmin(billId: string): Promise<void> {
+  const res = await send('POST', `/api/bills/${encodeURIComponent(billId)}/inline-admin/release`)
+  if (!res.ok) throw await failure(res, 'Could not release inline admin authority')
+}
+
+/** The supervised edit itself. One save consumes the authenticated window outright. */
+export async function applyInlineAdminEdit(
+  billId: string,
+  body: { total_cents: number; reason: string },
+): Promise<Bill> {
+  const res = await send(
+    'PUT',
+    `/api/bills/${encodeURIComponent(billId)}/inline-admin/override`,
+    body,
+  )
+  if (!res.ok) throw await failure(res, 'Could not save this edit')
   return res.json()
 }

@@ -64,6 +64,15 @@ SERVICE_UNAVAILABLE = "service_unavailable"
 # they just aren't this appointment's practitioner or this note's author. `capability_required`
 # would send them to ask for a grant that doesn't exist and can't fix it.
 NOT_NOTE_AUTHOR = "not_note_author"
+# #64: the business turned one of the two bill review authority paths off. Its own code, not
+# `capability_required` — the caller may hold every capability there is, and role membership
+# is not what refused this; a per-business setting did.
+BILL_OVERRIDE_REQUESTS_DISABLED = "bill_override_requests_disabled"
+INLINE_ADMIN_BILLING_DISABLED = "inline_admin_billing_disabled"
+# #64: no live inline-admin window on this bill — nobody has authenticated, the one edit it
+# authorized already happened, or the idle/hard-limit window ran out. Distinct from
+# `admin_mode_required`: the caller's own Admin Mode is not what is being asked about.
+INLINE_ADMIN_AUTHORITY_REQUIRED = "inline_admin_authority_required"
 
 
 class Forbidden(HTTPException):

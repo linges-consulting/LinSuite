@@ -231,6 +231,10 @@ class NotificationSettingsOut(BaseModel):
     # --- walk-in queue toggle (Phase 7 Task 1, #12) -------------------------------------
     enable_walk_in_queue: bool
 
+    # --- bill review authority toggles (#64) ---------------------------------------------
+    enable_bill_override_requests: bool
+    enable_inline_admin_bill_edit: bool
+
 
 class NotificationSettingsChange(BaseModel):
     """A field left out (or sent `null`) is left alone — the Security panel's own rule, applied
@@ -262,6 +266,10 @@ class NotificationSettingsChange(BaseModel):
 
     # --- walk-in queue toggle (Phase 7 Task 1, #12) -------------------------------------
     enable_walk_in_queue: bool | None = None
+
+    # --- bill review authority toggles (#64) ---------------------------------------------
+    enable_bill_override_requests: bool | None = None
+    enable_inline_admin_bill_edit: bool | None = None
 
 
 class TestEmailRequest(BaseModel):
@@ -335,6 +343,8 @@ def _settings_out(
         booking_daily_cap_per_ip=business.booking_daily_cap_per_ip,
         booking_daily_cap_per_email=business.booking_daily_cap_per_email,
         enable_walk_in_queue=business.enable_walk_in_queue,
+        enable_bill_override_requests=business.enable_bill_override_requests,
+        enable_inline_admin_bill_edit=business.enable_inline_admin_bill_edit,
     )
 
 
@@ -391,6 +401,10 @@ async def update_notification_settings(
         candidates["booking_daily_cap_per_email"] = payload.booking_daily_cap_per_email
     if payload.enable_walk_in_queue is not None:
         candidates["enable_walk_in_queue"] = payload.enable_walk_in_queue
+    if payload.enable_bill_override_requests is not None:
+        candidates["enable_bill_override_requests"] = payload.enable_bill_override_requests
+    if payload.enable_inline_admin_bill_edit is not None:
+        candidates["enable_inline_admin_bill_edit"] = payload.enable_inline_admin_bill_edit
 
     changed = [field for field, value in candidates.items() if getattr(business, field) != value]
     for field in changed:

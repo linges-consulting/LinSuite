@@ -9,8 +9,9 @@ function's own status guard to call this at all. So the one-line-per-appointment
 inherited from that lock, not re-implemented here — see `ServiceBillLine`'s docstring.
 """
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import func
 
 from billing.models import ServiceBill, ServiceBillLine
 from scheduling.models import Appointment
@@ -39,6 +40,17 @@ async def record_draft_bill_line(db: AsyncSession, appointment: Appointment) -> 
         db.add(bill)
         await db.flush()
         bill_id = bill.id
+    else:
+        # #64: a sibling appointment completing onto an *existing* draft changes what a
+        # pending staff override request (`bill_override_requests`) was reviewed against —
+        # bump `updated_at` with a plain `UPDATE`, no need to load the row, so
+        # `bill_authority.py`'s stale-approval guard sees this the same way it already sees a
+        # discount-selection change (`bill_review.py::apply_discounts`). A brand-new bill
+        # (the `if` branch above) needs no bump: its own `server_default=func.now()` already
+        # postdates every request, since nothing could have targeted a bill before it existed.
+        await db.execute(
+            update(ServiceBill).where(ServiceBill.id == bill_id).values(updated_at=func.now())
+        )
     db.add(
         ServiceBillLine(
             bill_id=bill_id,

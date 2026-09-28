@@ -17,6 +17,7 @@ from auth.passwords import router as passwords_router
 from auth.roles import router as roles_router
 from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
+from billing.bill_authority import router as bill_authority_router
 from billing.bill_review import router as bill_review_router
 from billing.packages import router as package_definitions_router
 from billing.routes import router as discounts_router
@@ -302,4 +303,8 @@ api.include_router(tax_router)
 # The staff-facing draft-bill review screen (`billing.view`, Staff Mode, #63): #59's draft
 # bill, #58's discounts and #57's tax come together here for the first time.
 api.include_router(bill_review_router)
+# Bill review authority (#64): staff-request review (`billing.manage`, Admin Mode) and inline
+# admin edit (own credentials, verified on the staff screen) — the two override paths on top
+# of #63's screen. Same `/bills` prefix as `bill_review_router`; no path collides.
+api.include_router(bill_authority_router)
 app.include_router(api)
