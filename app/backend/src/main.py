@@ -21,6 +21,7 @@ from billing.bill_authority import router as bill_authority_router
 from billing.bill_review import router as bill_review_router
 from billing.invoices import router as invoices_router
 from billing.packages import router as package_definitions_router
+from billing.retail_sales import router as retail_sales_router
 from billing.routes import router as discounts_router
 from billing.tax_routes import router as tax_router
 from core.config import get_settings
@@ -312,4 +313,8 @@ api.include_router(bill_authority_router)
 # issued, immutable invoice (`billing.view`, Staff Mode — checkout, not an admin action), plus
 # `GET /invoices`/`GET /invoices/{id}` to read one back from its own frozen snapshot.
 api.include_router(invoices_router)
+# Retail sale (#75): draft cart -> atomic, stock-deducting issue (`billing.view`, Staff Mode).
+# Always its own invoice, never combined with a service invoice — a separate table pair and a
+# separate router, sharing only the `business_invoice_counters` numbering series.
+api.include_router(retail_sales_router)
 app.include_router(api)

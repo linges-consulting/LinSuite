@@ -893,3 +893,271 @@ class InvoiceLineTax(Base):
     component_code: Mapped[str] = mapped_column(String(16), primary_key=True)
     rate_bp: Mapped[int] = mapped_column(Integer)
     amount_cents: Mapped[int] = mapped_column(Integer)
+
+
+# ---------------------------------------------------------------------------------------------
+#
+# ## retail sale: draft -> atomic stock-deducting issue (#75, M4 spec #54 stories 5, 69-77)
+#
+# A retail sale of `ProductVariant`s (#56) is always its own invoice, never combined with a
+# service bill/invoice (CLAUDE.md "Domain rules": "Services and retail invoice separately").
+# So this is a second, independent draft/issued table pair — `RetailSale`/`RetailSaleLine`
+# mirror `ServiceBill`/`ServiceBillLine`'s draft/mutable shape, `RetailInvoice`/
+# `RetailInvoiceLine` mirror `Invoice`/`InvoiceLine`'s issued/frozen shape — rather than adding
+# nullable retail columns onto the existing service-shaped tables: `invoices.service_bill_id`
+# and `invoice_lines.appointment_id`/`service_id` are NOT NULL for a reason (an issued service
+# invoice is never a hybrid), and a retail sale never has a `ServiceBill` behind it (#59's
+# completion hook is the only thing that creates one, and it only fires for appointments).
+#
+# **No completion hook creates this one.** Unlike `ServiceBill`, which only ever comes from
+# `complete_appointment`, `RetailSale` is created directly by a staff action ("start a retail
+# sale") — `billing/retail_sales.py::start_retail_sale`.
+#
+# **A draft never touches stock, at all** — no reservation, no soft-lock (#75's own first
+# acceptance criterion). `RetailSaleLine.unit_price_cents` is a snapshot of `ProductVariant.
+# price_cents` taken when the line is added (the same "copied rather than referenced" contract
+# `ServiceBillLine.price_cents` already follows against `Service.price_cents`) — a later price
+# change on the variant must not rewrite a line already sitting in somebody's cart. Quantity
+# available is never checked at draft time either; issue is the one and only moment that
+# matters (below).
+#
+# **Anonymous or linked.** `customer_id` is nullable — the opposite of `ServiceBill.
+# customer_id`, which is required because a visit is always for one client. A walk-up retail
+# sale with no customer record is explicitly allowed (#75's own acceptance criteria); when a
+# customer *is* linked, the sale (and later its invoice) is visible in their history the same
+# way an issued service `Invoice` already is (`ix_invoices_customer`'s own precedent).
+#
+# **"Sold by" vs. the payment collector — two distinct staff attributions, never conflated.**
+# `sold_by_staff_id` defaults to the acting staff member (`billing/retail_sales.py::
+# _acting_staff_id`, the same `Staff.user_id == actor.id` lookup `scheduling/appointments.py`
+# already makes) but is staff-selectable — an admin/manager ringing up a sale on behalf of a
+# colleague, or reassigning attribution, via `PATCH /api/retail-sales/{id}`.
+# `payment_collector_staff_id` is a second, independent, nullable column: whoever actually
+# processed the payment. Changing one never touches the other — two separate columns, not one
+# field with an override flag. **No payment ledger exists yet** (#66 is running in parallel) —
+# this column is only the place a future payment-collector reference attaches once it does;
+# nothing here wires actual payment collection, per this ticket's own scope. Both are nullable
+# on `RetailSale`; frozen onto `RetailInvoice` at issue, where `sold_by_staff_id` becomes NOT
+# NULL (issue refuses a sale with no attribution at all) and `payment_collector_staff_id`
+# stays nullable, since #66's wiring is still pending.
+#
+# **The atomic multi-line stock deduction, composed from #61's own primitive.** `billing/
+# retail_sales.py::issue_retail_sale` calls `inventory/stock.py::record_movement` once per
+# line, `kind="sale"`, a negative `quantity_delta` — the exact call `m4.md`'s own #61 ledger
+# entry names as the one this ticket must use, never a second competing `UPDATE`. Every call
+# happens inside the *one* transaction that also inserts the `RetailInvoice`/
+# `RetailInvoiceLine` rows; nothing commits until every line's `record_movement` has
+# succeeded. `record_movement`'s own atomic `UPDATE ... WHERE quantity_on_hand + :delta >= 0`
+# (CLAUDE.md "Concurrency: stock") is what "revalidates availability" means here — there is no
+# separate read-then-check step for a second buyer to race. If any one line's variant has
+# insufficient stock, `record_movement` raises `InsufficientStock`; the route lets that
+# propagate as a 409 naming the variant, and — because nothing was committed —
+# `SessionDep`'s own request-scoped session discards every write this attempt made when
+# FastAPI tears it down, the same reliance `inventory/stock_routes.py`'s own routes already
+# place on that teardown (no explicit `db.rollback()` needed). So a whole invoice is never
+# partially stock-deducted: either every line's movement lands and the invoice commits, or
+# none of it does. Lines are processed in `variant_id` order (not insertion order) so two
+# concurrent multi-line sales sharing more than one variant can never deadlock against each
+# other by taking the same two row locks in opposite orders.
+#
+# **Numbering reuses `business_invoice_counters`, the same series `Invoice` draws from**
+# (`billing/invoice_numbering.py::allocate_invoice_number`, unchanged) — a service invoice and
+# a retail invoice for the same business never collide on a number, because both draw from the
+# one counter row, even though each keeps its own `uq_*_business_number` uniqueness *within*
+# its own table (the same defense-in-depth role `uq_invoices_business_number` already plays:
+# the row lock should already make a cross-table collision impossible; the per-table
+# constraint is what a stray script or a future bug can't defeat).
+#
+# **No discount or tax computation in this ticket** — #75's acceptance criteria are about the
+# draft/issue/stock/attribution machinery only, and this ticket is blocked by #61/#65, not
+# #57/#58. `RetailInvoice.subtotal_cents`/`grand_total_cents` are the plain sum of each line's
+# `unit_price_cents * quantity`, with no tax or discount applied — the same scope line #65
+# already drew for its own "no cancel route... not in this ticket's acceptance criteria." A
+# later ticket that wants retail tax/discounts extends this table the way #65 extended
+# `ServiceBill`'s neighbourhood, without touching what's built here.
+#
+# **Commission field: reused, and snapshotted at issue — the ticket's own decision point.**
+# `RetailInvoiceLine.commission_rate_bp` is the same `InvoiceLine.commission_rate_bp`-shaped
+# column #65 already established, so #69's posting logic can read either line shape
+# uniformly. It is populated from `Staff.commission_rate_retail_bp` (already exists,
+# `scheduling/models.py:102`) belonging to the invoice's own `sold_by_staff_id` — read fresh
+# **at issue**, not at draft-line-add time. That is the opposite moment from the service side
+# (`ServiceBillLine.commission_rate_bp` freezes at appointment *completion*, CLAUDE.md
+# "commission earns on delivery, not sale") but it is still the same rule applied to what
+# "delivery" means for a retail item: nothing has left the shelf until stock is actually
+# deducted, which only happens at issue — issue *is* the retail delivery moment, so that is
+# when the rate is read and frozen. #75 does **not** post a commission entry anywhere — no
+# such ledger exists yet (#69 is running in parallel and is expected to add the posting hook,
+# symmetrically, once both tickets merge); this column only makes the rate available for #69
+# to read, snapshotted so a later rate change on `Staff` can never rewrite an already-issued
+# line's numbers.
+#
+# ---------------------------------------------------------------------------------------------
+
+RETAIL_SALE_STATUSES = ("draft", "issued")
+RETAIL_INVOICE_STATUSES = ("issued", "cancelled")
+
+
+class RetailSale(Base):
+    """One retail sale's draft — a cart of `ProductVariant` lines built up by a staff action,
+    never touching stock until #75's own atomic issue. See the module section above."""
+
+    __tablename__ = "retail_sales"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{s}'" for s in RETAIL_SALE_STATUSES) + ")",
+            name="ck_retail_sales_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    # Nullable, unlike `ServiceBill.customer_id` — a walk-up retail sale may have no client
+    # record at all (module section above).
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("customers.id", ondelete="RESTRICT")
+    )
+    status: Mapped[str] = mapped_column(String(16), server_default=text("'draft'"))
+    # Defaults to the acting staff member at creation, reassignable while still a draft
+    # (`PATCH /api/retail-sales/{id}`) — module section above.
+    sold_by_staff_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("staff.id", ondelete="RESTRICT"))
+    # Nullable: who actually processed the payment, independent of `sold_by_staff_id` and
+    # unwired to any real payment flow yet (#66, running in parallel) — module section above.
+    payment_collector_staff_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("staff.id", ondelete="RESTRICT")
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    lines: Mapped[list["RetailSaleLine"]] = relationship(
+        cascade="all, delete-orphan", lazy="selectin", passive_deletes=True
+    )
+
+
+class RetailSaleLine(Base):
+    """One variant/quantity in a draft retail sale's cart. `unit_price_cents` is a snapshot of
+    `ProductVariant.price_cents` taken when the line is added — see the module section above
+    for why. No ORM relationship to `ProductVariant` (only a plain `variant_id` column):
+    `billing` never imports `inventory`'s ORM classes, the same cross-domain boundary
+    `PackageDefinitionService.service_id` already draws against `scheduling`."""
+
+    __tablename__ = "retail_sale_lines"
+    __table_args__ = (
+        CheckConstraint("quantity >= 1", name="ck_retail_sale_lines_quantity"),
+        CheckConstraint("unit_price_cents >= 0", name="ck_retail_sale_lines_price"),
+        Index("ix_retail_sale_lines_sale", "sale_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    sale_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("retail_sales.id", ondelete="CASCADE"))
+    # No `ondelete` — a variant is never hard-deleted (`StockMovement.variant_id`'s own
+    # precedent, `inventory/models.py`).
+    variant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("product_variants.id"))
+    quantity: Mapped[int] = mapped_column(Integer)
+    unit_price_cents: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RetailInvoice(Base):
+    """One issued retail invoice — the voidable document class (CLAUDE.md), created once, at
+    #75's own atomic issue, and never combined with a service invoice (module section above).
+    No cancel route is built by this ticket (the same scope line #65 drew for its own cancel
+    transition) — the voidable shape and its trigger are ready for #76 (retail returns)."""
+
+    __tablename__ = "retail_invoices"
+    __table_args__ = (
+        UniqueConstraint(
+            "business_id", "invoice_number", name="uq_retail_invoices_business_number"
+        ),
+        UniqueConstraint("retail_sale_id", name="uq_retail_invoices_retail_sale_id"),
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{s}'" for s in RETAIL_INVOICE_STATUSES) + ")",
+            name="ck_retail_invoices_status",
+        ),
+        CheckConstraint(
+            "(status = 'issued' AND cancelled_at IS NULL AND cancelled_by IS NULL "
+            "AND cancel_reason IS NULL) OR "
+            "(status = 'cancelled' AND cancelled_at IS NOT NULL AND cancelled_by IS NOT NULL "
+            "AND cancel_reason IS NOT NULL)",
+            name="ck_retail_invoices_cancel_fields",
+        ),
+        Index("ix_retail_invoices_customer", "customer_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    business_id: Mapped[int] = mapped_column(Integer, ForeignKey("businesses.id"))
+    invoice_number: Mapped[int] = mapped_column(Integer)
+    retail_sale_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("retail_sales.id", ondelete="RESTRICT")
+    )
+    customer_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("customers.id", ondelete="RESTRICT")
+    )
+    status: Mapped[str] = mapped_column(Text, server_default=text("'issued'"))
+    subtotal_cents: Mapped[int] = mapped_column(Integer)
+    # The one number actually billed. Always equal to `subtotal_cents` in this ticket (no tax
+    # or discount computation yet, module section above) — a separate column anyway, so a
+    # later ticket that adds either never has to rename what every reader already calls "the
+    # total".
+    grand_total_cents: Mapped[int] = mapped_column(Integer)
+    sold_by_staff_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("staff.id", ondelete="RESTRICT"))
+    payment_collector_staff_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("staff.id", ondelete="RESTRICT")
+    )
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    issued_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    replaces_invoice_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("retail_invoices.id"))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT")
+    )
+    cancel_reason: Mapped[str | None] = mapped_column(Text)
+
+    lines: Mapped[list["RetailInvoiceLine"]] = relationship(lazy="selectin")
+
+
+class RetailInvoiceLine(Base):
+    """One frozen line of an issued retail invoice. Append-only from the app role's own grant
+    (migration 0055) — even the invoice's own cancel transition never touches a line, the same
+    shape `InvoiceLine` already follows."""
+
+    __tablename__ = "retail_invoice_lines"
+    __table_args__ = (
+        CheckConstraint("quantity >= 1", name="ck_retail_invoice_lines_quantity"),
+        CheckConstraint("unit_price_cents >= 0", name="ck_retail_invoice_lines_price"),
+        CheckConstraint("line_total_cents >= 0", name="ck_retail_invoice_lines_line_total"),
+        CheckConstraint(
+            "commission_rate_bp BETWEEN 0 AND 10000", name="ck_retail_invoice_lines_commission_bp"
+        ),
+        UniqueConstraint("retail_sale_line_id", name="uq_retail_invoice_lines_retail_sale_line_id"),
+        Index("ix_retail_invoice_lines_invoice", "invoice_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    invoice_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("retail_invoices.id", ondelete="CASCADE")
+    )
+    retail_sale_line_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("retail_sale_lines.id", ondelete="RESTRICT")
+    )
+    variant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("product_variants.id"))
+    quantity: Mapped[int] = mapped_column(Integer)
+    unit_price_cents: Mapped[int] = mapped_column(Integer)
+    line_total_cents: Mapped[int] = mapped_column(Integer)
+    # `sold_by_staff_id`'s value at issue, copied per line for the same reason `InvoiceLine.
+    # staff_id` is copied per line (module section above): every line in one retail sale
+    # shares one "sold by", but #69's posting logic reads a uniform per-line shape either way.
+    staff_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("staff.id", ondelete="RESTRICT"))
+    # `Staff.commission_rate_retail_bp`, read fresh and frozen at issue — module section above.
+    commission_rate_bp: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
