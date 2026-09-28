@@ -18,6 +18,8 @@ from tests.test_appointments import (  # noqa: F401 — the autouse fixture come
     MONDAY,
     OTHER_PASSWORD,
     PASSWORD,
+    STAFF,
+    add_colleague,
     as_admin,
     as_staff,
     at,
@@ -30,6 +32,8 @@ from tests.test_appointments import (  # noqa: F401 — the autouse fixture come
     me_staff_id,
     move,
     put_hours,
+    service_bill_lines,
+    service_bills,
     slots_on,
 )
 
@@ -120,6 +124,163 @@ async def test_completing_a_cancelled_appointment_is_refused(client):
 
     assert resp.status_code == 409, resp.text
     assert resp.json()["code"] == "invalid_transition"
+
+
+# --- draft service bill on completion (#59) ------------------------------------------------
+#
+# `complete_appointment`'s second hook (m4.md "the completion transaction to hook into"): a
+# completed appointment creates or appends to its visit's draft `service_bills` row, one
+# `service_bill_lines` row per appointment, with the staff member's commission rate
+# snapshotted onto the line at this exact moment — not re-read later (CLAUDE.md's M4 reversal
+# of the older "snapshot at invoice issue" assumption).
+
+
+async def set_commission(client, staff_id: str, bp: int) -> None:
+    resp = await client.patch(f"{STAFF}/{staff_id}", json={"commission_rate_services_bp": bp})
+    assert resp.status_code == 200, resp.text
+
+
+async def book_group_of_two(client, ana: str, ben: str, service_a: str, service_b: str) -> dict:
+    body = {
+        "starts_at": at("09:00"),
+        "links": [
+            {"service_id": service_a, "staff_id": ana},
+            {"service_id": service_b, "staff_id": ben},
+        ],
+        "customer": {"first_name": "Priya", "last_name": "Nair"},
+    }
+    resp = await client.post(f"{APPOINTMENTS}/group", json=body)
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+async def test_completing_a_single_appointment_creates_a_one_line_draft_bill(client):
+    appointment_id, service, me, _ = await book_one(client)
+    await set_commission(client, me, 4500)
+
+    resp = await client.post(f"{APPOINTMENTS}/{appointment_id}/complete", json={})
+
+    assert resp.status_code == 200, resp.text
+    bills = await service_bills()
+    assert len(bills) == 1
+    bill_id, group_id, status = bills[0]
+    assert group_id is None  # an ungrouped appointment's bill carries no visit tag
+    assert status == "draft"
+    lines = await service_bill_lines(bill_id)
+    assert len(lines) == 1
+    assert lines[0]["appointment_id"] == appointment_id
+    assert lines[0]["service_id"] == service
+    assert lines[0]["staff_id"] == me
+    assert lines[0]["commission_rate_bp"] == 4500
+
+    # The snapshot is fixed at completion — a later rate change never rewrites it.
+    await set_commission(client, me, 1000)
+    assert (await service_bill_lines(bill_id))[0]["commission_rate_bp"] == 4500
+
+
+async def test_a_booking_groups_appointments_contribute_lines_to_one_shared_draft(client):
+    await as_admin(client)
+    ana = await me_staff_id(client)
+    ben = await add_colleague(client, "ben@cedar.example", OTHER_PASSWORD)
+    await put_hours(client, ana, [(0, 540, 1020)])
+    await put_hours(client, ben, [(0, 540, 1020)])
+    facial = await make_service(client, [ana], name="Facial", duration_minutes=60, price_cents=8000)
+    massage = await make_service(
+        client, [ben], name="Massage", duration_minutes=60, price_cents=9000
+    )
+    await set_commission(client, ana, 3000)
+    await set_commission(client, ben, 2000)
+    group = await book_group_of_two(client, ana, ben, facial, massage)
+    first_id, second_id = (a["id"] for a in group["appointments"])
+
+    first = await client.post(f"{APPOINTMENTS}/{first_id}/complete", json={})
+    assert first.status_code == 200, first.text
+    second = await client.post(f"{APPOINTMENTS}/{second_id}/complete", json={})
+    assert second.status_code == 200, second.text
+
+    bills = await service_bills()
+    assert len(bills) == 1  # one draft for the whole visit, not one per appointment
+    bill_id, group_id, status = bills[0]
+    assert group_id == group["booking_group_id"]
+    assert status == "draft"
+    lines = await service_bill_lines(bill_id)
+    assert {line["appointment_id"] for line in lines} == {first_id, second_id}
+    by_appointment = {line["appointment_id"]: line for line in lines}
+    assert by_appointment[first_id]["commission_rate_bp"] == 3000
+    assert by_appointment[second_id]["commission_rate_bp"] == 2000
+
+
+async def test_a_retried_completion_never_duplicates_the_bill_line(client):
+    appointment_id, *_ = await book_one(client)
+    first = await client.post(f"{APPOINTMENTS}/{appointment_id}/complete", json={})
+    assert first.status_code == 200, first.text
+
+    again = await client.post(f"{APPOINTMENTS}/{appointment_id}/complete", json={})
+
+    assert again.status_code == 409, again.text
+    bills = await service_bills()
+    assert len(bills) == 1
+    assert len(await service_bill_lines(bills[0][0])) == 1
+
+
+async def test_cancelling_creates_no_bill_line(client):
+    appointment_id, *_ = await book_one(client)
+
+    resp = await client.post(f"{APPOINTMENTS}/{appointment_id}/cancel", json={})
+
+    assert resp.status_code == 200, resp.text
+    assert await service_bills() == []
+
+
+async def test_a_no_show_creates_no_bill_line(client):
+    appointment_id, *_ = await book_one(client)
+    await push_to_past(appointment_id)
+
+    resp = await client.post(f"{APPOINTMENTS}/{appointment_id}/no-show", json={})
+
+    assert resp.status_code == 200, resp.text
+    assert await service_bills() == []
+
+
+async def test_a_completion_for_an_already_issued_bills_visit_opens_a_new_draft(client):
+    """Simulates what #65 (invoice issue, not built yet) will eventually do to a bill's
+    `status` — direct SQL, the same way `push_to_past` reaches into state no endpoint yet
+    exposes — then proves a third link finishing after that never appends to it."""
+    await as_admin(client)
+    ana = await me_staff_id(client)
+    ben = await add_colleague(client, "ben@cedar.example", OTHER_PASSWORD)
+    await put_hours(client, ana, [(0, 540, 1020)])
+    await put_hours(client, ben, [(0, 540, 1020)])
+    facial = await make_service(client, [ana], name="Facial", duration_minutes=60, price_cents=8000)
+    massage = await make_service(
+        client, [ben], name="Massage", duration_minutes=60, price_cents=9000
+    )
+    group = await book_group_of_two(client, ana, ben, facial, massage)
+    first_id, second_id = (a["id"] for a in group["appointments"])
+    first = await client.post(f"{APPOINTMENTS}/{first_id}/complete", json={})
+    assert first.status_code == 200, first.text
+    issued_bill_id = (await service_bills())[0][0]
+    async with session_scope() as db:
+        await db.execute(
+            text("UPDATE service_bills SET status = 'issued' WHERE id = :id"),
+            {"id": issued_bill_id},
+        )
+        await db.commit()
+
+    second = await client.post(f"{APPOINTMENTS}/{second_id}/complete", json={})
+
+    assert second.status_code == 200, second.text
+    bills = await service_bills()
+    assert len(bills) == 2
+    by_id = {b[0]: b for b in bills}
+    assert by_id[issued_bill_id][2] == "issued"
+    assert len(await service_bill_lines(issued_bill_id)) == 1
+    new_draft_id = next(b[0] for b in bills if b[0] != issued_bill_id)
+    assert by_id[new_draft_id][1] == group["booking_group_id"]
+    assert by_id[new_draft_id][2] == "draft"
+    new_lines = await service_bill_lines(new_draft_id)
+    assert len(new_lines) == 1
+    assert new_lines[0]["appointment_id"] == second_id
 
 
 # --- cancel ------------------------------------------------------------------------------

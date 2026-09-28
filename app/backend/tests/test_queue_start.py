@@ -58,6 +58,12 @@ async def claimed_instance(client):
         await wipe_document_keys()
         async with session_scope() as db:
             for table in (
+                # #59's draft bill lines/bills FK to appointments with no cascade from that
+                # side — deleted first, before appointments, the same reason queue_entries
+                # already comes before it (test_appointments.py's fixture carries the same
+                # addition).
+                "service_bill_lines",
+                "service_bills",
                 "queue_entries",
                 "appointment_resources",
                 "appointments",
@@ -95,7 +101,13 @@ async def claimed_instance(client):
     client.cookies.clear()
     yield
     async with session_scope() as db:
-        for table in ("queue_entries", "appointment_resources", "appointments"):
+        for table in (
+            "service_bill_lines",
+            "service_bills",
+            "queue_entries",
+            "appointment_resources",
+            "appointments",
+        ):
             await db.execute(text(f"DELETE FROM {table}"))
         await db.commit()
 
