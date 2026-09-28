@@ -22,6 +22,7 @@ from billing.bill_review import router as bill_review_router
 from billing.invoices import router as invoices_router
 from billing.package_purchase import router as package_purchase_router
 from billing.packages import router as package_definitions_router
+from billing.retail_sales import router as retail_sales_router
 from billing.routes import router as discounts_router
 from billing.tax_routes import router as tax_router
 from core.config import get_settings
@@ -317,4 +318,8 @@ api.include_router(invoices_router)
 # exact same machinery as #65 — same counter, same `Invoice` table (`billing.view`, Staff
 # Mode). Credits are frozen but never activated here; see `billing/package_purchase.py`.
 api.include_router(package_purchase_router)
+# Retail sale (#75): draft cart -> atomic, stock-deducting issue (`billing.view`, Staff Mode).
+# Always its own invoice, never combined with a service invoice — a separate table pair and a
+# separate router, sharing only the `business_invoice_counters` numbering series.
+api.include_router(retail_sales_router)
 app.include_router(api)
