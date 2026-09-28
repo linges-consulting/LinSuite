@@ -70,7 +70,7 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "invoice_lines": ("SELECT", "INSERT"),
     "invoice_line_discounts": ("SELECT", "INSERT"),
     "invoice_line_taxes": ("SELECT", "INSERT"),
-    # The commission ledger (#69, 0055): append-only, a correction is a second row
+    # The commission ledger (#69, 0057): append-only, a correction is a second row
     # (`kind="reversal"`), never an UPDATE of an existing one.
     "commission_postings": ("SELECT", "INSERT"),
 }

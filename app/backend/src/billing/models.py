@@ -911,7 +911,7 @@ class InvoiceLineTax(Base):
 #
 # **Append-only, `stock_movements`/`invoice_lines`'s exact shape** (CLAUDE.md, refunds: "post
 # as dated reversing entries in the period they occur, not by rewriting the original
-# posting"). The app role may only INSERT and SELECT (migration 0055's grant + trigger pair).
+# posting"). The app role may only INSERT and SELECT (migration 0057's grant + trigger pair).
 # A correction is never an `UPDATE` of `amount_cents` — it is a second row, `kind="reversal"`,
 # a negative `amount_cents`, and its own `posted_at` (the date the reversal actually happens,
 # never backdated to the original invoice's date) — the shape #67/#68/#73 (payment
