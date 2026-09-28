@@ -280,7 +280,12 @@ function reader(capabilities: string[], ready: () => boolean = () => true) {
         })
       }
       if (path === '/api/customers/c1') {
-        return Response.json({ customer: CUSTOMER, timezone: 'America/Toronto', appointments: [] })
+        return Response.json({
+          customer: CUSTOMER,
+          timezone: 'America/Toronto',
+          appointments: [],
+          notification_failures: [],
+        })
       }
       if (path === '/api/customers/c1/form-links') return Response.json({ links: [] })
       if (path === '/api/customers/c1/forms') {

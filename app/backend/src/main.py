@@ -43,6 +43,8 @@ from notes.routes import router as notes_router
 from scheduling.appointments import router as appointments_router
 from scheduling.closures import router as closures_router
 from scheduling.hours import router as hours_router
+from scheduling.public import router as public_booking_router
+from scheduling.queue import router as queue_router
 from scheduling.resources import router as resources_router
 from scheduling.schedule import router as schedule_router
 from scheduling.services import public as catalog_router
@@ -52,6 +54,7 @@ from scheduling.staff import public as roster_router
 from scheduling.staff import router as staff_router
 from scheduling.time_off import router as time_off_router
 from settings.images import FAVICON_MAX_BYTES, LOGO_MAX_BYTES
+from settings.notifications_routes import router as notification_settings_router
 from settings.routes import public as branding_router
 from settings.routes import router as business_router
 
@@ -246,6 +249,7 @@ api.include_router(availability_router)
 # The tracer bullet: what the slots above become once somebody picks one, and the people it
 # is for. `/staff` is the roster every scheduler reads; `/admin/staff` above is the accounts.
 api.include_router(appointments_router)
+api.include_router(queue_router)
 api.include_router(customers_router)
 api.include_router(erasure_router)
 # Who opened a client's record: administration, not the chart, so under `/admin` and unlogged.
@@ -266,6 +270,10 @@ api.include_router(form_scans_router)
 # Metadata only — no access-log row.
 api.include_router(form_compliance_router)
 api.include_router(public_forms_router)
+# The client-facing booking portal's first route (Phase 6 Task 1): the same engine
+# `availability_router` above reads, over an unauthenticated request (`scheduling/public.py`).
+api.include_router(public_booking_router)
 api.include_router(business_router)
+api.include_router(notification_settings_router)
 api.include_router(branding_router)
 app.include_router(api)

@@ -166,6 +166,12 @@ function fakeServer({
   groupSlots = [] as any[],
   /** `POST /api/appointments/group` refuses with this instead of booking. */
   groupBookingRefused = null as null | { status: number; body: any },
+  /** "Fit me in"'s multi-day scan (Task 3, #12): slots per business-local date, keyed
+   *  `YYYY-MM-DD`, for a `GET /availability` request whose range spans more than one day.
+   *  The dialog's ordinary single-day query is untouched by this and keeps answering `SLOTS`
+   *  regardless — only a `from` != `to` request (the week-wide scan) reads this map, empty
+   *  by default so a test that never presses "Fit me in" sees no behaviour change. */
+  fitMeInDays = {} as Record<string, typeof SLOTS>,
 } = {}) {
   const overridable = (detail: string) =>
     Response.json(
@@ -259,17 +265,24 @@ function fakeServer({
       if (url.startsWith('/api/availability?')) {
         const params = new URLSearchParams(url.split('?')[1])
         const staff = params.get('staff_id')
+        const from = params.get('from')!
+        const to = params.get('to')!
+        const dates = [from]
+        while (dates[dates.length - 1] < to) {
+          const [y, m, d] = dates[dates.length - 1].split('-').map(Number)
+          dates.push(new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10))
+        }
         return Response.json({
           service_id: 'v1',
           timezone: 'America/Toronto',
           granularity_minutes: 15,
           horizon_ends_on: '2026-09-13',
-          days: [
-            {
-              date: params.get('from'),
-              slots: staff ? SLOTS.filter((s) => s.staff_ids.includes(staff)) : SLOTS,
-            },
-          ],
+          days: dates.map((date) => {
+            // A one-day ask (the ordinary dialog query, `from === to`) answers `SLOTS` as
+            // ever; a wider ask (the "Fit me in" scan) reads the per-date map instead.
+            const daySlots = dates.length === 1 ? SLOTS : (fitMeInDays[date] ?? [])
+            return { date, slots: staff ? daySlots.filter((s) => s.staff_ids.includes(staff)) : daySlots }
+          }),
         })
       }
       if (url.startsWith('/api/customers?')) {
@@ -791,6 +804,47 @@ test('"any available" sends no staff id and an inline client goes as a customer 
     customer: { first_name: 'Sam', last_name: 'Okonkwo', email: null, phone: '647-555-0100' },
     notes: 'Prefers firm pressure',
   })
+})
+
+// --- "Fit me in" (Phase 7 Task 3, #12) ------------------------------------------------------
+
+test('"Fit me in" jumps to the soonest day with an offer and picks its earliest slot', async () => {
+  onTheFifteenth()
+  // Nothing free today or tomorrow; the 17th is the soonest the week-wide scan finds.
+  fakeServer({ fitMeInDays: { '2026-06-17': SLOTS } })
+  const user = userEvent.setup()
+  renderSchedule()
+
+  await user.click(await screen.findByRole('button', { name: 'New appointment' }))
+  const dialog = await screen.findByRole('dialog', { name: 'New appointment' })
+  await user.click(within(dialog).getByRole('combobox', { name: 'Service' }))
+  await user.click(await screen.findByRole('option', { name: /Swedish Massage/ }))
+  expect(within(dialog).getByLabelText('Day')).toHaveValue(DAY)
+
+  await user.click(await within(dialog).findByRole('button', { name: 'Fit me in' }))
+
+  await waitFor(() => expect(within(dialog).getByLabelText('Day')).toHaveValue('2026-06-17'))
+  // The earliest of that day's slots, in the "Any available" bucket (nobody was named).
+  expect(
+    await within(dialog).findByRole('button', { name: '10:00 AM', pressed: true }),
+  ).toBeInTheDocument()
+})
+
+test('"Fit me in" says so when nothing turns up in the window', async () => {
+  onTheFifteenth()
+  fakeServer() // no fitMeInDays entries: every day in the scan comes back empty
+  const user = userEvent.setup()
+  renderSchedule()
+
+  await user.click(await screen.findByRole('button', { name: 'New appointment' }))
+  const dialog = await screen.findByRole('dialog', { name: 'New appointment' })
+  await user.click(within(dialog).getByRole('combobox', { name: 'Service' }))
+  await user.click(await screen.findByRole('option', { name: /Swedish Massage/ }))
+  await user.click(await within(dialog).findByRole('button', { name: 'Fit me in' }))
+
+  expect(await screen.findByText('Nothing free in the next week. Try a specific day, or another provider.')).toBeInTheDocument()
+  // Still on the day it started on — nothing to jump to.
+  expect(within(dialog).getByLabelText('Day')).toHaveValue(DAY)
 })
 
 test('a slot picked under a person\'s name books that person', async () => {

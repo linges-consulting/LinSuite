@@ -1,7 +1,8 @@
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { CircleCheck, Link2Off } from 'lucide-react'
+import { CircleCheck } from 'lucide-react'
 import { useEffect, useState, useRef } from 'react'
 import { useLocation } from 'react-router'
+import { DeadEnd } from '@/components/dead-end'
 import { Form } from '@/components/form'
 import { FormFieldInput } from '@/components/form-fields'
 import { SIGNATURE_TOO_SMALL } from '@/components/signature-pad'
@@ -282,16 +283,6 @@ function message(field: FormField, code: string, value?: unknown): string {
       : 'Draw your signature and type your full name.'
   }
   return code === 'required' ? 'This is required.' : 'Check this answer.'
-}
-
-function DeadEnd(props: { title: string; text: string }) {
-  return (
-    <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed px-6 py-12 text-center">
-      <Link2Off className="size-6 text-muted-foreground" aria-hidden />
-      <h1 className="text-lg font-semibold">{props.title}</h1>
-      <p className="max-w-sm text-muted-foreground">{props.text}</p>
-    </div>
-  )
 }
 
 function Page({ children }: { children: React.ReactNode }) {

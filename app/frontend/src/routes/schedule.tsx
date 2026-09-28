@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { CancelConfirm } from '@/components/calendar/cancel-confirm'
 import { Grid } from '@/components/calendar/grid'
 import { OverrideConfirm } from '@/components/calendar/override-confirm'
+import { SlotButtons } from '@/components/calendar/slot-buttons'
 import type { Change, Column, Prefill } from '@/components/calendar/types'
 import { ClassificationBadge } from '@/components/classification-badge'
 import { EmptyState } from '@/components/empty-state'
@@ -447,6 +448,10 @@ function ColourDot({ member }: { member: RosterEntry }) {
 
 const ANY = 'any'
 
+// "Fit me in"'s forward window: today plus this many days, comfortably inside
+// `GET /availability`'s 31-day cap (`scheduling/slots.py::MAX_RANGE_DAYS`).
+const FIT_ME_IN_WINDOW_DAYS = 6
+
 /** A chain refused with `override_available`. The chain picker offers only chain-valid
  *  starts, so this is reachable on a stale pick — and the dialog has no per-link confirm to
  *  send them to, so it must not say "it can be booked with an override" and then offer no
@@ -557,6 +562,34 @@ function BookingDialog(props: {
     queryKey: [...CUSTOMERS, search],
     queryFn: () => searchCustomers(search),
     enabled: existing && search.trim().length > 0,
+  })
+
+  // "Fit me in" (Phase 7 Task 3, #12) — a walk-in wants the soonest offer for the chosen
+  // service, any provider already chosen or "Any available", without browsing day by day.
+  // `GET /availability` already answers a multi-day range in one call (up to `MAX_RANGE_DAYS`
+  // = 31, `scheduling/slots.py`) with each day's slots in start order, so a week-wide scan is
+  // one request, not a new endpoint. Single-service only — a chained visit's soonest-back-to-
+  // back start is `/availability/group`'s own concern, out of scope here.
+  const fitMeIn = useMutation({
+    mutationFn: async () => {
+      const from = today(props.schedule.timezone)
+      const to = addDays(from, FIT_ME_IN_WINDOW_DAYS) // today plus six: a week, inside the 31-day cap.
+      const data = await fetchAvailability({
+        service_id: serviceId,
+        from,
+        to,
+        staff_id: staffId === ANY ? undefined : staffId,
+      })
+      const day = data.days.find((d) => d.slots.length > 0)
+      if (!day) throw new Error('Nothing free in the next week. Try a specific day, or another provider.')
+      return { date: day.date, slot: day.slots[0] }
+    },
+    onSuccess: (found) => {
+      setWanted(null)
+      setDate(found.date)
+      setPicked(found.slot)
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : 'Could not find a time'),
   })
 
   const choose = (next: { service?: string; staff?: string; date?: string }) => {
@@ -813,7 +846,20 @@ function BookingDialog(props: {
           </Button>
 
           <fieldset className="flex flex-col gap-2">
-            <legend className="mb-2 text-sm font-medium">Time</legend>
+            <legend className="mb-2 flex items-center justify-between text-sm font-medium">
+              <span>Time</span>
+              {!chained && service?.bookable && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => fitMeIn.mutate()}
+                  disabled={fitMeIn.isPending}
+                >
+                  {fitMeIn.isPending ? 'Searching…' : 'Fit me in'}
+                </Button>
+              )}
+            </legend>
             {chained ? (
               !chainReady ? (
                 <p className="text-xs text-muted-foreground">Choose every service to see times.</p>
@@ -1068,30 +1114,4 @@ function BookingDialog(props: {
   )
 }
 
-function SlotButtons(props: {
-  slots: AvailabilitySlot[]
-  chosen: AvailabilitySlot | null
-  timezone?: string
-  /** Named when several lists share a dialog, so "10:00 AM under Ana" is its own control. */
-  group?: string
-  onPick: (slot: AvailabilitySlot) => void
-}) {
-  return (
-    <div className="flex flex-wrap gap-1.5" role="group" aria-label={props.group}>
-      {props.slots.map((s) => (
-        <Button
-          key={s.starts_at}
-          type="button"
-          size="sm"
-          variant={props.chosen?.starts_at === s.starts_at ? 'default' : 'outline'}
-          aria-pressed={props.chosen?.starts_at === s.starts_at}
-          className="tabular-nums"
-          onClick={() => props.onPick(s)}
-        >
-          {clock(s.starts_at, props.timezone)}
-        </Button>
-      ))}
-    </div>
-  )
-}
 

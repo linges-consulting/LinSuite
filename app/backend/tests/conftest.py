@@ -57,6 +57,9 @@ def database(tmp_path_factory, redis_server) -> Iterator[dict[str, str]]:
             # The master key every client's document key is wrapped under. Fixed and distinct
             # from the MFA key, so a test that unwraps under the wrong one fails for real.
             "DOCUMENT_MASTER_KEY": "22" * 32,
+            # The Resend/SMTP credential key on `businesses` (Phase 12 Task 2). Fixed and
+            # distinct from the two above, for the same reason.
+            "NOTIFICATION_CREDENTIAL_KEY": "33" * 32,
             # The ASGI harness speaks http://, and a `Secure` cookie is never sent over it.
             # Production leaves this on; `test_the_session_cookie_is_secure_when_configured`
             # is what proves the flag is wired up.
@@ -94,6 +97,29 @@ def sent_emails(eager_celery) -> Iterator[list]:
     sent.clear()
     yield sent
     sent.clear()
+
+
+@pytest.fixture
+def sent_sms(eager_celery) -> Iterator[list]:
+    from tests.fake_notifications import sent_sms
+
+    sent_sms.clear()
+    yield sent_sms
+    sent_sms.clear()
+
+
+@pytest.fixture
+def fail_next_send(eager_celery) -> Iterator[tuple[list, list]]:
+    """`(fail_email_next, fail_sms_next)` — push an exception to make the next send of that
+    channel raise it (Task 4, #11: simulating a delivery failure). Cleared before and after,
+    so a test that doesn't push anything never sees another test's leftovers."""
+    from tests.fake_notifications import fail_email_next, fail_sms_next
+
+    fail_email_next.clear()
+    fail_sms_next.clear()
+    yield fail_email_next, fail_sms_next
+    fail_email_next.clear()
+    fail_sms_next.clear()
 
 
 @pytest.fixture

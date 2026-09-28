@@ -121,6 +121,15 @@ CAPABILITIES: tuple[Capability, ...] = (
         "Administration",
         requires_admin_mode=True,
     ),
+    # Front-desk work, so no `requires_admin_mode` — the same reasoning `forms.issue` already
+    # gives for the clinic tablet. Every route this gates also 404s when a business has not
+    # opted into `enable_walk_in_queue` at all (Phase 7 Task 1, #12) — this capability decides
+    # *who*, that toggle decides *whether the surface exists*.
+    Capability(
+        "queue.manage",
+        "Add walk-in clients to the queue, see who is waiting, and mark them as gone.",
+        "Queue",
+    ),
 )
 
 BY_KEY: dict[str, Capability] = {c.key: c for c in CAPABILITIES}

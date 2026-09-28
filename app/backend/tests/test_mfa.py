@@ -1092,24 +1092,32 @@ async def test_every_403_this_feature_emits_names_its_kind(client):
         assert isinstance(resp.json()["detail"], str)
 
 
-async def test_there_is_no_sms_path_anywhere_in_the_product(client):
+async def test_there_is_no_sms_mfa_path_anywhere_in_the_product(client):
     """tech-stack §14 and CLAUDE.md: SMS MFA is never implemented.
 
-    Prose about *not* implementing it is exactly what the docstrings here say, so this looks
-    for the shapes an implementation would take instead — an identifier, a settings field, a
-    route — rather than for the three letters.
+    Notification SMS (Phase 12 Task 3, #11 — a Twilio adapter, admin-configurable, off by
+    default) is a real, separate feature as of this branch, so a blanket "no sms anywhere"
+    sweep across `notifications.providers` would now fail for a reason CLAUDE.md never
+    intended — that guidance is about MFA specifically, never about the whole product. What
+    must still never exist is an SMS *second factor*: no MFA method, enrolment route, or
+    settings field accepts it.
     """
     from main import app
-    from notifications.providers import PROVIDERS, NotificationProvider
 
     def named(names) -> list[str]:
         return [name for name in names if "sms" in name.lower()]
 
-    assert named(path for path in app.openapi()["paths"]) == []
-    assert named(dir(NotificationProvider)) == []
+    assert named(path for path in app.openapi()["paths"] if "mfa" in path.lower()) == []
+    assert named([mfa.TOTP, mfa.EMAIL, mfa.RECOVERY_CODE]) == []
     assert named(Settings.model_fields) == []
-    for factory in PROVIDERS.values():
-        assert named(dir(factory)) == []
+    async with session_scope() as db:
+        constraint_sql = await db.scalar(
+            text(
+                "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                "WHERE conname = 'ck_users_mfa_method'"
+            )
+        )
+    assert "sms" not in constraint_sql.lower()
 
 
 async def test_an_unreadable_secret_is_refused_rather_than_raised(client, caplog):

@@ -47,6 +47,7 @@ from customers import keys, retention
 from customers.classification import Classification, classify
 from customers.erasure import ErasureOut, erasure_out, is_held
 from customers.models import Customer, ErasureRequest
+from notifications.models import NotificationFailure
 from scheduling.models import Appointment
 
 router = APIRouter(prefix="/customers", tags=["customers"])
@@ -246,10 +247,16 @@ async def _classifications(
     return {cid: classify(counts.get(cid, 0), threshold or 10) for cid in customer_ids}
 
 
-async def create_customer(db: AsyncSession, payload: CustomerIn, actor_id: uuid.UUID) -> Customer:
+async def create_customer(
+    db: AsyncSession, payload: CustomerIn, actor_id: uuid.UUID | None
+) -> Customer:
     """Stage a customer and its audit event in the caller's transaction. Flushes, so the id
     exists and a duplicate email is a 409 here rather than a surprise at the caller's commit;
-    the caller's `commit` is what makes both real."""
+    the caller's `commit` is what makes both real.
+
+    `actor_id` is `None` for the one caller with nobody signed in at all: the public booking
+    endpoint (`scheduling/public.py`) — the same "no actor" shape `core/audit.py` already
+    allows, never a fabricated system user."""
     customer = Customer(**payload.model_dump())
     db.add(customer)
     try:
@@ -422,12 +429,30 @@ def customer_detail_out(
     )
 
 
+class NotificationFailureOut(BaseModel):
+    """A terminal delivery failure (Task 4, #11 — `notifications.failures`). Newest first,
+    capped: this is a "something needs attention" indicator, not a delivery log."""
+
+    id: str
+    channel: Literal["email", "sms"]
+    notification_type: str
+    recipient: str
+    reason: str
+    occurred_at: datetime
+
+
+# The most recent failures shown on a profile — enough to notice a pattern, not a full log.
+_MAX_FAILURES_SHOWN = 20
+
+
 class CustomerProfileOut(BaseModel):
     customer: CustomerDetailOut
     # The business's zone, so a screen can print the day each visit was on.
     timezone: str
     # Newest first, upcoming included, cancelled and no-shows too: this is the history.
     appointments: list[VisitOut]
+    # Newest first. Empty for the common case — nothing has ever permanently failed to send.
+    notification_failures: list[NotificationFailureOut]
 
 
 @router.get(
@@ -458,9 +483,28 @@ async def read_customer(customer_id: uuid.UUID, db: SessionDep) -> CustomerProfi
         .order_by(ErasureRequest.requested_at.desc())
         .limit(1)
     )
+    failures = list(
+        await db.scalars(
+            select(NotificationFailure)
+            .where(NotificationFailure.customer_id == customer_id)
+            .order_by(NotificationFailure.occurred_at.desc())
+            .limit(_MAX_FAILURES_SHOWN)
+        )
+    )
     return CustomerProfileOut(
         customer=customer_detail_out(customer, classification, timezone, request),
         timezone=timezone,
+        notification_failures=[
+            NotificationFailureOut(
+                id=str(f.id),
+                channel=f.channel,
+                notification_type=f.notification_type,
+                recipient=f.recipient,
+                reason=f.reason,
+                occurred_at=f.occurred_at,
+            )
+            for f in failures
+        ],
         appointments=[
             VisitOut(
                 id=str(a.id),

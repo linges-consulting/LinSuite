@@ -62,7 +62,12 @@ function reader(capabilities: string[]) {
         })
       }
       if (path === '/api/customers/c1') {
-        return Response.json({ customer: CUSTOMER, timezone: 'America/Toronto', appointments: [] })
+        return Response.json({
+          customer: CUSTOMER,
+          timezone: 'America/Toronto',
+          appointments: [],
+          notification_failures: [],
+        })
       }
       if (path === '/api/customers/c1/compliance') {
         return Response.json({
@@ -140,7 +145,12 @@ test('a compliant client (no entries) shows no banner at all', async () => {
         })
       }
       if (path === '/api/customers/c1') {
-        return Response.json({ customer: CUSTOMER, timezone: 'America/Toronto', appointments: [] })
+        return Response.json({
+          customer: CUSTOMER,
+          timezone: 'America/Toronto',
+          appointments: [],
+          notification_failures: [],
+        })
       }
       if (path === '/api/customers/c1/compliance') return Response.json({ templates: [] })
       return undefined

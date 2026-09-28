@@ -20,6 +20,7 @@ VALID = {
     "jwt_secret": "0" * 64,
     "mfa_encryption_key": "11" * 32,
     "document_master_key": "22" * 32,
+    "notification_credential_key": "33" * 32,
 }
 
 
@@ -34,7 +35,7 @@ def test_valid_secrets_boot():
 
 @pytest.mark.parametrize(
     "field",
-    ["jwt_secret", "mfa_encryption_key", "document_master_key"],
+    ["jwt_secret", "mfa_encryption_key", "document_master_key", "notification_credential_key"],
 )
 def test_the_shipped_placeholder_is_refused_with_the_command_that_fixes_it(field):
     with pytest.raises(ValidationError) as refused:
@@ -47,7 +48,9 @@ def test_a_short_jwt_secret_is_refused():
         settings(jwt_secret="tooshort")
 
 
-@pytest.mark.parametrize("field", ["mfa_encryption_key", "document_master_key"])
+@pytest.mark.parametrize(
+    "field", ["mfa_encryption_key", "document_master_key", "notification_credential_key"]
+)
 def test_a_key_that_is_not_32_bytes_of_hex_is_refused(field):
     with pytest.raises(ValidationError) as refused:
         settings(**{field: "not hex at all, but long enough to look like a key ok"})
@@ -65,11 +68,31 @@ def test_the_document_master_key_must_differ_from_the_mfa_key():
         settings(document_master_key="AB" * 32, mfa_encryption_key="ab" * 32)
 
 
+def test_the_notification_credential_key_must_differ_from_the_other_two():
+    with pytest.raises(ValidationError) as refused:
+        settings(notification_credential_key="11" * 32)  # same as mfa_encryption_key
+    assert "must be different keys" in str(refused.value)
+    with pytest.raises(ValidationError):
+        settings(notification_credential_key="22" * 32)  # same as document_master_key
+    with pytest.raises(ValidationError):
+        # Case-insensitive, same as the existing pair check.
+        settings(notification_credential_key="AB" * 32, mfa_encryption_key="ab" * 32)
+
+
 def test_the_document_master_key_is_required(monkeypatch):
     # The harness exports a valid one for the whole session; this test is about its absence.
     monkeypatch.delenv("DOCUMENT_MASTER_KEY", raising=False)
     with pytest.raises(ValidationError):
         Settings(_env_file=None, **{k: v for k, v in VALID.items() if k != "document_master_key"})
+
+
+def test_the_notification_credential_key_is_required(monkeypatch):
+    monkeypatch.delenv("NOTIFICATION_CREDENTIAL_KEY", raising=False)
+    with pytest.raises(ValidationError):
+        Settings(
+            _env_file=None,
+            **{k: v for k, v in VALID.items() if k != "notification_credential_key"},
+        )
 
 
 # --- the purge DSN is the worker's, not the web process's (Task 7 fix round 1) -------------

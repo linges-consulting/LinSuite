@@ -51,7 +51,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import AwareDatetime, BaseModel, Field, field_validator, model_validator
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import Range
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -76,7 +76,7 @@ from scheduling.availability import (
     waive_handover,
 )
 from scheduling.clock import localize
-from scheduling.models import Appointment, AppointmentResource, Staff
+from scheduling.models import Appointment, AppointmentResource, QueueEntry, Staff
 from scheduling.services import CatalogServiceOut, RequirementOut, catalog_entry
 from scheduling.slots import Computed, ResourceRow, check_range, compute, unbookable, utc
 from scheduling.time_off import business_zone
@@ -1108,9 +1108,15 @@ class CancelIn(BaseModel):
         return blank_to_none(value)
 
 
-def _cancel(db: AsyncSession, appointment: Appointment, actor: User, reason: str | None) -> None:
+def _cancel(
+    db: AsyncSession, appointment: Appointment, actor: User | None, reason: str | None
+) -> None:
     """The one cancellation code path — a single member and every member of a group both
-    call this, so "cancelled" means the same three things everywhere it happens."""
+    call this, so "cancelled" means the same three things everywhere it happens.
+
+    `actor` is `None` for a client's own cancellation through the booking-management link
+    (`scheduling/public.py`, Phase 6 Task 3) — the audit row's `actor_user_id` is then `None`
+    too, the same discipline `book_public`'s own `appointment.booked` event already uses."""
     appointment.status = "cancelled"
     appointment.cancelled_at = datetime.now(UTC)
     appointment.cancel_reason = reason
@@ -1120,8 +1126,25 @@ def _cancel(db: AsyncSession, appointment: Appointment, actor: User, reason: str
         "appointment.cancelled",
         target_type="appointment",
         target_id=str(appointment.id),
-        actor_user_id=actor.id,
+        actor_user_id=actor.id if actor else None,
         metadata={"reason": reason},
+    )
+
+
+async def _clear_queue_entry(db: AsyncSession, appointment_id: uuid.UUID) -> None:
+    """An appointment a walk-in queue entry converted into
+    (`scheduling/queue.py::start_queue_entry`) carries that entry's id on
+    `queue_entries.appointment_id`. Whatever terminal state the appointment reaches next —
+    completed, cancelled, or a no-show — the queue entry is done being `in_service`; a
+    walk-in who left, or whose slot was cancelled, is not still "in service" on the front
+    desk's screen. A plain, unconditional `UPDATE` rather than a load-then-save: there is at
+    most one such row (a queue entry converts once, guarded by its own `waiting`-only
+    transition), and an ordinary appointment with no queue entry at all touches zero rows,
+    silently."""
+    await db.execute(
+        update(QueueEntry)
+        .where(QueueEntry.appointment_id == appointment_id, QueueEntry.status == "in_service")
+        .values(status="done")
     )
 
 
@@ -1144,6 +1167,7 @@ async def complete_appointment(appointment_id: uuid.UUID, actor: Scheduler, db: 
         actor_user_id=actor.id,
         metadata={},
     )
+    await _clear_queue_entry(db, appointment.id)
     await db.commit()
     await cache.bump()
     return _out(await _load(db, appointment.id))
@@ -1166,6 +1190,7 @@ async def cancel_appointment(
         # to undo — this appointment simply stops matching `waive_handover`'s occupying test
         # the moment its status flips, and the sibling's resource period springs back to it.
         await _recompute_group_periods_never_failing(db, appointment.booking_group_id)
+    await _clear_queue_entry(db, appointment.id)
     await db.commit()
     await cache.bump()
     return _out(await _load(db, appointment.id))
@@ -1198,6 +1223,7 @@ async def mark_no_show(appointment_id: uuid.UUID, actor: Scheduler, db: SessionD
     if appointment.booking_group_id is not None:
         # Same restoration as a cancel (fix round 2) — a no-show stops occupying too.
         await _recompute_group_periods_never_failing(db, appointment.booking_group_id)
+    await _clear_queue_entry(db, appointment.id)
     await db.commit()
     await cache.bump()
     return _out(await _load(db, appointment.id))

@@ -53,7 +53,16 @@ async def claimed_instance(client):
     async with get_purge_engine().begin() as purge:
         await purge.execute(text("DELETE FROM audit_events"))
     async with session_scope() as db:
-        for table in ("staff", "password_reset_tokens", "users", "businesses", "setup_token"):
+        # "queue_entries" first: a leftover row (Phase 7 Task 1, #12) FKs to staff with no
+        # cascade, and would block the delete below.
+        for table in (
+            "queue_entries",
+            "staff",
+            "password_reset_tokens",
+            "users",
+            "businesses",
+            "setup_token",
+        ):
             await db.execute(text(f"DELETE FROM {table}"))
         await db.execute(text("DELETE FROM roles WHERE NOT is_system"))
         await db.commit()

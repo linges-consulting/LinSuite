@@ -1,0 +1,192 @@
+"""Unit tests for `TwilioProvider`'s own request-building, `sms_ready`, and the SMS methods
+grown onto `ConsoleProvider`/`RecordingProvider` (Task 3, #11).
+
+Per m3.md: mock `httpx` only here, at the adapter's own boundary — a test of a trigger path
+(not built yet) must go through `tests/fake_notifications.py`'s recording fake instead, never
+this. `httpx.MockTransport` is httpx's own test transport, the same shape
+`test_notification_email_providers.py` already uses for `ResendProvider`.
+"""
+
+from urllib.parse import parse_qs
+
+import httpx
+import pytest
+
+from core.models import Business
+from notifications.credentials import encrypt_credential
+from notifications.providers import (
+    ConsoleProvider,
+    PermanentDeliveryError,
+    TwilioProvider,
+    get_sms_provider,
+    sms_ready,
+)
+
+
+def _business(**overrides) -> Business:
+    return Business(id=1, name="Cedar Lane Clinic", timezone="America/Toronto", **overrides)
+
+
+# --- TwilioProvider --------------------------------------------------------------------------
+
+
+def test_twilio_posts_a_basic_authenticated_form_body():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(201, json={"sid": "SM123"})
+
+    provider = TwilioProvider(
+        account_sid="ACtest",
+        auth_token="secrettoken",
+        from_number="+15551234567",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    provider.send_sms(to="+15559876543", text="Your appointment is confirmed")
+
+    assert len(seen) == 1
+    request = seen[0]
+    assert str(request.url) == "https://api.twilio.com/2010-04-01/Accounts/ACtest/Messages.json"
+    # Basic Auth: account SID as username, auth token as password.
+    assert request.headers["authorization"].startswith("Basic ")
+    body = parse_qs(request.content.decode())
+    assert body == {
+        "From": ["+15551234567"],
+        "To": ["+15559876543"],
+        "Body": ["Your appointment is confirmed"],
+    }
+
+
+def test_twilio_raises_permanently_on_a_4xx_response():
+    # Task 4, #11: a 4xx (invalid number) is the caller's own fault — retrying changes
+    # nothing, so this is no longer a bare `httpx.HTTPStatusError` (this test's premise
+    # before Task 4) but the distinct error `notifications/tasks.py` catches to stop
+    # retrying immediately.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"message": "invalid number"})
+
+    provider = TwilioProvider(
+        account_sid="ACtest",
+        auth_token="secrettoken",
+        from_number="+15551234567",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(PermanentDeliveryError):
+        provider.send_sms(to="+15559876543", text="hi")
+
+
+def test_twilio_raises_transiently_on_a_5xx_response():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"message": "upstream unavailable"})
+
+    provider = TwilioProvider(
+        account_sid="ACtest",
+        auth_token="secrettoken",
+        from_number="+15551234567",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        provider.send_sms(to="+15559876543", text="hi")
+
+
+# --- ConsoleProvider / RecordingProvider send_sms --------------------------------------------
+
+
+def test_console_provider_logs_the_sms(caplog):
+    with caplog.at_level("INFO"):
+        ConsoleProvider().send_sms(to="+15559876543", text="hi there")
+    assert "+15559876543" in caplog.text
+    assert "hi there" in caplog.text
+
+
+def test_recording_provider_records_the_sms():
+    from tests.fake_notifications import RecordingProvider, sent_sms
+
+    sent_sms.clear()
+    RecordingProvider().send_sms(to="+15559876543", text="hi there")
+    try:
+        assert len(sent_sms) == 1
+        assert sent_sms[0].to == "+15559876543"
+        assert sent_sms[0].text == "hi there"
+    finally:
+        sent_sms.clear()
+
+
+# --- sms_ready ---------------------------------------------------------------------------------
+
+
+def test_sms_ready_is_false_when_disabled():
+    business = _business(
+        sms_enabled=False,
+        twilio_account_sid="ACtest",
+        twilio_auth_token_encrypted="sealed",
+        twilio_from_number="+15551234567",
+    )
+    assert sms_ready(business) is False
+
+
+def test_sms_ready_is_false_when_enabled_but_not_fully_configured():
+    business = _business(sms_enabled=True, twilio_account_sid="ACtest")
+    assert sms_ready(business) is False
+
+
+def test_sms_ready_is_true_when_enabled_and_fully_configured():
+    business = _business(
+        sms_enabled=True,
+        twilio_account_sid="ACtest",
+        twilio_auth_token_encrypted="sealed",
+        twilio_from_number="+15551234567",
+    )
+    assert sms_ready(business) is True
+
+
+# --- get_sms_provider (Task 6, #11) -------------------------------------------------------------
+
+
+def test_get_sms_provider_builds_a_twilio_provider_from_the_business_row(database, monkeypatch):
+    from core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "notification_provider", "unused-in-production")
+    business = _business(
+        sms_enabled=True,
+        twilio_account_sid="ACtest",
+        twilio_auth_token_encrypted=encrypt_credential("secrettoken"),
+        twilio_from_number="+15551234567",
+    )
+
+    provider = get_sms_provider(business)
+
+    assert isinstance(provider, TwilioProvider)
+    assert provider._account_sid == "ACtest"
+    assert provider._auth_token == "secrettoken"
+    assert provider._from_number == "+15551234567"
+
+
+def test_get_sms_provider_override_wins_even_over_a_configured_business(database):
+    # `NOTIFICATION_PROVIDER=recording` (the test harness default) is picked unconditionally —
+    # the suite must never dial Twilio for real, whatever a business row holds.
+    from tests.fake_notifications import RecordingProvider
+
+    business = _business(
+        sms_enabled=True,
+        twilio_account_sid="ACtest",
+        twilio_auth_token_encrypted=encrypt_credential("secrettoken"),
+        twilio_from_number="+15551234567",
+    )
+
+    assert isinstance(get_sms_provider(business), RecordingProvider)
+
+
+def test_get_sms_provider_degrades_to_console_when_not_sms_ready(database, monkeypatch):
+    """Task 7, #11: `notifications/tasks.py::send_sms` now calls this with a business row it
+    fetched itself, and a queued send can run after `sms_enabled`/the Twilio credentials
+    changed — the same "fall back to console rather than hand Twilio empty credentials" rule
+    `get_provider` already applies to a missing/unconfigured business."""
+    from core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "notification_provider", "unused-in-production")
+    not_ready = _business(sms_enabled=False)
+
+    assert isinstance(get_sms_provider(not_ready), ConsoleProvider)
+    assert isinstance(get_sms_provider(None), ConsoleProvider)

@@ -7,11 +7,17 @@
 no production code calls it. `test_only_the_purge_tasks_reach_the_purge_role` enforces this:
 the web process never builds a purge engine, so no request handler can reach the purge role.
 It does not even need the purge DSN (`DATABASE_URL_PURGE` is blanked for the `app` service).
+
+`run_task()` is the shared shape every Celery task with async work inside uses to run it
+(`customers/tasks.py`'s erasure tasks, `notifications/tasks.py`'s send tasks): see its own
+docstring for why a plain `asyncio.run` isn't always enough.
 """
 
-from collections.abc import AsyncIterator
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import (
@@ -85,3 +91,15 @@ SessionDep = Annotated[AsyncSession, Depends(get_session)]
 def session_scope() -> AsyncSession:
     """A session outside a request — application startup, Celery tasks. `async with` it."""
     return _session_factory()()
+
+
+def run_task(work: Callable[..., Awaitable[Any]], *args: object) -> Any:
+    """`asyncio.run`, from a real worker (no loop running) or from an eager call made inside a
+    request handler in the test suite (a loop is already running there, so run it on a thread
+    of its own — `asyncio.run` cannot nest inside a running loop)."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(work(*args))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, work(*args)).result()

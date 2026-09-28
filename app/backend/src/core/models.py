@@ -74,6 +74,19 @@ class Business(Base):
             "retention_profile IN ('regulated_health', 'general_business')",
             name="ck_businesses_retention_profile",
         ),
+        CheckConstraint(
+            "email_sender IS NULL OR email_sender IN ('resend', 'smtp')",
+            name="ck_businesses_email_sender",
+        ),
+        CheckConstraint(
+            "cancellation_cutoff_hours >= 0", name="ck_businesses_cancellation_cutoff_hours"
+        ),
+        CheckConstraint(
+            "booking_daily_cap_per_ip >= 1", name="ck_businesses_booking_daily_cap_per_ip"
+        ),
+        CheckConstraint(
+            "booking_daily_cap_per_email >= 1", name="ck_businesses_booking_daily_cap_per_email"
+        ),
     )
 
     id: Mapped[int] = mapped_column(
@@ -147,6 +160,83 @@ class Business(Base):
     retention_profile_set_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    # --- notification email sender (Phase 12 Task 2, #11; `notifications/providers.py`,
+    # `notifications/credentials.py`) --------------------------------------------------------
+    # Which provider a real send uses. NULL means unconfigured — Task 6's settings panel shows
+    # a banner until one is chosen and a test send succeeds. The two `*_encrypted` columns are
+    # direct AES-256-GCM field encryption under `NOTIFICATION_CREDENTIAL_KEY`
+    # (`notifications/credentials.py`), the same shape `mfa_encryption_key` already uses for
+    # TOTP secrets — one business row, no per-record wrapped-key scheme.
+    email_sender: Mapped[str | None] = mapped_column(String(16))
+    resend_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    resend_from_address: Mapped[str | None] = mapped_column(String(320))
+    # Set only by a successful Resend test send (Task 6, not built here). NULL gates Task 5's
+    # trigger functions from ever attempting a real Resend send — "email features remain
+    # disabled behind a banner until a test send succeeds" (#11 acceptance criterion).
+    resend_domain_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    smtp_host: Mapped[str | None] = mapped_column(String(255))
+    smtp_port: Mapped[int | None] = mapped_column(Integer)
+    smtp_username: Mapped[str | None] = mapped_column(String(255))
+    smtp_password_encrypted: Mapped[str | None] = mapped_column(Text)
+    smtp_from_address: Mapped[str | None] = mapped_column(String(320))
+    # SMTP's equivalent of `resend_domain_verified_at`: SMTP has no domain to verify, only a
+    # test send that succeeded, so it is named for what it actually records.
+    smtp_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # --- notification SMS sender (Phase 12 Task 3, #11; `notifications/providers.py`) -------
+    # Off by default: unlike email (which degrades to `console`), SMS is opt-in per tenant —
+    # tech-stack §6 treats it as an adapter nobody gets until they ask and supply credentials.
+    # `twilio_auth_token_encrypted` is direct AES-256-GCM field encryption under the same
+    # `NOTIFICATION_CREDENTIAL_KEY` the Resend/SMTP columns above use — one key, reused, not a
+    # second one (still one business row, no crypto-shred requirement).
+    sms_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    twilio_account_sid: Mapped[str | None] = mapped_column(String(64))
+    twilio_auth_token_encrypted: Mapped[str | None] = mapped_column(Text)
+    twilio_from_number: Mapped[str | None] = mapped_column(String(32))
+
+    # --- reminder scheduler (Phase 12 Task 5, #11; `notifications/reminders.py`) ------------
+    # Hours-before-appointment offsets a reminder fires at, reckoned against this business's
+    # own local wall clock (see that module's docstring for why a raw instant-minus-`timedelta`
+    # is wrong across a DST boundary). JSONB, like `AuditEvent.event_metadata` and
+    # `Appointment.overridden_rules` — a plain list of small integers doesn't need a real
+    # array type, and this keeps the same column shape the rest of the app already uses for
+    # "a list, stored". Task 6's settings panel is what will let an administrator edit this;
+    # until then every deployment gets the same default, a day before and two hours before.
+    reminder_intervals_hours: Mapped[list[int]] = mapped_column(
+        JSONB, server_default=text("'[24, 2]'::jsonb")
+    )
+
+    # --- booking-portal policy (Phase 6 Tasks 3-4, #10; `scheduling/public.py`,
+    # `settings/notifications_routes.py`) ----------------------------------------------------
+    # All four read at the API — never only hidden behind a UI toggle (#10's own acceptance
+    # criterion: "disabling online cancellation removes the capability at the API"). Editable
+    # through the same notification/portal settings panel (Task 4).
+    online_cancellation_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    # Hours before `starts_at` a client may still cancel or reschedule online, reckoned
+    # against the plain instant (unlike `reminder_intervals_hours`, this is not a wall-clock
+    # recurrence rule — "24 hours before this exact appointment" means the same thing across
+    # a DST boundary that a weekly shift pattern would not).
+    cancellation_cutoff_hours: Mapped[int] = mapped_column(Integer, server_default=text("24"))
+    # The whole-portal switch (Task 4): `scheduling/public.py`'s availability and booking
+    # routes both 404 the same way an unknown/not-`bookable_online` service already does, once
+    # this is off — distinct from `bookable_online`, which is per-service. Defaulted on so an
+    # upgrade through this migration changes nothing until an administrator turns it off.
+    online_booking_enabled: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    # Admin-configurable counterparts of what were `scheduling/public.py`'s fixed
+    # `_DAILY_CAP_PER_IP`/`_DAILY_CAP_PER_EMAIL` constants (Task 2) — same defaults, now a
+    # setting rather than a number only a code change could move.
+    booking_daily_cap_per_ip: Mapped[int] = mapped_column(Integer, server_default=text("20"))
+    booking_daily_cap_per_email: Mapped[int] = mapped_column(Integer, server_default=text("5"))
+
+    # --- walk-in queue toggle (Phase 7 Task 1, #12; `scheduling/models.py::QueueEntry`) ------
+    # Off by default. CLAUDE.md's own distinction: "fit me in" (an always-on "next available"
+    # search shortcut in the ordinary booking flow, Phase 7 Task 3) is not this. This is "take
+    # a number" — a business opts in because service there starts when a chair frees, not by
+    # appointment time. With it off, no queue surface exists anywhere in the product (#12's own
+    # acceptance criterion) — Tasks 2/8 gate the CRUD routes, the nav entry and the frontend
+    # route on this same column; this task only makes the toggle itself exist and be honest.
+    enable_walk_in_queue: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
 
 
 class AuditEvent(Base):

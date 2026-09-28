@@ -24,6 +24,8 @@ export const TIME_OFF = ['time-off'] as const
 export const CLOSURES = ['closures'] as const
 export const MFA = ['mfa'] as const
 export const SECURITY = ['security-policy'] as const
+/** Settings → Notifications: sender, SMS, templates, reminder intervals (#11). */
+export const NOTIFICATION_SETTINGS = ['notification-settings'] as const
 /** The public branding document: read by the shell, invalidated by the Branding panel. */
 export const BRANDING_DOCUMENT = ['branding'] as const
 export const BUSINESS = ['business'] as const
@@ -68,3 +70,8 @@ export const NOTE_TEMPLATES = ['note-templates'] as const
 export const SESSION_NOTES = ['session-notes'] as const
 export const SESSION_NOTE = ['session-note'] as const
 export const NOTE_APPOINTMENTS = ['note-appointments'] as const
+/** The walk-in queue (`queue.manage`, #12): waiting/in-service entries, wait estimates and
+ *  compliance gaps recomputed live on every read. `null` cached under this key means
+ *  `enable_walk_in_queue` is off (the server's whole-surface 404) — `lib/nav.ts`'s gate and
+ *  the queue screen itself both read that shape off the same query, one fetch either way. */
+export const QUEUE = ['queue'] as const

@@ -129,7 +129,12 @@ function fake({
         return Response.json(erasure, { status: 201 })
       }
       if (path === '/api/customers/c1') {
-        return Response.json({ customer: current, timezone: 'America/Toronto', appointments })
+        return Response.json({
+          customer: current,
+          timezone: 'America/Toronto',
+          appointments,
+          notification_failures: [],
+        })
       }
       return undefined
     },

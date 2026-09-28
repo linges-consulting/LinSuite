@@ -6,6 +6,7 @@ import {
   Ellipsis,
   Eraser,
   History,
+  MailWarning,
   Pencil,
   Plus,
   SearchX,
@@ -62,6 +63,7 @@ import {
   type Erasure,
   type CustomerDraft,
   type CustomerPatch,
+  type NotificationFailure,
   type Visit,
 } from '@/lib/api'
 import { useSession } from '@/lib/auth'
@@ -406,6 +408,9 @@ export function ClientPage() {
         <>
           {profile.data.customer.erasure && (
             <ErasureBanner erasure={profile.data.customer.erasure} />
+          )}
+          {profile.data.notification_failures.length > 0 && (
+            <DeliveryFailureBanner failures={profile.data.notification_failures} />
           )}
           {compliance.data && compliance.data.length > 0 && (
             <ComplianceBanner
@@ -858,6 +863,50 @@ function ErasureBanner({ erasure }: { erasure: Erasure }) {
         <p className="text-muted-foreground">
           This client is hidden from the client list, search and booking.
         </p>
+      </div>
+    </div>
+  )
+}
+
+// Falls back to the raw type for anything not in this list — the six known types plus
+// whatever a future one is named never breaks rendering, just reads a little less nicely.
+const NOTIFICATION_TYPE_LABEL: Record<string, string> = {
+  booking_confirmation: 'booking confirmation',
+  reminder: 'reminder',
+  modification: 'booking change',
+  cancellation: 'cancellation notice',
+  form_link: 'form link',
+  package_notice: 'package notice',
+}
+
+/** A permanent delivery failure (Task 4, #11) — a bad address/number or rejected credentials,
+ *  not a transient one still retrying in the background. */
+function DeliveryFailureBanner({ failures }: { failures: NotificationFailure[] }) {
+  return (
+    <div
+      role="status"
+      aria-label="Notification delivery failed"
+      className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm"
+    >
+      <MailWarning aria-hidden className="mt-0.5 size-4 shrink-0 text-destructive" />
+      <div className="flex-1 space-y-1.5">
+        <p className="font-medium">
+          {failures.length === 1
+            ? 'A message could not be delivered'
+            : `${failures.length} messages could not be delivered`}
+        </p>
+        <ul className="space-y-1">
+          {failures.map((failure) => (
+            <li key={failure.id} className="flex flex-wrap items-center gap-x-2">
+              <span className="capitalize">{failure.channel}</span>
+              <span className="text-muted-foreground">
+                ({NOTIFICATION_TYPE_LABEL[failure.notification_type] ?? failure.notification_type}
+                ) to {failure.recipient} on{' '}
+                <time dateTime={failure.occurred_at}>{shortDate(failure.occurred_at)}</time>
+              </span>
+            </li>
+          ))}
+        </ul>
       </div>
     </div>
   )

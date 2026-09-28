@@ -935,6 +935,118 @@ export async function updateSecurityPolicy(policy: SecurityChange): Promise<Secu
   return res.json()
 }
 
+// --- notifications: sender, SMS, templates, reminders (Phase 12 Task 6, #11) ----------------
+
+export type NotificationTemplate = {
+  id: string
+  notification_type: string
+  channel: 'email' | 'sms'
+  subject_template: string | null
+  body_template: string
+  updated_at: string
+  /** The `$identifier`s this type's seeded body actually uses (`notifications/render.py`'s
+   *  `safe_substitute` leaves an unrecognised one literal, so this is a courtesy, not a limit). */
+  merge_fields: string[]
+}
+
+export type NotificationSettings = {
+  email_sender: 'resend' | 'smtp' | null
+  /** Read straight off `notifications/providers.py::email_ready` — the one fact the banner is
+   *  built from, never inferred here from which fields happen to be filled in. */
+  email_ready: boolean
+  resend_from_address: string | null
+  /** Whether a key is stored — the key itself is write-only and never sent to the browser. */
+  resend_api_key_set: boolean
+  resend_domain_verified_at: string | null
+  smtp_host: string | null
+  smtp_port: number | null
+  smtp_username: string | null
+  smtp_from_address: string | null
+  smtp_password_set: boolean
+  smtp_verified_at: string | null
+  sms_enabled: boolean
+  sms_ready: boolean
+  twilio_account_sid: string | null
+  twilio_from_number: string | null
+  twilio_auth_token_set: boolean
+  reminder_intervals_hours: number[]
+  templates: NotificationTemplate[]
+
+  // --- booking-portal policy (Phase 6 Task 4, #10) — read at the API, not just this panel ---
+  online_booking_enabled: boolean
+  online_cancellation_enabled: boolean
+  cancellation_cutoff_hours: number
+  booking_daily_cap_per_ip: number
+  booking_daily_cap_per_email: number
+
+  // --- walk-in queue toggle (Phase 7 Task 1, #12) — "take a number", not "fit me in" ---
+  enable_walk_in_queue: boolean
+}
+
+/** A field left out is left alone — the three secrets included, so rotating one credential
+ *  never means retyping the others. `email_sender: 'none'` is the explicit clear; omitting
+ *  the field (as every other field can) means "leave it as it is". */
+export type NotificationSettingsChange = Partial<{
+  email_sender: 'resend' | 'smtp' | 'none'
+  resend_from_address: string | null
+  resend_api_key: string
+  smtp_host: string | null
+  smtp_port: number | null
+  smtp_username: string | null
+  smtp_password: string
+  smtp_from_address: string | null
+  sms_enabled: boolean
+  twilio_account_sid: string | null
+  twilio_auth_token: string
+  twilio_from_number: string | null
+  reminder_intervals_hours: number[]
+  online_booking_enabled: boolean
+  online_cancellation_enabled: boolean
+  cancellation_cutoff_hours: number
+  booking_daily_cap_per_ip: number
+  booking_daily_cap_per_email: number
+  enable_walk_in_queue: boolean
+}>
+
+export async function fetchNotificationSettings(): Promise<NotificationSettings> {
+  const res = await fetch('/api/admin/business/notifications')
+  if (!res.ok) throw await failure(res, 'Could not load the notification settings')
+  return res.json()
+}
+
+export async function updateNotificationSettings(
+  change: NotificationSettingsChange,
+): Promise<NotificationSettings> {
+  const res = await send('PATCH', '/api/admin/business/notifications', change)
+  if (!res.ok) throw await failure(res, 'Could not save the notification settings')
+  return res.json()
+}
+
+/** Calls the real adapter synchronously and, only on success, sets the verified timestamp —
+ *  the one thing that ungates the "disabled behind a banner" state for real (#11). */
+export async function sendTestEmail(to: string): Promise<NotificationSettings> {
+  const res = await send('POST', '/api/admin/business/notifications/test-email', { to })
+  if (!res.ok) throw await failure(res, 'The test email could not be sent')
+  return res.json()
+}
+
+/** SMS has no verified flag to flip (`notifications/providers.py::sms_ready` never gates on
+ *  one) — this still performs a real send, it just reports success or the adapter's error. */
+export async function sendTestSms(to: string): Promise<{ sent: boolean }> {
+  const res = await send('POST', '/api/admin/business/notifications/test-sms', { to })
+  if (!res.ok) throw await failure(res, 'The test text could not be sent')
+  return res.json()
+}
+
+export async function updateNotificationTemplate(
+  id: string,
+  change: { subject_template: string | null; body_template: string },
+): Promise<NotificationTemplate> {
+  const res = await send('PUT', `/api/admin/business/notifications/templates/${id}`, change)
+  if (!res.ok) throw await failure(res, 'Could not save the template')
+  return res.json()
+}
+
 // --- services: the catalog ----------------------------------------------------------------
 
 /** One thing delivering a service needs. `resource_id` null is "any active resource of this
@@ -1537,11 +1649,25 @@ export type Erasure = {
   purged_at: string | null
 }
 
+/** A terminal delivery failure (Phase 12 Task 4, #11): a permanent one (a bad address/number,
+ *  rejected credentials) writes this row and stops retrying — a transient one (network error,
+ *  a 5xx) just keeps retrying in the background and never appears here. */
+export type NotificationFailure = {
+  id: string
+  channel: 'email' | 'sms'
+  notification_type: string
+  recipient: string
+  reason: string
+  occurred_at: string
+}
+
 export type CustomerProfile = {
   customer: CustomerDetail
   timezone: string
   /** Newest first, upcoming included, cancelled and no-shows too. */
   appointments: Visit[]
+  /** Newest first. Empty for the common case — nothing has ever permanently failed to send. */
+  notification_failures: NotificationFailure[]
 }
 
 /** The profile and its visits in one response — one request, because on the server it is
@@ -1878,5 +2004,210 @@ export async function cancelGroup(groupId: string, reason?: string | null): Prom
     reason: reason || null,
   })
   if (!res.ok) throw await failure(res, 'Could not cancel the visit')
+  return res.json()
+}
+
+// --- public booking portal: `/book` and `/manage-booking` (Phase 6 Task 6, #10) --------------
+
+/** One bookable service on the public portal — `CatalogService`'s shape pared to what an
+ *  anonymous visitor may see: no `requirements`/`unbookable_reasons`, staff named rather than
+ *  left as bare ids (a client picking a provider needs a name, same as the staff dialog). */
+export type PublicService = {
+  id: string
+  name: string
+  description: string | null
+  duration_minutes: number
+  price_cents: number
+  staff: { id: string; display_name: string }[]
+}
+
+export type PublicServices = { online_booking_enabled: boolean; services: PublicService[] }
+
+/** `online_booking_enabled: false` with an empty list is the whole portal being off, not a
+ *  moment where no service happens to qualify — the page shows a different message for each. */
+export async function fetchPublicServices(): Promise<PublicServices> {
+  const res = await fetch('/api/public/booking/services', { credentials: 'omit', cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the services')
+  return res.json()
+}
+
+/**
+ * The public counterpart to `fetchAvailability` — same shape, `staff_id` omitted for "any
+ * available". `credentials: 'omit'`: a staff browser previewing `/book` must not send its
+ * session along (`fetchPublicForm`'s own reasoning). A 409 is a service the catalog no longer
+ * says is bookable; a 404 is an unknown or not-online-bookable one.
+ */
+export async function fetchPublicAvailability(query: {
+  service_id: string
+  from: string
+  to: string
+  staff_id?: string
+}): Promise<Availability> {
+  const params = new URLSearchParams({ service_id: query.service_id, from: query.from, to: query.to })
+  if (query.staff_id) params.set('staff_id', query.staff_id)
+  const res = await fetch(`/api/public/booking/availability?${params}`, {
+    credentials: 'omit',
+    cache: 'no-store',
+  })
+  if (!res.ok) throw await failure(res, 'Could not load the available times')
+  return res.json()
+}
+
+/** What the identity step sends, plus the honeypot (`website`): must arrive empty, or the
+ *  server accepts the request with a 200 and books nothing — the detection is never revealed,
+ *  so this client never branches on it either, same as the server's own docstring insists. */
+export type PublicBookingDraft = {
+  service_id: string
+  staff_id: string | null
+  starts_at: string
+  customer: CustomerDraft
+  website: string
+}
+
+/** What the confirmation screen shows. `management_link` is the only recovery path when no
+ *  notification channel is configured — shown plainly, on this screen, never only emailed. */
+export type PublicBooking = {
+  appointment_id: string
+  starts_at: string
+  ends_at: string
+  service_name: string
+  staff_name: string
+  management_link: string
+}
+
+/**
+ * `POST /api/public/booking`, sent the same way the public forms endpoints are: no
+ * credentials, and `referrerPolicy: 'origin'` so the server's Origin check (`main.py`) sees
+ * this deployment's own origin rather than `Origin: null`, which the page's `no-referrer`
+ * policy would otherwise produce for this one request (`fetchPublicForm`'s own note).
+ */
+export async function createPublicBooking(draft: PublicBookingDraft): Promise<PublicBooking> {
+  const res = await fetch('/api/public/booking', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(draft),
+    credentials: 'omit',
+    referrerPolicy: 'origin',
+    cache: 'no-store',
+  })
+  if (!res.ok) throw await failure(res, 'Could not book the appointment')
+  return res.json()
+}
+
+/** What the booking-management sub-flow shows and acts on. `cancellable` gates both cancel
+ *  and reschedule — one shared toggle, the server's own `ManageBookingOut` shape.
+ *  `service_id`/`staff_id` are what the reschedule step hands `fetchPublicAvailability`. */
+export type ManageBooking = {
+  appointment_id: string
+  status: string
+  starts_at: string
+  ends_at: string
+  service_id: string
+  service_name: string
+  staff_id: string
+  staff_name: string
+  cancellable: boolean
+}
+
+async function manageRequest(path: string, body: unknown): Promise<ManageBooking> {
+  const res = await fetch(`/api/public/booking/manage${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    credentials: 'omit',
+    referrerPolicy: 'origin',
+    cache: 'no-store',
+  })
+  // A dead link is a 404 `link_invalid`; the cutoff/toggle refusal is a 422
+  // `online_change_not_allowed` — both carry `code`, which the page reads to word the two
+  // differently rather than showing one generic failure for both.
+  if (!res.ok) throw await failure(res, 'Could not open this booking')
+  return res.json()
+}
+
+/** `token` is read from the URL fragment (`/manage-booking/#<token>`), never a path segment —
+ *  the same reason the form-link lookup keeps it out of the path (`fetchPublicForm`). */
+export const fetchManageBooking = (token: string) => manageRequest('', { token })
+export const cancelManageBooking = (token: string) => manageRequest('/cancel', { token })
+export const rescheduleManageBooking = (token: string, starts_at: string) =>
+  manageRequest('/reschedule', { token, starts_at })
+
+// --- walk-in queue ("take a number", #12) --------------------------------------------------
+
+export type QueueEntryStatus = 'waiting' | 'in_service' | 'done' | 'abandoned'
+
+/** `QueueEntryOut`'s shape (`scheduling/queue.py`). `estimated_wait_minutes` and
+ *  `compliance_gaps` are only ever populated by `fetchQueueEntries` (the list read) — every
+ *  other queue action's own single-entry response carries `null` for both, the server's own
+ *  "not computed here" convention (Tasks 6/7's docstrings). */
+export type QueueEntry = {
+  id: string
+  status: QueueEntryStatus
+  arrived_at: string
+  requested_service: { id: string; name: string }
+  preferred_staff: { id: string; display_name: string } | null
+  customer: { id: string; first_name: string; last_name: string; phone: string | null } | null
+  bare_name: string | null
+  bare_phone: string | null
+  appointment_id: string | null
+  /** An **estimate**, never a promise (Task 6's own labelling rule) — null for a non-waiting
+   *  entry. */
+  estimated_wait_minutes: number | null
+  /** Only ever guaranteed complete for an essential template that applies to every client
+   *  (`applies_to_all`) — a template scoped to the requested service can't yet "apply" to a
+   *  walk-in with no confirmed appointment (Task 7's own documented gap). `null` outside the
+   *  list read. */
+  compliance_gaps: ComplianceEntry[] | null
+}
+
+export type QueueList = { entries: QueueEntry[] }
+
+/**
+ * `null` means `enable_walk_in_queue` is off — the server's whole-surface 404 (#12's own
+ * acceptance criterion, "no queue surface exists anywhere in the product" while disabled),
+ * never an error. `lib/nav.ts`'s gate and the queue screen itself both read this same shape,
+ * off the same query key, so flipping the toggle needs no second endpoint to notice.
+ */
+export async function fetchQueueEntries(includeAbandoned = false): Promise<QueueList | null> {
+  const qs = includeAbandoned ? '?include_abandoned=true' : ''
+  const res = await fetch(`/api/queue-entries${qs}`, { cache: 'no-store' })
+  if (res.status === 404) return null
+  if (!res.ok) throw await failure(res, 'Could not load the queue')
+  return res.json()
+}
+
+/** Exactly one of `customer_id`/`bare_name`, mirroring the server's own CHECK — "a walk-in
+ *  may never become a full customer record" (CLAUDE.md). */
+export type AddQueueEntryDraft = {
+  customer_id?: string
+  bare_name?: string
+  bare_phone?: string | null
+  requested_service_id: string
+  preferred_staff_id?: string | null
+}
+
+export async function addQueueEntry(draft: AddQueueEntryDraft): Promise<QueueEntry> {
+  const res = await send('POST', '/api/queue-entries', draft)
+  if (!res.ok) throw await failure(res, 'Could not add this walk-in to the queue')
+  return res.json()
+}
+
+export async function abandonQueueEntry(id: string): Promise<QueueEntry> {
+  const res = await send('POST', `/api/queue-entries/${encodeURIComponent(id)}/abandon`, {})
+  if (!res.ok) throw await failure(res, 'Could not update this queue entry')
+  return res.json()
+}
+
+/** What `POST .../start` hands back: the queue entry (now `in_service`) and the ordinary
+ *  `Appointment` it became — trimmed to what the queue screen's own success toast needs,
+ *  not the calendar's full `Appointment` shape. */
+export type QueueStartResult = {
+  queue_entry: QueueEntry
+  appointment: { id: string; staff: { display_name: string }; service: { name: string } }
+}
+
+export async function startQueueEntry(id: string): Promise<QueueStartResult> {
+  const res = await send('POST', `/api/queue-entries/${encodeURIComponent(id)}/start`, {})
+  if (!res.ok) throw await failure(res, 'Could not start this walk-in')
   return res.json()
 }

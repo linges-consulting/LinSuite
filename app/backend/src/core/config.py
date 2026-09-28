@@ -99,9 +99,19 @@ class Settings(BaseSettings):
     # --- Notifications (tech-stack §6) -----------------------------------------------------
     # Which implementation of `notifications.providers.NotificationProvider` sends. `console`
     # writes the whole message to the log, which is how a reset link is retrieved locally.
+    # This stays the dev/test override only (`console`/`recording`) — `get_provider()` reads
+    # a real deployment's sender off `businesses.email_sender` instead (Phase 12 Task 2, #11):
+    # email is tenant-owned config now, not a deployment-wide env var.
     notification_provider: str = "console"
     # Origin that links in outgoing messages point back at. No trailing slash.
     app_base_url: str = "http://localhost"
+
+    # AES-256-GCM key for the Resend/SMTP credentials on `businesses` at rest (Phase 12 Task
+    # 2, #11; `notifications/credentials.py`), the same shape `mfa_encryption_key` already
+    # uses for TOTP secrets — direct field encryption, no per-record wrapped key, because
+    # there is one business row and no crypto-shred requirement here. No default, and
+    # escrowed like the other two: losing it makes every stored sender credential unreadable.
+    notification_credential_key: str
 
     # Screen new passwords against HaveIBeenPwned (only a 5-character SHA-1 prefix leaves
     # the server). Off for air-gapped installs; the bundled list is then the only check.
@@ -126,7 +136,9 @@ class Settings(BaseSettings):
             )
         return value
 
-    @field_validator("mfa_encryption_key", "document_master_key", mode="after")
+    @field_validator(
+        "mfa_encryption_key", "document_master_key", "notification_credential_key", mode="after"
+    )
     @classmethod
     def _real_aes_key(cls, value: str, info: ValidationInfo) -> str:
         try:
@@ -144,13 +156,23 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _separate_keys(self) -> "Settings":
-        # One value in both would tie the TOTP secrets and every client's documents to one
-        # secret: a leak of either is a leak of both, and escrow loses its second copy.
-        if self.document_master_key.lower() == self.mfa_encryption_key.lower():
-            raise ValueError(
-                "DOCUMENT_MASTER_KEY and MFA_ENCRYPTION_KEY must be different keys. "
-                f"Generate each with its own: {GENERATE}"
-            )
+        # One value shared by any two of these would tie whatever they each protect
+        # together: a leak or a loss of one key becomes a leak or a loss of both, and escrow
+        # loses its second copy.
+        keys = {
+            "DOCUMENT_MASTER_KEY": self.document_master_key,
+            "MFA_ENCRYPTION_KEY": self.mfa_encryption_key,
+            "NOTIFICATION_CREDENTIAL_KEY": self.notification_credential_key,
+        }
+        seen: dict[str, str] = {}
+        for name, value in keys.items():
+            lowered = value.lower()
+            if lowered in seen:
+                raise ValueError(
+                    f"{seen[lowered]} and {name} must be different keys. "
+                    f"Generate each with its own: {GENERATE}"
+                )
+            seen[lowered] = name
         return self
 
 

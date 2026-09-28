@@ -294,6 +294,60 @@ class ResourceRow:
     name: str
 
 
+async def staff_specs(
+    db: SessionDep, staff_ids: Iterable[uuid.UUID], window: Interval
+) -> dict[uuid.UUID, StaffSpec]:
+    """Each of `staff_ids`' own shift matrix, time off and concurrency limit, in the engine's
+    shape — the one place this is read off the database, shared by `compute` (the whole-day
+    grid, `window` its date range) and `scheduling/queue.py::start_queue_entry` (one walk-in's
+    instant start, `window` its narrow buffered span) — Phase 7 Task 5's own reuse of this
+    loader rather than a second copy of the same three queries."""
+    staff_ids = list(staff_ids)
+    limits = dict(
+        (
+            await db.execute(
+                select(Staff.id, Staff.max_concurrent_appointments).where(Staff.id.in_(staff_ids))
+            )
+        ).all()  # type: ignore[arg-type]
+    )
+    hours: dict[uuid.UUID, dict[int, list[tuple[int, int]]]] = {s: {} for s in staff_ids}
+    for row in await db.execute(
+        select(
+            WorkingHours.staff_id,
+            WorkingHours.weekday,
+            WorkingHours.start_minute,
+            WorkingHours.end_minute,
+        ).where(WorkingHours.staff_id.in_(staff_ids))
+    ):
+        hours[row.staff_id].setdefault(row.weekday, []).append((row.start_minute, row.end_minute))
+    time_off: dict[uuid.UUID, list[Interval]] = {s: [] for s in staff_ids}
+    for row in await db.execute(
+        select(TimeOff.staff_id, TimeOff.starts_at, TimeOff.ends_at).where(
+            TimeOff.staff_id.in_(staff_ids),
+            TimeOff.ends_at > window[0],
+            TimeOff.starts_at < window[1],
+        )
+    ):
+        time_off[row.staff_id].append((row.starts_at, row.ends_at))
+    return {
+        s: StaffSpec(id=s, hours=hours[s], time_off=time_off[s], max_concurrent=limits.get(s, 1))
+        for s in staff_ids
+    }
+
+
+async def active_resources(db: SessionDep) -> list[ResourceRow]:
+    """Every active space or device, in the order "any" requirement picks from — the one
+    place this is read, shared by `compute` and `scheduling/queue.py::start_queue_entry`."""
+    return [
+        ResourceRow(id=row.id, kind=row.kind, sort_order=row.sort_order, name=row.name)
+        for row in await db.execute(
+            select(Resource.id, Resource.kind, Resource.sort_order, Resource.name)
+            .where(Resource.active)
+            .order_by(Resource.sort_order, Resource.name)
+        )
+    ]
+
+
 @dataclass(frozen=True)
 class Computed:
     """Everything `compute` read and what the engine made of it. Booking wants the day's
@@ -351,41 +405,8 @@ async def compute(
         localize(datetime.combine(to + timedelta(days=1), time.min), zone),
     )
 
-    limits = dict(
-        (
-            await db.execute(
-                select(Staff.id, Staff.max_concurrent_appointments).where(Staff.id.in_(staff_ids))
-            )
-        ).all()  # type: ignore[arg-type]
-    )
-    hours: dict[uuid.UUID, dict[int, list[tuple[int, int]]]] = {s: {} for s in staff_ids}
-    for row in await db.execute(
-        select(
-            WorkingHours.staff_id,
-            WorkingHours.weekday,
-            WorkingHours.start_minute,
-            WorkingHours.end_minute,
-        ).where(WorkingHours.staff_id.in_(staff_ids))
-    ):
-        hours[row.staff_id].setdefault(row.weekday, []).append((row.start_minute, row.end_minute))
-    time_off: dict[uuid.UUID, list[Interval]] = {s: [] for s in staff_ids}
-    for row in await db.execute(
-        select(TimeOff.staff_id, TimeOff.starts_at, TimeOff.ends_at).where(
-            TimeOff.staff_id.in_(staff_ids),
-            TimeOff.ends_at > window[0],
-            TimeOff.starts_at < window[1],
-        )
-    ):
-        time_off[row.staff_id].append((row.starts_at, row.ends_at))
-
-    resources = [
-        ResourceRow(id=row.id, kind=row.kind, sort_order=row.sort_order, name=row.name)
-        for row in await db.execute(
-            select(Resource.id, Resource.kind, Resource.sort_order, Resource.name)
-            .where(Resource.active)
-            .order_by(Resource.sort_order, Resource.name)
-        )
-    ]
+    specs = await staff_specs(db, staff_ids, window)
+    resources = await active_resources(db)
     closures = set(
         await db.scalars(select(Closure.date).where(Closure.date >= from_, Closure.date <= to))
     )
@@ -400,10 +421,6 @@ async def compute(
 
     now = datetime.now(UTC)
     horizon_ends_on = now.astimezone(zone).date() + timedelta(days=business.booking_horizon_days)
-    specs = {
-        s: StaffSpec(id=s, hours=hours[s], time_off=time_off[s], max_concurrent=limits.get(s, 1))
-        for s in staff_ids
-    }
     days = bookable_slots(
         timezone=business.timezone,
         granularity_minutes=business.slot_granularity_minutes,
@@ -450,23 +467,29 @@ def check_range(from_: Date, to: Date) -> None:
         raise refuse("to", f"Ask for at most {MAX_RANGE_DAYS} days at a time.", where="query")
 
 
-@router.get("", response_model=AvailabilityOut)
-async def availability(
-    _: Viewer,
+async def resolve_availability(
     db: SessionDep,
-    service_id: uuid.UUID,
-    from_: Annotated[Date, Query(alias="from")],
+    service: CatalogServiceOut,
+    from_: Date,
     to: Date,
-    staff_id: uuid.UUID | None = None,
-):
-    """Bookable slots for `service_id` on each business-local date from `from` to `to`
-    inclusive (at most 31 days). Days after `horizon_ends_on` — today plus the business's
-    `booking_horizon_days`, inclusive — are answered with no slots.
+    staff_id: uuid.UUID | None,
+) -> AvailabilityOut | JSONResponse:
+    """The bookable-slots answer for one already-fetched, already-admitted `service` —
+    shared by the staff route below and the public one (`scheduling/public.py`), so "is this
+    start offered" has exactly one computation and one cache key regardless of who is
+    asking. Whatever admission check gates `service` for the caller (nothing extra for staff;
+    `bookable_online` for the public route) has already run before this is reached — this
+    only ever enforces what the engine itself needs, a named `staff_id` must be one of the
+    service's eligible staff, and always calls `compute()` with `relax_advisory` left at its
+    default `False`: there is no parameter here to pass anything else. The client-facing
+    portal (M3) must never be given that switch (`scheduling/availability.py`'s and
+    `scheduling/appointments.py`'s docstrings) — this function's signature is how that holds
+    structurally, not just by convention.
 
-    The documented body is `AvailabilityOut`; the 409 below is a `JSONResponse` because
-    `HTTPException` carries one `detail` and this refusal has a list beside it."""
-    check_range(from_, to)
-    service = await catalog_entry(db, service_id)
+    Only this — the engine's own answer — is cached (tech-stack §19). The catalog and
+    eligibility checks the caller ran always run fresh; they are cheap single-row reads, and
+    a cache hit here already reflects the latest generation, which any change to either one
+    bumps (`scheduling/cache.py`)."""
     if not service.bookable:
         return unbookable(service)
     staff_ids = [uuid.UUID(s) for s in service.staff_ids]
@@ -477,10 +500,6 @@ async def availability(
             )
         staff_ids = [staff_id]
 
-    # Only this — the engine's own answer — is cached (tech-stack §19). The catalog and
-    # eligibility checks above always run fresh; they are cheap single-row reads, and a
-    # cache hit here already reflects the latest generation, which any change to either one
-    # bumps (`scheduling/cache.py`).
     async def _compute() -> dict:
         computed = await compute(db, service, staff_ids, from_, to)
         return AvailabilityOut(
@@ -511,6 +530,28 @@ async def availability(
         "to": to.isoformat(),
     }
     return AvailabilityOut.model_validate(await cache.cached("avail", parts, _compute))
+
+
+@router.get("", response_model=AvailabilityOut)
+async def availability(
+    _: Viewer,
+    db: SessionDep,
+    service_id: uuid.UUID,
+    from_: Annotated[Date, Query(alias="from")],
+    to: Date,
+    staff_id: uuid.UUID | None = None,
+):
+    """Bookable slots for `service_id` on each business-local date from `from` to `to`
+    inclusive (at most 31 days). Days after `horizon_ends_on` — today plus the business's
+    `booking_horizon_days`, inclusive — are answered with no slots.
+
+    The documented body is `AvailabilityOut`; the 409 below is a `JSONResponse` because
+    `HTTPException` carries one `detail` and this refusal has a list beside it. The engine
+    call itself is `resolve_availability`, shared with the public booking route
+    (`scheduling/public.py`)."""
+    check_range(from_, to)
+    service = await catalog_entry(db, service_id)
+    return await resolve_availability(db, service, from_, to, staff_id)
 
 
 def unbookable(service: CatalogServiceOut, link_index: int | None = None) -> JSONResponse:

@@ -42,7 +42,7 @@ from core.config import get_settings
 from core.db import SessionDep
 from customers.models import Customer
 from forms.models import FormLink, FormTemplate, FormTemplateVersion
-from notifications.tasks import send_email
+from notifications.triggers import notify_form_link_issued
 
 LIFETIME = timedelta(hours=48)
 # Per source address, per minute, on the public lookup (`public.py`), and Traefik's `public`
@@ -223,20 +223,12 @@ async def issue_link(
     await db.commit()
 
     url = url_of(token)
-    if email:
-        # After the commit, like the reset link: a fast worker must not send a link the
-        # public page cannot find yet. Console until Phase 12, with no change here.
-        send_email.delay(email, f"A form to fill in: {version.name}", _message(version.name, url))
+    # After the commit, like the reset link: a fast worker must not send a link the public
+    # page cannot find yet. `notify_form_link_issued` (Phase 12 Task 5) resolves email/sms
+    # per the business's own configured senders — a no-op on whichever channel isn't ready,
+    # never an error, since the link itself already exists and is returned below regardless.
+    await notify_form_link_issued(db, link, customer, version, url)
     return IssuedLink(id=str(link.id), url=url, expires_at=link.expires_at, emailed_to=email)
-
-
-def _message(form_name: str, url: str) -> str:
-    return (
-        f"You have been sent a form to fill in: {form_name}.\n\n"
-        f"Open it here:\n{url}\n\n"
-        "The link works once and expires in 48 hours. If you were not expecting this, you "
-        "can ignore it."
-    )
 
 
 @router.get("/customers/{customer_id}/form-links", dependencies=SEES_CLIENTS)

@@ -245,6 +245,9 @@ async def test_the_two_system_roles_are_seeded_and_marked(client):
         "forms.view",
         "notes.view",
         "notes.write",
+        # Taking a walk-in's name at the door is front-desk work too (0042, #12) — the same
+        # call `forms.issue` already made.
+        "queue.manage",
     }
 
 
