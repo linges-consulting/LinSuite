@@ -93,6 +93,7 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "invoice_refunds": ("SELECT", "INSERT"),  # #67
     # #72, 0061: the package credit redemption ledger — spending a credit is a new row.
     "package_credit_redemptions": ("SELECT", "INSERT"),
+    "package_credit_voids": ("SELECT", "INSERT"),  # #73, 0062
 }
 # The purge role reads and deletes everywhere and writes nowhere — except the fact of its own
 # purge, which ADR-0001 §6 puts in the purge transaction (0024, pre-flight D11).
@@ -131,6 +132,7 @@ TRIGGERS = (
     ("invoice_payment_transfers", "invoice_payment_transfers_no_rewrite"),
     ("invoice_refunds", "invoice_refunds_no_rewrite"),
     ("package_credit_redemptions", "package_credit_redemptions_guard"),
+    ("package_credit_voids", "package_credit_voids_no_rewrite"),
 )
 
 
