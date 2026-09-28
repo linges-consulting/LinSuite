@@ -16,33 +16,16 @@ reset, MFA, a staff notification) — writes nothing: there is no profile to sur
 the column is `NOT NULL`.
 """
 
-import asyncio
 import uuid
-from collections.abc import Coroutine
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from core.config import get_settings
+from core.db import run_task
 from notifications.models import NotificationFailure
 
 _REASON_MAX = 2000  # `reason` is diagnostic text, not a compliance record — trimmed, not typed.
-
-
-def _run(work: Coroutine[Any, Any, None]) -> None:
-    """`asyncio.run`, from a worker (no loop running) or from an eager call made inside a
-    request/test that already has one of its own (`customers/tasks.py::_run`'s same
-    reasoning, copied rather than imported — this module has no other reason to depend on
-    `customers`)."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        asyncio.run(work)
-    else:
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            pool.submit(asyncio.run, work).result()
 
 
 def record_permanent_failure(
@@ -56,7 +39,7 @@ def record_permanent_failure(
     notification type to attach the row to — see the module docstring."""
     if customer_id is None or notification_type is None:
         return
-    _run(_write(customer_id, channel, notification_type, recipient, str(error)))
+    run_task(_write, customer_id, channel, notification_type, recipient, str(error))
 
 
 async def _write(

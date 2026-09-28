@@ -534,6 +534,25 @@ async def test_a_fully_compliant_customers_entry_shows_no_gaps(client):
     assert listed.json()["entries"][0]["compliance_gaps"] == []
 
 
+async def test_a_service_scoped_essential_forms_gap_shows_for_a_waiting_walk_in(client):
+    """Fix round: a template mapped to a *specific* service (not `applies_to_all`) used to
+    never show for a queue entry at all, because `_applicable_services` only ever checked
+    confirmed appointments — a walk-in waiting for that exact service has none yet. This is
+    the population #12's "while the client is still waiting" criterion is actually about."""
+    await as_admin(client)
+    await enable_queue(client)
+    me = await me_staff_id(client)
+    service = await make_service(client, staff_ids=[me])
+    template = await _essential_template(client, service)  # mapped to this service, not all
+    customer_id = await make_customer(client)
+    await client.post(QUEUE, json={"customer_id": customer_id, "requested_service_id": service})
+
+    listed = await client.get(QUEUE)
+    assert listed.json()["entries"][0]["compliance_gaps"] == [
+        {"template_id": template["id"], "name": template["name"], "status": "missing"}
+    ]
+
+
 async def test_a_bare_name_entry_has_no_chart_and_shows_the_same_empty_shape_as_compliant(client):
     """No `customer_id` at all to check — mirrors `_compliance`'s own "nothing to report" shape
     for a compliant customer (an empty list), never a third shape for "no chart to check"."""

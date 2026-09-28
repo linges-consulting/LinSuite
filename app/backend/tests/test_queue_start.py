@@ -503,6 +503,57 @@ async def test_completing_the_converted_appointment_marks_the_queue_entry_done(c
     assert status == "done"
 
 
+async def test_cancelling_the_converted_appointment_marks_the_queue_entry_done(client):
+    """A walk-in whose converted appointment gets cancelled is not stuck `in_service` on the
+    front-desk screen forever — cancel clears it exactly like completion does."""
+    await as_admin(client)
+    await enable_queue(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me)
+    service = await make_service(client, [me], duration_minutes=20)
+    customer = await make_customer(client)
+    entry = await add_entry(
+        client, customer_id=customer, requested_service_id=service, preferred_staff_id=me
+    )
+    started = await client.post(f"{QUEUE}/{entry['id']}/start", json={})
+    appointment_id = started.json()["appointment"]["id"]
+
+    cancelled = await client.post(f"{APPOINTMENTS}/{appointment_id}/cancel", json={})
+    assert cancelled.status_code == 200, cancelled.text
+
+    listed = await client.get(QUEUE)
+    status = next(e["status"] for e in listed.json()["entries"] if e["id"] == entry["id"])
+    assert status == "done"
+
+
+async def test_a_no_show_on_the_converted_appointment_marks_the_queue_entry_done(client):
+    await as_admin(client)
+    await enable_queue(client)
+    me = await me_staff_id(client)
+    await put_hours(client, me)
+    service = await make_service(client, [me], duration_minutes=20)
+    customer = await make_customer(client)
+    entry = await add_entry(
+        client, customer_id=customer, requested_service_id=service, preferred_staff_id=me
+    )
+    started = await client.post(f"{QUEUE}/{entry['id']}/start", json={})
+    appointment_id = started.json()["appointment"]["id"]
+
+    async with session_scope() as db:
+        await db.execute(
+            text("UPDATE appointments SET starts_at = now() - interval '1 minute' WHERE id = :id"),
+            {"id": appointment_id},
+        )
+        await db.commit()
+
+    no_show = await client.post(f"{APPOINTMENTS}/{appointment_id}/no-show", json={})
+    assert no_show.status_code == 200, no_show.text
+
+    listed = await client.get(QUEUE)
+    status = next(e["status"] for e in listed.json()["entries"] if e["id"] == entry["id"])
+    assert status == "done"
+
+
 async def test_an_ordinary_appointment_with_no_queue_entry_completes_unaffected(client):
     """The `UPDATE ... WHERE appointment_id = ...` touches zero rows for an appointment that
     never came through the queue at all — completing it must not error. Booked the same way

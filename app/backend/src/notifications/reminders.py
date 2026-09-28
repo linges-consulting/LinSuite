@@ -27,11 +27,8 @@ observes, so this module calls that file's shared dispatch surface
 sixth trigger.
 """
 
-import asyncio
-from collections.abc import Coroutine, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
@@ -41,6 +38,7 @@ from sqlalchemy.pool import NullPool
 
 from core.celery_app import celery_app
 from core.config import get_settings
+from core.db import run_task
 from notifications.models import AppointmentReminder
 from notifications.triggers import appointment_context, dispatch, load_business
 from scheduling.clock import localize
@@ -148,20 +146,6 @@ async def send_due_reminders(db: AsyncSession) -> int:
 # --- Celery --------------------------------------------------------------------------------
 
 
-def _run(work: Coroutine[Any, Any, int]) -> int:
-    """`asyncio.run`, from a worker (no loop running) or from an eager call made inside a
-    request/test that already has one of its own — `notifications/failures.py::_run`'s same
-    reasoning, copied rather than imported (this module has no other reason to depend on
-    that one)."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(work)
-    else:
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, work).result()
-
-
 async def _send_due_reminders_own_session() -> int:
     # A fresh engine on this call's own event loop, the same shape `notifications/failures.py`
     # and `forms/tasks.py` use: a worker call has no loop of its own, and a pooled connection
@@ -176,4 +160,4 @@ async def _send_due_reminders_own_session() -> int:
 
 @celery_app.task(name="notifications.send_appointment_reminders")
 def send_appointment_reminders() -> int:
-    return _run(_send_due_reminders_own_session())
+    return run_task(_send_due_reminders_own_session)

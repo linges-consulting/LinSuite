@@ -1131,18 +1131,27 @@ def _cancel(
     )
 
 
+async def _clear_queue_entry(db: AsyncSession, appointment_id: uuid.UUID) -> None:
+    """An appointment a walk-in queue entry converted into
+    (`scheduling/queue.py::start_queue_entry`) carries that entry's id on
+    `queue_entries.appointment_id`. Whatever terminal state the appointment reaches next —
+    completed, cancelled, or a no-show — the queue entry is done being `in_service`; a
+    walk-in who left, or whose slot was cancelled, is not still "in service" on the front
+    desk's screen. A plain, unconditional `UPDATE` rather than a load-then-save: there is at
+    most one such row (a queue entry converts once, guarded by its own `waiting`-only
+    transition), and an ordinary appointment with no queue entry at all touches zero rows,
+    silently."""
+    await db.execute(
+        update(QueueEntry)
+        .where(QueueEntry.appointment_id == appointment_id, QueueEntry.status == "in_service")
+        .values(status="done")
+    )
+
+
 @router.post("/{appointment_id}/complete", response_model=AppointmentOut)
 async def complete_appointment(appointment_id: uuid.UUID, actor: Scheduler, db: SessionDep):
     """The one explicit, recorded event later phases hang behaviour on (module docstring;
-    CLAUDE.md "package credits deduct on completion"). Only from `confirmed`.
-
-    **Phase 7 Task 5 (#12)**: an appointment a walk-in queue entry converted into
-    (`scheduling/queue.py::start_queue_entry`) carries that entry's id on
-    `queue_entries.appointment_id`. Completing it is also that entry's own "done" — m3.md's own
-    text — so any still-`in_service` entry pointing here is flipped in the same transaction. A
-    plain, unconditional `UPDATE` rather than a load-then-save: there is at most one such row
-    (a queue entry converts once, guarded by its own `waiting`-only transition), and an
-    ordinary appointment with no queue entry at all touches zero rows, silently."""
+    CLAUDE.md "package credits deduct on completion"). Only from `confirmed`."""
     appointment = await _lock(db, appointment_id)
     if appointment is None:
         raise HTTPException(status_code=404, detail="No such appointment.")
@@ -1158,11 +1167,7 @@ async def complete_appointment(appointment_id: uuid.UUID, actor: Scheduler, db: 
         actor_user_id=actor.id,
         metadata={},
     )
-    await db.execute(
-        update(QueueEntry)
-        .where(QueueEntry.appointment_id == appointment.id, QueueEntry.status == "in_service")
-        .values(status="done")
-    )
+    await _clear_queue_entry(db, appointment.id)
     await db.commit()
     await cache.bump()
     return _out(await _load(db, appointment.id))
@@ -1185,6 +1190,7 @@ async def cancel_appointment(
         # to undo — this appointment simply stops matching `waive_handover`'s occupying test
         # the moment its status flips, and the sibling's resource period springs back to it.
         await _recompute_group_periods_never_failing(db, appointment.booking_group_id)
+    await _clear_queue_entry(db, appointment.id)
     await db.commit()
     await cache.bump()
     return _out(await _load(db, appointment.id))
@@ -1217,6 +1223,7 @@ async def mark_no_show(appointment_id: uuid.UUID, actor: Scheduler, db: SessionD
     if appointment.booking_group_id is not None:
         # Same restoration as a cancel (fix round 2) — a no-show stops occupying too.
         await _recompute_group_periods_never_failing(db, appointment.booking_group_id)
+    await _clear_queue_entry(db, appointment.id)
     await db.commit()
     await cache.bump()
     return _out(await _load(db, appointment.id))

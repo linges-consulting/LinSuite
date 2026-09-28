@@ -61,7 +61,7 @@ from core.db import SessionDep
 from customers.models import Customer
 from forms.models import FormSubmission, FormTemplate, FormTemplateService, FormTemplateVersion
 from scheduling.clock import localize
-from scheduling.models import Appointment
+from scheduling.models import Appointment, QueueEntry
 from scheduling.time_off import business_zone
 
 Status = Literal["missing", "expired", "resign_required"]
@@ -230,6 +230,21 @@ async def _applicable_services(
     )
     found: dict[uuid.UUID, set[uuid.UUID]] = defaultdict(set)
     for customer_id, service_id in rows:
+        found[customer_id].add(service_id)
+    # Phase 7 Task 7 (#12): a waiting or in-service walk-in queue entry applies the same way a
+    # confirmed appointment does — "essential-form gaps appear while the client is still
+    # waiting" names exactly this population, and a queue entry has no appointment yet for
+    # `_applicable_services`'s own check above to find. A `bare_name` entry has no
+    # `customer_id` at all and is excluded here the same way it is everywhere else — there is
+    # no chart to attach a gap to.
+    queue_rows = await db.execute(
+        select(QueueEntry.customer_id, QueueEntry.requested_service_id).where(
+            QueueEntry.customer_id.in_(customer_ids),
+            QueueEntry.requested_service_id.in_(service_ids),
+            QueueEntry.status.in_(("waiting", "in_service")),
+        )
+    )
+    for customer_id, service_id in queue_rows:
         found[customer_id].add(service_id)
     return found
 
