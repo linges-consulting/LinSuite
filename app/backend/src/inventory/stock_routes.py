@@ -1,4 +1,5 @@
-"""Settings → Products: receiving a delivery and correcting a stock count (#61).
+"""Settings → Products: receiving a delivery and correcting a stock count (#61), and the
+low-stock email alert that a crossing arms in the same transaction (#62).
 
 Two routes, two capabilities — `inventory.receive` and `inventory.adjust` — checked
 independently rather than folded into `catalog.manage`: an owner may trust a lead to receive
@@ -9,6 +10,14 @@ admin/owner only (`requires_admin_mode=True`, `auth/capabilities.py`).
 Every write here goes through `inventory.stock::record_movement`, which is where the atomic
 non-negative guard actually lives (CLAUDE.md "Concurrency") — this module only turns its
 outcome into the right HTTP status and appends the matching `record_event`.
+
+**Low-stock alert, queued after commit.** `record_movement` evaluates the crossing inside its
+own transaction and returns whether *this* call is the one that just armed it
+(`MovementResult.low_stock_alert_armed`); each route commits first, exactly as `scheduling/
+public.py::book_public` commits before calling `notify_booking_confirmed`, and only then calls
+`notifications/triggers.py::notify_low_stock` — a task queued before the commit could race a
+rollback (CLAUDE.md: Celery workers, never inline; #62's own "queued after commit"
+requirement).
 """
 
 import uuid
@@ -23,6 +32,7 @@ from core.audit import record_event
 from core.db import SessionDep
 from inventory.routes import ProductOut, _load_product, _load_variant, _product_out
 from inventory.stock import InsufficientStock, VariantNotFound, record_movement
+from notifications.triggers import notify_low_stock
 
 router = APIRouter(prefix="/admin/products", tags=["inventory"])
 
@@ -79,7 +89,7 @@ async def receive_stock(
     await _load_variant(db, product_id, variant_id)  # 404 before anything is written
 
     try:
-        await record_movement(
+        movement = await record_movement(
             db,
             variant_id=variant_id,
             kind="receipt",
@@ -99,6 +109,8 @@ async def receive_stock(
         metadata={"quantity": payload.quantity},
     )
     await db.commit()
+    if movement.low_stock_alert_armed:
+        await notify_low_stock(db, variant_id)
     return _product_out(await _load_product(db, product_id))
 
 
@@ -113,7 +125,7 @@ async def adjust_stock(
     await _load_variant(db, product_id, variant_id)  # 404 before anything is written
 
     try:
-        await record_movement(
+        movement = await record_movement(
             db,
             variant_id=variant_id,
             kind="adjustment",
@@ -137,4 +149,6 @@ async def adjust_stock(
         metadata={"quantity_delta": payload.quantity_delta, "reason": payload.reason},
     )
     await db.commit()
+    if movement.low_stock_alert_armed:
+        await notify_low_stock(db, variant_id)
     return _product_out(await _load_product(db, product_id))
