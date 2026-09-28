@@ -17,6 +17,7 @@ from auth.passwords import router as passwords_router
 from auth.roles import router as roles_router
 from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
+from billing.bill_review import router as bill_review_router
 from billing.packages import router as package_definitions_router
 from billing.routes import router as discounts_router
 from billing.tax_routes import router as tax_router
@@ -298,4 +299,7 @@ api.include_router(stock_router)
 # Settings → Billing → Tax: tax components and their effective-dated rates (`billing.manage`,
 # Admin Mode, #57).
 api.include_router(tax_router)
+# The staff-facing draft-bill review screen (`billing.view`, Staff Mode, #63): #59's draft
+# bill, #58's discounts and #57's tax come together here for the first time.
+api.include_router(bill_review_router)
 app.include_router(api)

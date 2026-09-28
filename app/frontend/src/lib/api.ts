@@ -2390,3 +2390,91 @@ export async function addTaxComponentRate(
   if (!res.ok) throw await failure(res, 'Could not add the new rate')
   return res.json()
 }
+
+// --- bill review: draft bill + discounts + tax, together (#63) --------------------------
+
+export type BillRef = { id: string; name: string }
+
+export type LineTax = {
+  pretax_cents: number
+  /** Keyed by `TaxComponent.code` (e.g. `"GST"`) — every applicable component appears, `0`
+   *  for one with no rate covering today, never omitted (`billing/tax.py`'s own rule). */
+  component_cents: Record<string, number>
+  tax_cents: number
+  total_cents: number
+}
+
+export type BillLine = {
+  id: string
+  appointment_id: string
+  service: BillRef
+  staff: BillRef
+  price_cents: number
+  applied_discount_ids: string[]
+  discounted_cents: number
+  tax: LineTax
+  line_total_cents: number
+}
+
+export type DiscountChoice = {
+  id: string
+  name: string
+  kind: 'percentage' | 'fixed'
+  percentage_bp: number | null
+  amount_cents: number | null
+  stackable: boolean
+  /** Whether this discount is part of the combination currently applied to the bill. */
+  applied: boolean
+}
+
+export type Bill = {
+  id: string
+  status: 'draft' | 'issued'
+  customer: BillRef
+  booking_group_id: string | null
+  created_at: string
+  lines: BillLine[]
+  /** Every enabled discount eligible for at least one line — the picker's own choices, not
+   *  only the ones currently applied. */
+  eligible_discounts: DiscountChoice[]
+  subtotal_cents: number
+  discount_total_cents: number
+  tax_totals_by_component: Record<string, number>
+  tax_total_cents: number
+  grand_total_cents: number
+}
+
+export type BillSummary = {
+  id: string
+  customer: BillRef
+  booking_group_id: string | null
+  created_at: string
+  line_count: number
+  subtotal_cents: number
+}
+
+export async function fetchDraftBills(): Promise<BillSummary[]> {
+  const res = await fetch('/api/bills', { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the draft bills')
+  return (await res.json()).bills
+}
+
+export async function fetchBill(id: string): Promise<Bill> {
+  const res = await fetch(`/api/bills/${encodeURIComponent(id)}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load this bill')
+  return res.json()
+}
+
+/**
+ * Replaces the whole applied combination in one call — reapplying with a changed selection
+ * is how "add or remove a discount" both work, the same "recomputed live" screen either way.
+ * A 422 means the combination was refused (not stackable together, or exceeds the eligible
+ * charge); `ApiError.message` carries the server's own specific reason verbatim.
+ */
+export async function applyBillDiscounts(id: string, discountIds: string[]): Promise<Bill> {
+  const res = await send('PUT', `/api/bills/${encodeURIComponent(id)}/discounts`, {
+    discount_ids: discountIds,
+  })
+  if (!res.ok) throw await failure(res, 'Could not apply these discounts')
+  return res.json()
+}

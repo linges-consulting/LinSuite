@@ -474,3 +474,35 @@ class ServiceBillLine(Base):
     # completion*, never re-read at invoice issue (#65) or report time (#69).
     commission_rate_bp: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ServiceBillDiscount(Base):
+    """One discount (#58) staff has chosen to apply to a draft bill, from the bill review
+    screen (#63) — the combination, not a per-line record. Composite key, replaced whole on
+    `PUT /api/bills/{id}/discounts` — `DiscountEligibleItem`'s own reasoning: one discount
+    named twice against one bill is one application, not two.
+
+    **Bill-level, not line-level, on purpose.** Which lines a discount actually reduces is
+    derived at read time from `discount_resolver.is_eligible` against each line's
+    `service_id` (`billing/bill_review.py`), never stored — a draft bill still accepts new
+    lines as sibling appointments complete (#59's own contract: "appended to, line by line,
+    right up until #65 issues it"), and a bill-level selection means a discount staff already
+    applied keeps applying to whatever line shows up next, with no reapply step, rather than
+    going stale the moment a second appointment on the same visit finishes.
+
+    Persisted rather than recomputed per request — #64 (bill review authority, blocked by
+    this ticket) reads whatever is here to decide what it is approving, so a staff member's
+    selection has to survive a page reload and outlive the request that made it. `discount_id`
+    is `ON DELETE RESTRICT`: `Discount` is never hard-deleted (`enabled` going false is the
+    only retirement path), so a bill can always keep naming what applied to it.
+    """
+
+    __tablename__ = "service_bill_discounts"
+
+    bill_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("service_bills.id", ondelete="CASCADE"), primary_key=True
+    )
+    discount_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("discounts.id", ondelete="RESTRICT"), primary_key=True
+    )
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

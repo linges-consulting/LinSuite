@@ -159,6 +159,15 @@ CAPABILITIES: tuple[Capability, ...] = (
         "Inventory",
         requires_admin_mode=True,
     ),
+    # #63: front-desk work (reviewing a visit's own draft bill before checkout), so no
+    # `requires_admin_mode` — the same reasoning `queue.manage`/`forms.issue` already give for
+    # the front desk. `billing.manage`'s own docstring reserved this exact key for whichever
+    # ticket first needed a staff-facing billing read/write, rather than a near-duplicate.
+    Capability(
+        "billing.view",
+        "See a visit's draft service bill and apply eligible discounts before checkout.",
+        "Billing",
+    ),
 )
 
 BY_KEY: dict[str, Capability] = {c.key: c for c in CAPABILITIES}
