@@ -18,17 +18,17 @@ it — see the module section in `billing/models.py` for exactly why, and what #
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from auth.capabilities import Requires
 from billing.allocation import allocate_bundle_price
 from billing.bill_review import (
     BillViewer,
-    _applicable_components,
-    _business,
-    _today_in,
+    applicable_components,
+    business_or_404,
     components_for,
 )
 from billing.invoice_numbering import allocate_invoice_number
@@ -40,9 +40,11 @@ from billing.models import (
     PackagePurchaseCredit,
 )
 from billing.tax import compute_line_tax
+from core.access_log import LogAccessOf
 from core.audit import record_event
 from core.db import SessionDep
 from customers.models import Customer
+from scheduling.clock import today_in
 from scheduling.models import Service
 
 router = APIRouter(prefix="/packages", tags=["billing"])
@@ -133,7 +135,7 @@ def _out(purchase: PackagePurchase, invoice: Invoice) -> PackagePurchaseOut:
 async def purchase_package(
     definition_id: uuid.UUID, payload: PurchasePackageIn, actor: BillViewer, db: SessionDep
 ) -> PackagePurchaseOut:
-    business = await _business(db)
+    business = await business_or_404(db)
 
     definition = await db.scalar(
         select(PackageDefinition).where(PackageDefinition.id == definition_id)
@@ -167,7 +169,7 @@ async def purchase_package(
     # `PackagePurchaseCredit.allocated_price_cents` rather than recomputing it on every read.
     allocated = allocate_bundle_price(regular_prices, definition.price_cents)
 
-    today = _today_in(business)
+    today = today_in(business.timezone)
     expires_at = (
         today + timedelta(days=definition.expires_after_days)
         if definition.expires_after_days is not None
@@ -200,7 +202,7 @@ async def purchase_package(
     # purchase's own per-component breakdown, with the resolved rates and the convention
     # frozen beside it (`tax_rates_by_component`/`tax_convention`).
     resolved_components = components_for(
-        await _applicable_components(db, business, today), definition.tax_component_keys
+        await applicable_components(db, business, today), definition.tax_component_keys
     )
     line_tax = compute_line_tax(
         definition.price_cents, resolved_components, definition.tax_convention
@@ -254,7 +256,13 @@ async def purchase_package(
 # --- reading -------------------------------------------------------------------------------
 
 
-@router.get("/purchases/{purchase_id}")
+@router.get(
+    "/purchases/{purchase_id}",
+    dependencies=[
+        Depends(Requires("billing.view")),
+        Depends(LogAccessOf("package_purchase", "purchase_id", PackagePurchase.customer_id)),
+    ],
+)
 async def get_package_purchase(
     purchase_id: uuid.UUID, _: BillViewer, db: SessionDep
 ) -> PackagePurchaseOut:

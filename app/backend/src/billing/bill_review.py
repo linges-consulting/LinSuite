@@ -25,7 +25,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from datetime import date as Date
 from typing import Annotated
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -45,10 +44,12 @@ from billing.models import (
 )
 from billing.pricing import OverrideConflict, PricedLine, distribute_override, price_line
 from billing.tax import ComponentRate, LineTax, invoice_tax_totals, resolve_rate_bp
+from core.access_log import LogAccessOf
 from core.audit import record_event
 from core.db import SessionDep
 from core.models import Business
 from customers.models import Customer
+from scheduling.clock import today_in
 from scheduling.models import Service, Staff
 
 router = APIRouter(prefix="/bills", tags=["billing"])
@@ -159,18 +160,14 @@ class ApplyDiscountsIn(BaseModel):
 # --- loading -----------------------------------------------------------------------------------
 
 
-async def _business(db: SessionDep) -> Business:
+async def business_or_404(db: SessionDep) -> Business:
     business = await db.scalar(select(Business).where(Business.id == 1))
     if business is None:
         raise HTTPException(status_code=404, detail="This instance has not been set up.")
     return business
 
 
-def _today_in(business: Business) -> Date:
-    return datetime.now(ZoneInfo(business.timezone)).date()
-
-
-async def _load_bill(db: SessionDep, bill_id: uuid.UUID) -> ServiceBill:
+async def load_bill(db: SessionDep, bill_id: uuid.UUID) -> ServiceBill:
     bill = await db.scalar(
         select(ServiceBill)
         .where(ServiceBill.id == bill_id)
@@ -181,7 +178,7 @@ async def _load_bill(db: SessionDep, bill_id: uuid.UUID) -> ServiceBill:
     return bill
 
 
-async def _applicable_components(
+async def applicable_components(
     db: SessionDep, business: Business, today: Date
 ) -> list[ComponentRate]:
     """Every active, business-applicable component with a rate covering `today` — the pool an
@@ -235,7 +232,7 @@ def eligible_discounts(
     ]
 
 
-class _LineConflict(Exception):
+class LineConflict(Exception):
     """A selected combination fails `resolve_stacked_discounts` on one specific line —
     surfaced verbatim (acceptance criterion: "shows the specific reason, not a silent
     no-op"), with the service name so staff knows which line it was about."""
@@ -266,7 +263,7 @@ async def price_bill(
     db: SessionDep, business: Business, bill: ServiceBill, *, selected_ids: set[uuid.UUID]
 ) -> PricedBill:
     """Every line priced, plus the override (if any) distributed — the one computation the
-    review screen, the authority routes and issue all share. Raises `_LineConflict`."""
+    review screen, the authority routes and issue all share. Raises `LineConflict`."""
     service_ids = {line.service_id for line in bill.lines}
     services = (
         {s.id: s for s in await db.scalars(select(Service).where(Service.id.in_(service_ids)))}
@@ -274,7 +271,7 @@ async def price_bill(
         else {}
     )
     enabled = list(await db.scalars(select(Discount).where(Discount.enabled)))
-    pool = await _applicable_components(db, business, _today_in(business))
+    pool = await applicable_components(db, business, today_in(business.timezone))
 
     lines: list[PricedBillLine] = []
     for line in bill.lines:
@@ -294,7 +291,7 @@ async def price_bill(
                 line.price_cents, convention, components, [discount_input(d) for d in applied]
             )
         except DiscountConflict as error:
-            raise _LineConflict(service.name if service else "This service", str(error)) from error
+            raise LineConflict(service.name if service else "This service", str(error)) from error
         lines.append(PricedBillLine(line, service, applied, components, priced, priced.tax))
 
     overridden = bill.manual_override_cents is not None
@@ -306,13 +303,13 @@ async def price_bill(
                 [(p.priced.tax, p.components, p.bill_line.prepaid_cents > 0) for p in lines],
             )
         except OverrideConflict as error:
-            raise _LineConflict("Override", str(error)) from error
+            raise LineConflict("Override", str(error)) from error
         for p, tax in zip(lines, billed, strict=True):
             p.billed = tax
     return PricedBill(lines=lines, pool=pool, overridden=overridden)
 
 
-async def _compute(
+async def compute_bill(
     db: SessionDep, business: Business, bill: ServiceBill, *, selected_ids: set[uuid.UUID]
 ) -> BillOut:
     """The whole screen's numbers, for one candidate `selected_ids` combination — used both to
@@ -406,7 +403,7 @@ async def _compute(
     )
 
 
-async def _persisted_selection(db: SessionDep, bill_id: uuid.UUID) -> set[uuid.UUID]:
+async def persisted_selection(db: SessionDep, bill_id: uuid.UUID) -> set[uuid.UUID]:
     rows = await db.scalars(
         select(ServiceBillDiscount.discount_id).where(ServiceBillDiscount.bill_id == bill_id)
     )
@@ -447,14 +444,20 @@ async def list_draft_bills(_: BillViewer, db: SessionDep) -> dict[str, list[Bill
     }
 
 
-@router.get("/{bill_id}")
+@router.get(
+    "/{bill_id}",
+    dependencies=[
+        Depends(Requires("billing.view")),
+        Depends(LogAccessOf("service_bill", "bill_id", ServiceBill.customer_id)),
+    ],
+)
 async def get_bill(bill_id: uuid.UUID, _: BillViewer, db: SessionDep) -> BillOut:
-    business = await _business(db)
-    bill = await _load_bill(db, bill_id)
-    selected_ids = await _persisted_selection(db, bill_id)
+    business = await business_or_404(db)
+    bill = await load_bill(db, bill_id)
+    selected_ids = await persisted_selection(db, bill_id)
     try:
-        return await _compute(db, business, bill, selected_ids=selected_ids)
-    except _LineConflict as error:
+        return await compute_bill(db, business, bill, selected_ids=selected_ids)
+    except LineConflict as error:
         # A combination that was valid when applied but no longer is (a discount disabled, or
         # an eligibility set changed, since) — surfaced the same honest way a fresh apply
         # would refuse it, not hidden behind a 500.
@@ -468,8 +471,8 @@ async def get_bill(bill_id: uuid.UUID, _: BillViewer, db: SessionDep) -> BillOut
 async def apply_discounts(
     bill_id: uuid.UUID, payload: ApplyDiscountsIn, actor: BillViewer, db: SessionDep
 ) -> BillOut:
-    business = await _business(db)
-    bill = await _load_bill(db, bill_id)
+    business = await business_or_404(db)
+    bill = await load_bill(db, bill_id)
 
     selected_ids = set(payload.discount_ids)
     if selected_ids:
@@ -503,8 +506,8 @@ async def apply_discounts(
     bill.updated_at = datetime.now(UTC)
 
     try:
-        computed = await _compute(db, business, bill, selected_ids=selected_ids)
-    except _LineConflict as error:
+        computed = await compute_bill(db, business, bill, selected_ids=selected_ids)
+    except LineConflict as error:
         raise HTTPException(status_code=422, detail=error.detail) from error
 
     await db.execute(delete(ServiceBillDiscount).where(ServiceBillDiscount.bill_id == bill_id))

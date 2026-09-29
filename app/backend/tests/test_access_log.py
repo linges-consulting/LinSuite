@@ -70,6 +70,24 @@ LOGGED = {
     ("POST", "/api/customers/{customer_id}/invoices/{invoice_id}/email"),
     ("GET", "/api/customers/{customer_id}/invoices/{invoice_id}/receipts/{line_id}/pdf"),
     ("POST", "/api/customers/{customer_id}/invoices/{invoice_id}/receipts/{line_id}/email"),
+    # Opening a client's financial record (review R30): no `{customer_id}` in the path, so
+    # `LogAccessOf` reads the owning client off the record. `test_financial_access_log.py`
+    # and `test_retail_access_log.py` prove each writes one row.
+    ("GET", "/api/invoices/{invoice_id}"),
+    ("GET", "/api/invoices/{invoice_id}/payments"),
+    ("GET", "/api/invoices/{invoice_id}/refunds"),
+    ("GET", "/api/invoices/{invoice_id}/balance-exceptions"),
+    ("GET", "/api/retail-invoices/{invoice_id}"),
+    ("GET", "/api/retail-invoices/{invoice_id}/payments"),
+    ("GET", "/api/retail-invoices/{invoice_id}/refunds"),
+    ("GET", "/api/retail-invoices/{invoice_id}/balance-exceptions"),
+    ("GET", "/api/bills/{bill_id}"),
+    ("GET", "/api/packages/purchases/{purchase_id}"),
+    # Lists: logged only when `?customer_id=` narrows them to one client's history
+    # (`LogAccessIfFiltered`); unfiltered they are list renders (ADR-0002 §4) and write nothing.
+    ("GET", "/api/invoices"),
+    ("GET", "/api/retail-invoices"),
+    ("GET", "/api/admin/reports/package-liability"),
 }
 # Customer-scoped GETs that deliberately do not log. Empty: nothing under a customer's path
 # is metadata yet (the access report itself will live under `/api/admin/...`).

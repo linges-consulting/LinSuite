@@ -49,11 +49,11 @@ from auth.models import User
 from billing.bill_review import (
     BillOut,
     BillViewer,
-    _business,
-    _compute,
-    _LineConflict,
-    _load_bill,
-    _persisted_selection,
+    LineConflict,
+    business_or_404,
+    compute_bill,
+    load_bill,
+    persisted_selection,
     price_bill,
 )
 from billing.models import BillOverrideRequest
@@ -177,9 +177,9 @@ async def _refuse_unbillable(db: SessionDep, bill) -> None:
     prepaid, review R6) is refused before anything commits — nothing is persisted."""
     try:
         await price_bill(
-            db, await _business(db), bill, selected_ids=await _persisted_selection(db, bill.id)
+            db, await business_or_404(db), bill, selected_ids=await persisted_selection(db, bill.id)
         )
-    except _LineConflict as error:
+    except LineConflict as error:
         raise HTTPException(status_code=422, detail=error.detail) from error
 
 
@@ -211,10 +211,10 @@ def _request_out(
 async def request_override(
     bill_id: uuid.UUID, payload: OverrideRequestIn, actor: BillViewer, db: SessionDep
 ) -> OverrideRequestOut:
-    business = await _business(db)
+    business = await business_or_404(db)
     if not business.enable_bill_override_requests:
         raise _OVERRIDE_REQUESTS_DISABLED
-    bill = await _load_bill(db, bill_id)
+    bill = await load_bill(db, bill_id)
     if bill.status != "draft":
         raise HTTPException(
             status_code=422, detail="Only a draft bill can have an override requested."
@@ -253,7 +253,7 @@ async def request_override(
 async def list_override_requests(
     bill_id: uuid.UUID, _: BillViewer, db: SessionDep
 ) -> dict[str, list[OverrideRequestOut]]:
-    await _load_bill(db, bill_id)
+    await load_bill(db, bill_id)
     requests = list(
         await db.scalars(
             select(BillOverrideRequest)
@@ -284,7 +284,7 @@ async def decide_override_request(
     ticket exists for is that a stale approval must never authorize a *different* exceptional
     change than the one actually reviewed, and the simplest way to guarantee that is to never
     let one be decided at all — staff resubmits against the bill's current state instead."""
-    bill = await _load_bill(db, bill_id)
+    bill = await load_bill(db, bill_id)
     request = await _load_request(db, bill_id, request_id)
     if request.status != "pending":
         raise HTTPException(status_code=409, detail="This request has already been decided.")
@@ -402,7 +402,7 @@ async def _inline_admin_status(db: SessionDep, bill_id: uuid.UUID) -> InlineAdmi
 async def read_inline_admin_status(
     bill_id: uuid.UUID, _: BillViewer, db: SessionDep
 ) -> InlineAdminStatusOut:
-    await _load_bill(db, bill_id)
+    await load_bill(db, bill_id)
     return await _inline_admin_status(db, bill_id)
 
 
@@ -416,10 +416,10 @@ async def authenticate_inline_admin(
     `/auth/login` call, because this must never replace the staff cookie or mint a session for
     the admin (module docstring: "no session is minted and the staff cookie never changes").
     """
-    business = await _business(db)
+    business = await business_or_404(db)
     if not business.enable_inline_admin_bill_edit:
         raise _INLINE_ADMIN_DISABLED
-    await _load_bill(db, bill_id)
+    await load_bill(db, bill_id)
 
     email = payload.email.lower()
     await throttle.guard(email)
@@ -486,10 +486,10 @@ async def apply_inline_admin_edit(
     consumes the grant outright ("ends on save"): the acceptance criterion asks for an ending,
     not a budget of edits, and re-authenticating for a second correction is one password away.
     """
-    business = await _business(db)
+    business = await business_or_404(db)
     if not business.enable_inline_admin_bill_edit:
         raise _INLINE_ADMIN_DISABLED
-    bill = await _load_bill(db, bill_id)
+    bill = await load_bill(db, bill_id)
 
     grant = await _read_inline_admin(bill_id)
     if grant is None:
@@ -524,8 +524,8 @@ async def apply_inline_admin_edit(
     await db.commit()
     await _end_inline_admin(bill_id)
 
-    selected_ids = await _persisted_selection(db, bill_id)
+    selected_ids = await persisted_selection(db, bill_id)
     try:
-        return await _compute(db, business, bill, selected_ids=selected_ids)
-    except _LineConflict as error:
+        return await compute_bill(db, business, bill, selected_ids=selected_ids)
+    except LineConflict as error:
         raise HTTPException(status_code=409, detail=error.detail) from error

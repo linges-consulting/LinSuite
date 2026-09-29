@@ -207,7 +207,7 @@ async def test_a_concurrent_double_issue_gets_one_invoice_and_a_422(
     results = await race(
         monkeypatch,
         invoices_mod,
-        "_persisted_selection",  # runs after the status check, under the bill lock
+        "persisted_selection",  # runs after the status check, under the bill lock
         lambda c: c.post(issue_url(bill_id), json={}),
         lambda c: c.post(issue_url(bill_id), json={}),
     )
