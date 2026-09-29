@@ -4,7 +4,7 @@ schema, snapshot contract and refusal-condition rationale — this module is the
 `invoices`/`invoice_lines`/`invoice_line_discounts`/`invoice_line_taxes`, and (bar direct SQL,
 S5-tested separately) the only way any of those four tables is ever touched.
 
-**Reuses `bill_review.py`'s own `_compute`, never reimplements the math** — the same rule that
+**Reuses `bill_review.py`'s own `compute_bill`, never reimplements the math** — the same rule that
 module's own docstring states for itself, extended one level further: issue is one more reader
 of the same pure functions (`discount_resolver.resolve_stacked_discounts`, `billing/tax.py`'s
 three functions), called one final time, with the result frozen rather than merely rendered.
@@ -40,11 +40,11 @@ from sqlalchemy.orm import aliased
 from auth.capabilities import Requires
 from billing.bill_review import (
     BillViewer,
-    _business,
-    _compute,
-    _LineConflict,
-    _load_bill,
-    _persisted_selection,
+    LineConflict,
+    business_or_404,
+    compute_bill,
+    load_bill,
+    persisted_selection,
     price_bill,
 )
 from billing.commission import commission_amount_cents
@@ -62,7 +62,7 @@ from billing.models import (
 )
 from billing.payments import balance, balances, carry_payments
 from billing.tax import invoice_tax_totals
-from core.access_log import LogAccess
+from core.access_log import LogAccess, LogAccessIfFiltered, LogAccessOf
 from core.audit import record_event
 from core.db import SessionDep
 from core.documents import fetch_document
@@ -221,7 +221,7 @@ def _str_or_none(value: uuid.UUID | None) -> str | None:
     return str(value) if value is not None else None
 
 
-async def _invoice_out(db: SessionDep, invoice: Invoice) -> InvoiceOut:
+async def invoice_out(db: SessionDep, invoice: Invoice) -> InvoiceOut:
     return InvoiceOut(
         id=str(invoice.id),
         business_id=invoice.business_id,
@@ -268,11 +268,11 @@ async def _load_invoice(db: SessionDep, invoice_id: uuid.UUID) -> Invoice:
 
 @router.post("/bills/{bill_id}/issue", status_code=201)
 async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -> InvoiceOut:
-    business = await _business(db)
+    business = await business_or_404(db)
     # R11: the bill's row lock serializes concurrent issues of one draft — the loser waits,
     # then reads `issued` below and gets the ordinary 422, never a unique-index 500.
     await db.execute(select(ServiceBill.id).where(ServiceBill.id == bill_id).with_for_update())
-    bill = await _load_bill(db, bill_id)
+    bill = await load_bill(db, bill_id)
 
     if bill.status != "draft":
         raise HTTPException(status_code=422, detail="This bill has already been issued.")
@@ -305,11 +305,11 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
             ),
         )
 
-    selected_ids = await _persisted_selection(db, bill_id)
+    selected_ids = await persisted_selection(db, bill_id)
     try:
-        computed = await _compute(db, business, bill, selected_ids=selected_ids)
+        computed = await compute_bill(db, business, bill, selected_ids=selected_ids)
         priced_bill = await price_bill(db, business, bill, selected_ids=selected_ids)
-    except _LineConflict as error:
+    except LineConflict as error:
         raise HTTPException(status_code=409, detail=error.detail) from error
 
     components_by_code = {c.code: c.rate_bp for c in priced_bill.pool}
@@ -456,7 +456,7 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
 
     invoice = await db.get(Invoice, invoice.id, populate_existing=True)
     assert invoice is not None
-    return await _invoice_out(db, invoice)
+    return await invoice_out(db, invoice)
 
 
 # --- cancel & replace (#68) -------------------------------------------------------------------
@@ -562,7 +562,7 @@ async def cancel_invoice(
         # package credit moves. An override on an issued bill was valid at issue (issue refuses
         # a stale one) and nothing edits an issued bill, so it stays authorized for the same
         # content; any later edit to the draft invalidates it the usual way.
-        bill = await _load_bill(db, invoice.service_bill_id)
+        bill = await load_bill(db, invoice.service_bill_id)
         bill.status = "draft"
         bill.updated_at = now
         if bill.manual_override_cents is not None:
@@ -571,14 +571,16 @@ async def cancel_invoice(
         invoice = await _load_invoice(db, invoice_id)
 
     return CancelledOut(
-        invoice=await _invoice_out(db, invoice), replacement_bill_id=str(invoice.service_bill_id)
+        invoice=await invoice_out(db, invoice), replacement_bill_id=str(invoice.service_bill_id)
     )
 
 
 # --- reading --------------------------------------------------------------------------------
 
 
-@router.get("/invoices")
+@router.get(
+    "/invoices", dependencies=[_ViewInvoiceDocs, Depends(LogAccessIfFiltered("invoice_history"))]
+)
 async def list_invoices(
     _: BillViewer, db: SessionDep, customer_id: uuid.UUID | None = None
 ) -> dict[str, list[InvoiceSummaryOut]]:
@@ -606,10 +608,16 @@ async def list_invoices(
     }
 
 
-@router.get("/invoices/{invoice_id}")
+@router.get(
+    "/invoices/{invoice_id}",
+    dependencies=[
+        _ViewInvoiceDocs,
+        Depends(LogAccessOf("invoice", "invoice_id", Invoice.customer_id)),
+    ],
+)
 async def get_invoice(invoice_id: uuid.UUID, _: BillViewer, db: SessionDep) -> InvoiceOut:
     invoice = await _load_invoice(db, invoice_id)
-    return await _invoice_out(db, invoice)
+    return await invoice_out(db, invoice)
 
 
 # --- PDF print/download and email (#70) ------------------------------------------------------
@@ -735,7 +743,7 @@ async def _customer_email(db: SessionDep, customer_id: uuid.UUID) -> str:
 async def email_invoice(
     customer_id: uuid.UUID, invoice_id: uuid.UUID, actor: BillViewer, db: SessionDep
 ) -> EmailedOut:
-    business = await _business(db)
+    business = await business_or_404(db)
     if not email_ready(business):
         raise HTTPException(
             status_code=422, detail="Email is not configured and verified for this business."
@@ -792,7 +800,7 @@ async def email_treatment_receipt(
     actor: BillViewer,
     db: SessionDep,
 ) -> EmailedOut:
-    business = await _business(db)
+    business = await business_or_404(db)
     if not email_ready(business):
         raise HTTPException(
             status_code=422, detail="Email is not configured and verified for this business."

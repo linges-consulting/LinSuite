@@ -56,6 +56,7 @@ from billing.models import (
     RetailInvoice,
 )
 from billing.package_purchase import activate_credits
+from core.access_log import LogAccessOf
 from core.audit import record_event
 from core.db import SessionDep
 
@@ -472,7 +473,7 @@ def _payment_out(payment: InvoicePayment) -> PaymentOut:
     )
 
 
-def _refund_out(refund: InvoiceRefund) -> RefundOut:
+def refund_out(refund: InvoiceRefund) -> RefundOut:
     return RefundOut(
         id=str(refund.id),
         invoice_id=_str(refund.invoice_id),
@@ -592,7 +593,13 @@ async def _record_payment(
     return _payment_out(payment)
 
 
-@router.get("/{invoice_id}/payments")
+@router.get(
+    "/{invoice_id}/payments",
+    dependencies=[
+        Depends(Requires("billing.view")),
+        Depends(LogAccessOf("invoice_payments", "invoice_id", Invoice.customer_id)),
+    ],
+)
 async def list_payments(
     invoice_id: uuid.UUID, _: BillViewer, db: SessionDep
 ) -> dict[str, list[PaymentOut] | list[PaymentTransferOut]]:
@@ -731,10 +738,16 @@ async def refund(
         db, invoice, amount_cents=payload.amount_cents, reason=payload.reason, approver=actor
     )
     await db.commit()
-    return _refund_out(created)
+    return refund_out(created)
 
 
-@router.get("/{invoice_id}/refunds")
+@router.get(
+    "/{invoice_id}/refunds",
+    dependencies=[
+        Depends(Requires("billing.view")),
+        Depends(LogAccessOf("invoice_refunds", "invoice_id", Invoice.customer_id)),
+    ],
+)
 async def list_refunds(
     invoice_id: uuid.UUID, _: BillViewer, db: SessionDep
 ) -> dict[str, list[RefundOut]]:
@@ -747,7 +760,7 @@ async def _list_refunds(db: SessionDep, invoice: AnyInvoice) -> dict[str, list[R
         .where(getattr(InvoiceRefund, _ledger_fk(invoice)) == invoice.id)
         .order_by(InvoiceRefund.refunded_at)
     )
-    return {"refunds": [_refund_out(r) for r in refunds]}
+    return {"refunds": [refund_out(r) for r in refunds]}
 
 
 # --- authorizing the outstanding-balance exception (billing.manage, Admin Mode) ----------------
@@ -790,7 +803,13 @@ async def _authorize(
     return _authorization_out(authorization)
 
 
-@router.get("/{invoice_id}/balance-exceptions")
+@router.get(
+    "/{invoice_id}/balance-exceptions",
+    dependencies=[
+        Depends(Requires("billing.view")),
+        Depends(LogAccessOf("invoice_balance_exceptions", "invoice_id", Invoice.customer_id)),
+    ],
+)
 async def list_balance_exceptions(
     invoice_id: uuid.UUID, _: BillViewer, db: SessionDep
 ) -> dict[str, list[BalanceAuthorizationOut]]:
@@ -818,7 +837,17 @@ async def authorize_retail_outstanding_balance(
     return await _authorize(db, await _load_retail_invoice(db, invoice_id), payload, actor)
 
 
-@retail_router.get("/{invoice_id}/balance-exceptions")
+@retail_router.get(
+    "/{invoice_id}/balance-exceptions",
+    dependencies=[
+        Depends(Requires("billing.view")),
+        Depends(
+            LogAccessOf(
+                "retail_invoice_balance_exceptions", "invoice_id", RetailInvoice.customer_id
+            )
+        ),
+    ],
+)
 async def list_retail_balance_exceptions(
     invoice_id: uuid.UUID, _: BillViewer, db: SessionDep
 ) -> dict[str, list[BalanceAuthorizationOut]]:
@@ -832,7 +861,13 @@ async def record_retail_payment(
     return await _record_payment(db, await _load_retail_invoice(db, invoice_id), payload, actor)
 
 
-@retail_router.get("/{invoice_id}/payments")
+@retail_router.get(
+    "/{invoice_id}/payments",
+    dependencies=[
+        Depends(Requires("billing.view")),
+        Depends(LogAccessOf("retail_invoice_payments", "invoice_id", RetailInvoice.customer_id)),
+    ],
+)
 async def list_retail_payments(
     invoice_id: uuid.UUID, _: BillViewer, db: SessionDep
 ) -> dict[str, list[PaymentOut] | list[PaymentTransferOut]]:
@@ -860,10 +895,16 @@ async def retail_refund(
         db, invoice, amount_cents=payload.amount_cents, reason=payload.reason, approver=actor
     )
     await db.commit()
-    return _refund_out(created)
+    return refund_out(created)
 
 
-@retail_router.get("/{invoice_id}/refunds")
+@retail_router.get(
+    "/{invoice_id}/refunds",
+    dependencies=[
+        Depends(Requires("billing.view")),
+        Depends(LogAccessOf("retail_invoice_refunds", "invoice_id", RetailInvoice.customer_id)),
+    ],
+)
 async def list_retail_refunds(
     invoice_id: uuid.UUID, _: BillViewer, db: SessionDep
 ) -> dict[str, list[RefundOut]]:

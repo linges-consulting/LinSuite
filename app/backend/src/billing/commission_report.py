@@ -38,8 +38,8 @@ from sqlalchemy import Select, select
 from auth.capabilities import Requires
 from billing.models import CommissionPosting, Invoice, InvoiceLine
 from core.db import SessionDep
-from scheduling._admin_forms import refuse
-from scheduling.clock import localize
+from core.forms import refuse
+from scheduling.clock import localize, today_in
 from scheduling.models import Staff
 from scheduling.time_off import business_zone
 
@@ -109,7 +109,7 @@ async def _rows(
     db: SessionDep, from_: date | None, to: date | None, staff_id: uuid.UUID | None
 ) -> tuple[list[CommissionRowOut], date, date, str]:
     zone = await business_zone(db)
-    to = to or datetime.now(zone).date()
+    to = to or today_in(zone)
     from_ = from_ or to - timedelta(days=DEFAULT_DAYS)
     if to < from_:
         raise refuse("to", "The last day cannot come before the first.", where="query")

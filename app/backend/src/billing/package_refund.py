@@ -33,7 +33,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import exists, func, select
 
-from billing.invoices import InvoiceOut, _invoice_out, cancel_issued, reverse_commission
+from billing.invoices import InvoiceOut, cancel_issued, invoice_out, reverse_commission
 from billing.models import (
     CommissionPosting,
     Invoice,
@@ -45,9 +45,9 @@ from billing.models import (
 from billing.payments import (
     AdminReviewer,
     RefundOut,
-    _refund_out,
     lock_lineage,
     record_refund,
+    refund_out,
     refundable_cents,
 )
 from core.audit import record_event
@@ -175,8 +175,8 @@ async def refund_package(
     assert invoice is not None
     return PackageRefundOut(
         package_purchase_id=str(purchase_id),
-        invoice=await _invoice_out(db, invoice),
-        refund=_refund_out(refund) if refund else None,
+        invoice=await invoice_out(db, invoice),
+        refund=refund_out(refund) if refund else None,
         credits_voided=cancel_credits or bool(voided),
         commission_reversals=reversals,
     )

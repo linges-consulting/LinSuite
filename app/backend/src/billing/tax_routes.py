@@ -24,9 +24,7 @@ acceptance criterion 1's "selected from the business's jurisdiction, not hardcod
 
 import uuid
 from datetime import date as Date
-from datetime import datetime
 from typing import Annotated, Literal
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
@@ -37,11 +35,14 @@ from sqlalchemy.orm import selectinload
 
 from auth.capabilities import Requires
 from auth.models import User
+from billing.bill_review import business_or_404
 from billing.models import MAX_TAX_RATE_BP, TaxComponent, TaxComponentRate
 from billing.tax import resolve_rate_bp
 from core.audit import record_event
 from core.db import SessionDep
-from core.models import PROVINCE_CODES, Business
+from core.forms import blank_to_none
+from core.models import PROVINCE_CODES
+from scheduling.clock import today_in
 
 BillingManager = Annotated[User, Depends(Requires("billing.manage"))]
 
@@ -70,13 +71,6 @@ router = APIRouter(
 RateBp = Annotated[int, Field(ge=0, le=MAX_TAX_RATE_BP)]
 Code = Annotated[str, Field(min_length=1, max_length=16)]
 Name = Annotated[str, Field(min_length=1, max_length=100)]
-
-
-def _blank_to_none(value: str | None) -> str | None:
-    """A cleared text input sends `""`, which is not a shorter province code. Duplicated from
-    `scheduling/_admin_forms.py` rather than imported — that module is scheduling-private, per
-    its own docstring, and this is two lines."""
-    return value.strip() or None if isinstance(value, str) else value
 
 
 class TaxRateOut(BaseModel):
@@ -132,7 +126,7 @@ class TaxComponentCreate(BaseModel):
     @field_validator("province", mode="before")
     @classmethod
     def _blank(cls, value: str | None) -> str | None:
-        return _blank_to_none(value)
+        return blank_to_none(value)
 
     @field_validator("province", mode="after")
     @classmethod
@@ -156,12 +150,12 @@ class TaxComponentPatch(BaseModel):
     @field_validator("name", mode="after")
     @classmethod
     def _trimmed(cls, value: str | None) -> str | None:
-        return _blank_to_none(value)
+        return blank_to_none(value)
 
     @field_validator("province", mode="before")
     @classmethod
     def _blank(cls, value: str | None) -> str | None:
-        return _blank_to_none(value)
+        return blank_to_none(value)
 
 
 class TaxRateCreate(BaseModel):
@@ -181,17 +175,6 @@ def _is_duplicate_code(error: IntegrityError) -> bool:
         if getattr(candidate, "constraint_name", None) == _CODE_INDEX:
             return True
     return _CODE_INDEX in str(error.orig)
-
-
-async def _business(db: SessionDep) -> Business:
-    business = await db.scalar(select(Business).where(Business.id == 1))
-    if business is None:
-        raise HTTPException(status_code=404, detail="This instance has not been set up.")
-    return business
-
-
-def _today_in(business: Business) -> Date:
-    return datetime.now(ZoneInfo(business.timezone)).date()
 
 
 async def _load(db: SessionDep, component_id: uuid.UUID) -> TaxComponent:
@@ -233,8 +216,8 @@ def _out(component: TaxComponent, *, today: Date, business_province: str | None)
 async def list_tax_components(
     _: BillingManager, db: SessionDep
 ) -> dict[str, list[TaxComponentOut]]:
-    business = await _business(db)
-    today = _today_in(business)
+    business = await business_or_404(db)
+    today = today_in(business.timezone)
     components = await db.scalars(
         select(TaxComponent).options(selectinload(TaxComponent.rates)).order_by(TaxComponent.code)
     )
@@ -249,7 +232,7 @@ async def list_tax_components(
 async def create_tax_component(
     payload: TaxComponentCreate, admin: BillingManager, db: SessionDep
 ) -> TaxComponentOut:
-    business = await _business(db)
+    business = await business_or_404(db)
     component = TaxComponent(
         code=payload.code, name=payload.name, province=payload.province, active=True
     )
@@ -275,7 +258,7 @@ async def create_tax_component(
     )
     await db.commit()
     await db.refresh(component, attribute_names=["rates"])
-    return _out(component, today=_today_in(business), business_province=business.province)
+    return _out(component, today=today_in(business.timezone), business_province=business.province)
 
 
 @router.patch("/tax-components/{component_id}")
@@ -291,7 +274,7 @@ async def update_tax_component(
     endpoint reads its payload with `is not None` instead, which is what makes "omitted" and
     "sent null" collide there and force a sentinel. Sending `province: null` here really does
     clear it to federal; leaving the key out really does leave it alone."""
-    business = await _business(db)
+    business = await business_or_404(db)
     component = await _load(db, component_id)
 
     sent = payload.model_dump(exclude_unset=True)
@@ -323,14 +306,14 @@ async def update_tax_component(
         )
     await db.commit()
     await db.refresh(component, attribute_names=["rates"])
-    return _out(component, today=_today_in(business), business_province=business.province)
+    return _out(component, today=today_in(business.timezone), business_province=business.province)
 
 
 @router.post("/tax-components/{component_id}/rates", status_code=201)
 async def add_tax_component_rate(
     component_id: uuid.UUID, payload: TaxRateCreate, admin: BillingManager, db: SessionDep
 ) -> TaxComponentOut:
-    business = await _business(db)
+    business = await business_or_404(db)
     component = await _load(db, component_id)
 
     open_rate = next((r for r in component.rates if r.effective_to is None), None)
@@ -372,4 +355,4 @@ async def add_tax_component_rate(
     )
     await db.commit()
     await db.refresh(component, attribute_names=["rates"])
-    return _out(component, today=_today_in(business), business_province=business.province)
+    return _out(component, today=today_in(business.timezone), business_province=business.province)

@@ -465,9 +465,9 @@ class ServiceBill(Base):
     # An admin/owner-authorized exception to the computed `grand_total_cents` — either an
     # approved `BillOverrideRequest` (staff-request path) or a direct inline admin edit
     # (`billing/bill_authority.py`). Deliberately a single absolute final-total override, not
-    # a second per-line/tax calculation path beside `bill_review.py::_compute`: an owner
+    # a second per-line/tax calculation path beside `bill_review.py::compute_bill`: an owner
     # authorizing an exception is authorizing a number, not asking the system to re-derive
-    # one under a different formula. `_compute` reports it alongside the ordinarily-computed
+    # one under a different formula. `compute_bill` reports it alongside the ordinarily-computed
     # total (`BillOut.override_total_cents`) rather than replacing `grand_total_cents`, so
     # nothing that already reads that field changes meaning.
     manual_override_cents: Mapped[int | None] = mapped_column(Integer)
@@ -578,7 +578,7 @@ class ServiceBillDiscount(Base):
 #
 # **Unifies "ad hoc discount" and "price override" as one number**: `requested_total_cents`/
 # `decided_total_cents` is a proposed absolute `grand_total_cents` for the whole bill, not a
-# second per-line calculation path beside `bill_review.py::_compute`. `kind` is kept only for
+# second per-line calculation path beside `bill_review.py::compute_bill`. `kind` is kept only for
 # what the review screen displays ("discount requested" vs. "price override requested");
 # nothing that computes money reads it.
 #
@@ -705,13 +705,13 @@ class BillOverrideRequest(Base):
 # turns "should" into "does," and what a migration, an import or a stray script can't defeat.
 #
 # **Snapshot contract, exact shape.** At issue, `billing/invoices.py` calls `bill_review.py`'s
-# own `_compute` one final time (never reimplements its math — the same rule `bill_review.py`'s
+# own `compute_bill` one final time (never reimplements its math — the same rule `bill_review.py`'s
 # own docstring already states for itself) against whatever `service_bill_discounts` currently
 # holds, and freezes every number it returns:
 #
 # - `InvoiceLine` — one row per `ServiceBillLine`, `price_cents`/`commission_rate_bp` copied
 #   straight off it (already themselves frozen at completion time, #59); `discounted_cents`/
-#   `pretax_cents`/`tax_cents`/`line_total_cents` copied off that line's `_compute`-computed
+#   `pretax_cents`/`tax_cents`/`line_total_cents` copied off that line's `compute_bill`-computed
 #   `BillLineOut`/`LineTax`. `service_id`/`staff_id`/`appointment_id` are carried for display
 #   only — an FK to a never-hard-deleted table, never read back into a money calculation.
 # - `InvoiceLineDiscount` — one row per discount that actually applied to that line
@@ -722,7 +722,7 @@ class BillOverrideRequest(Base):
 #   or basis change on the definition can never rewrite an already-earned commission.
 # - `InvoiceLineTax` — one row per tax component that taxed that line, `component_code` a
 #   frozen `Text` copy (not an FK to `tax_components.id` — independence from the live table is
-#   the point), `rate_bp` the exact resolved rate `_compute`'s own `_applicable_components` (and
+#   the point), `rate_bp` the exact resolved rate `compute_bill`'s own `applicable_components` (and
 #   under it, `tax.py::resolve_rate_bp`) used, `amount_cents` the component's contribution to
 #   that line (`LineTax.component_cents[code]`). A component at `rate_bp == 0` still gets a row,
 #   the same "never dropped, just zero" rule `tax.py::LineTax` already states for itself.
@@ -1057,7 +1057,7 @@ class InvoiceLineTax(Base):
 # - `PackagePurchase.expires_after_days`/`expires_at` — the definition's expiry *policy*,
 #   frozen, plus the actual computed calendar date it resolves to for *this* purchase
 #   (`purchased_at`'s date, in the business's own timezone, plus `expires_after_days` — the same
-#   `_today_in(business)` helper `bill_review.py`/`invoices.py` already use for tax-rate
+#   `scheduling.clock.today_in` helper `bill_review.py`/`invoices.py` already use for tax-rate
 #   resolution). `NULL` for both together (`ck_package_purchases_expiry_pair`) iff the
 #   definition never expires.
 # - `PackagePurchaseCredit.credits_total` — each `PackageDefinitionService.credits`, frozen.
@@ -1079,7 +1079,7 @@ class InvoiceLineTax(Base):
 # "catalog default" (`billing/bill_review.py`'s own documented v1 scope decision: exclusive
 # convention, every active business-applicable component applies). `PackageDefinition.
 # price_cents` gets the identical treatment for consistency — `billing/package_purchase.py`
-# calls the same `tax.py::compute_line_tax`/`bill_review.py::_applicable_components` this
+# calls the same `tax.py::compute_line_tax`/`bill_review.py::applicable_components` this
 # ticket does not reimplement, one "line" (the whole purchase), no per-service tax breakdown
 # needed since `Invoice.tax_totals_by_component` already *is* that one line's own totals.
 #

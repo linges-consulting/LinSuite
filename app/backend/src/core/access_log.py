@@ -25,10 +25,11 @@ access to log without one.
 
 import uuid
 from collections.abc import Callable
-from typing import get_args
+from typing import Any, get_args
 
 from fastapi import Request
 from pydantic import BaseModel
+from sqlalchemy import select
 
 from auth.session import CurrentUser
 from core.db import SessionDep
@@ -115,25 +116,73 @@ def LogAccess(resource_type: str, resource_param: str | None = None) -> Callable
     async def dependency(
         customer_id: uuid.UUID, user: CurrentUser, request: Request, db: SessionDep
     ) -> None:
-        db.add(
-            AccessLogEntry(
-                actor_user_id=user.id,
-                actor_role=user.role.name,
-                customer_id=customer_id,
-                resource_type=resource_type,
-                resource_id=(
-                    str(request.path_params[resource_param]) if resource_param else str(customer_id)
-                ),
-                action=VIEW,
-                # The caller's address, provided uvicorn trusts the proxy's forwarded header
-                # (`FORWARDED_ALLOW_IPS` on the `app` service). None only where there is
-                # truly no socket; httpx's `ASGITransport` supplies a loopback address
-                # (127.0.0.1) by default, so the test suite exercises a real value here too.
-                ip=request.client.host if request.client else None,
-            )
-        )
-        await db.commit()
+        resource_id = str(request.path_params[resource_param]) if resource_param else None
+        await _record(db, user, request, customer_id, resource_type, resource_id)
 
     # What the route-enumeration test looks for.
+    dependency.phi_resource = resource_type
+    return dependency
+
+
+async def _record(
+    db: SessionDep,
+    user: CurrentUser,
+    request: Request,
+    customer_id: uuid.UUID,
+    resource_type: str,
+    resource_id: str | None,
+) -> None:
+    """The one insert every factory here shares: flushed and committed before the handler."""
+    db.add(
+        AccessLogEntry(
+            actor_user_id=user.id,
+            actor_role=user.role.name,
+            customer_id=customer_id,
+            resource_type=resource_type,
+            resource_id=resource_id or str(customer_id),
+            action=VIEW,
+            # The caller's address, provided uvicorn trusts the proxy's forwarded header
+            # (`FORWARDED_ALLOW_IPS` on the `app` service). None only where there is
+            # truly no socket; httpx's `ASGITransport` supplies a loopback address
+            # (127.0.0.1) by default, so the test suite exercises a real value here too.
+            ip=request.client.host if request.client else None,
+        )
+    )
+    await db.commit()
+
+
+def LogAccessOf(resource_type: str, resource_param: str, owner: Any) -> Callable:  # noqa: N802
+    """`LogAccess` for a record whose path has no `{customer_id}` — `/invoices/{invoice_id}`.
+    `owner` is the record's customer column (`Invoice.customer_id`); the dependency reads it
+    for the id in `resource_param` and logs against that client, still before the handler.
+
+    No row when there is no client to name: an unknown or malformed id (the handler 404s or
+    422s and discloses nothing) or an anonymous retail invoice (`customer_id` NULL). Declare
+    the capability check before this, as with `LogAccess` — a refusal is not an access."""
+
+    async def dependency(user: CurrentUser, request: Request, db: SessionDep) -> None:
+        try:
+            record_id = uuid.UUID(str(request.path_params[resource_param]))
+        except ValueError:
+            return
+        customer_id = await db.scalar(select(owner).where(owner.class_.id == record_id))
+        if customer_id is not None:
+            await _record(db, user, request, customer_id, resource_type, str(record_id))
+
+    dependency.phi_resource = resource_type
+    return dependency
+
+
+def LogAccessIfFiltered(resource_type: str) -> Callable:  # noqa: N802
+    """For a list that narrows to one client's history with `?customer_id=`. Unfiltered it is
+    a list render (ADR-0002 §4) and writes nothing; filtered, it is that client's financial
+    history opened, and logs one row against them."""
+
+    async def dependency(
+        user: CurrentUser, request: Request, db: SessionDep, customer_id: uuid.UUID | None = None
+    ) -> None:
+        if customer_id is not None:
+            await _record(db, user, request, customer_id, resource_type, None)
+
     dependency.phi_resource = resource_type
     return dependency

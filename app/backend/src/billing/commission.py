@@ -34,7 +34,7 @@ entirely.
   percentage-then-fixed, half-up-once composition — never a second, hand-rolled formula.
 
 **Never raises `DiscountConflict`.** The reduces-only subset is provably never a *larger*
-reduction than the full set `bill_review.py::_compute` already validated successfully when the
+reduction than the full set `bill_review.py::compute_bill` already validated successfully when the
 bill was issued: removing any discount from a stack can only raise the resulting charge
 (fewer/smaller factors and fewer fixed subtractions), and a subset of an already-mutually-
 stackable set is still mutually stackable (the "more than one non-stackable" rule only ever

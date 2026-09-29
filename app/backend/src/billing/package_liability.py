@@ -27,10 +27,11 @@ from sqlalchemy import func, select
 from auth.capabilities import Requires
 from billing.models import PackageCreditRedemption, PackagePurchase, PackagePurchaseCredit
 from billing.redemption import spendable
+from core.access_log import LogAccessIfFiltered
 from core.db import SessionDep
+from core.forms import refuse
 from customers.models import Customer
-from scheduling._admin_forms import refuse
-from scheduling.clock import localize
+from scheduling.clock import localize, today_in
 from scheduling.models import Service
 from scheduling.time_off import business_zone
 
@@ -69,7 +70,13 @@ class LiabilityReportOut(BaseModel):
     timezone: str
 
 
-@router.get("/package-liability", dependencies=[Depends(Requires("billing.manage"))])
+@router.get(
+    "/package-liability",
+    dependencies=[
+        Depends(Requires("billing.manage")),
+        Depends(LogAccessIfFiltered("package_liability")),
+    ],
+)
 async def package_liability_report(
     db: SessionDep,
     from_: Annotated[date | None, Query(alias="from")] = None,
@@ -79,7 +86,7 @@ async def package_liability_report(
     if from_ and to and to < from_:
         raise refuse("to", "The last day cannot come before the first.", where="query")
     zone = await business_zone(db)
-    today = datetime.now(zone).date()
+    today = today_in(zone)
 
     used = (
         select(

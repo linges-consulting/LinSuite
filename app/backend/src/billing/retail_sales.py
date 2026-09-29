@@ -34,8 +34,8 @@ from auth.capabilities import Requires
 from auth.models import User
 from billing.bill_review import (
     LineTaxOut,
-    _applicable_components,
-    _today_in,
+    applicable_components,
+    business_or_404,
     components_for,
     discount_input,
     eligible_discounts,
@@ -65,13 +65,14 @@ from billing.payments import (
 )
 from billing.pricing import PricedLine, price_line
 from billing.tax import ComponentRate, invoice_tax_totals
+from core.access_log import LogAccessIfFiltered, LogAccessOf
 from core.audit import record_event
 from core.db import SessionDep
-from core.models import Business
 from customers.models import Customer
 from inventory.models import ProductVariant
 from inventory.stock import InsufficientStock, VariantNotFound, record_movement
 from notifications.triggers import notify_low_stock
+from scheduling.clock import today_in
 from scheduling.models import Staff
 
 router = APIRouter(tags=["billing"])
@@ -231,8 +232,8 @@ async def _price_sale(
 ) -> tuple[list[_PricedRetailLine], list[ComponentRate]]:
     """Every line priced against its variant's live tax settings and the selection — the
     one computation the draft view, the discount PUT and issue share. 422 on a conflict."""
-    business = await _business(db)
-    pool = await _applicable_components(db, business, _today_in(business))
+    business = await business_or_404(db)
+    pool = await applicable_components(db, business, today_in(business.timezone))
     variant_ids = {line.variant_id for line in sale.lines}
     variants = (
         {
@@ -419,13 +420,6 @@ async def _require_customer(db: SessionDep, customer_id: uuid.UUID) -> None:
         raise HTTPException(status_code=404, detail="No such customer.")
 
 
-async def _business(db: SessionDep) -> Business:
-    business = await db.scalar(select(Business).where(Business.id == 1))
-    if business is None:
-        raise HTTPException(status_code=404, detail="This instance has not been set up.")
-    return business
-
-
 # --- the draft: starting a sale and building its cart ------------------------------------------
 
 
@@ -608,7 +602,7 @@ async def apply_retail_discounts(
 async def issue_retail_sale(
     sale_id: uuid.UUID, actor: RetailSeller, db: SessionDep
 ) -> RetailInvoiceOut:
-    business = await _business(db)
+    business = await business_or_404(db)
     # R11: the sale's row lock serializes concurrent issues — the loser waits, then reads
     # `issued` below and gets the ordinary 422, never a unique-constraint 500.
     await db.execute(select(RetailSale.id).where(RetailSale.id == sale_id).with_for_update())
@@ -774,7 +768,13 @@ async def issue_retail_sale(
 # --- reading issued retail invoices -------------------------------------------------------------
 
 
-@router.get("/retail-invoices")
+@router.get(
+    "/retail-invoices",
+    dependencies=[
+        Depends(Requires("billing.view")),
+        Depends(LogAccessIfFiltered("retail_invoice_history")),
+    ],
+)
 async def list_retail_invoices(
     _: RetailSeller, db: SessionDep, customer_id: uuid.UUID | None = None
 ) -> dict[str, list[RetailInvoiceSummaryOut]]:
@@ -798,7 +798,13 @@ async def list_retail_invoices(
     }
 
 
-@router.get("/retail-invoices/{invoice_id}")
+@router.get(
+    "/retail-invoices/{invoice_id}",
+    dependencies=[
+        Depends(Requires("billing.view")),
+        Depends(LogAccessOf("retail_invoice", "invoice_id", RetailInvoice.customer_id)),
+    ],
+)
 async def get_retail_invoice(
     invoice_id: uuid.UUID, _: RetailSeller, db: SessionDep
 ) -> RetailInvoiceOut:

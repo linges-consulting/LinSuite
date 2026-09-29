@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from auth.capabilities import Requires
 from auth.models import User
 from billing.allocation import allocate_bundle_price
-from billing.bill_review import _business, _today_in
+from billing.bill_review import business_or_404
 from billing.models import (
     PackageCreditRedemption,
     PackageCreditVoid,
@@ -45,6 +45,7 @@ from billing.models import (
 )
 from core.audit import record_event
 from core.db import SessionDep
+from scheduling.clock import today_in
 from scheduling.models import Appointment
 
 router = APIRouter(prefix="/appointments", tags=["billing"])
@@ -125,8 +126,8 @@ async def redeem_credit(
     )
     if locked is None:
         raise HTTPException(status_code=404, detail="No such package purchase.")
-    business = await _business(db)
-    found = await _eligible(db, appointment, _today_in(business), purchase_id)
+    business = await business_or_404(db)
+    found = await _eligible(db, appointment, today_in(business.timezone), purchase_id)
     if not found:
         raise HTTPException(
             status_code=422,
@@ -183,7 +184,7 @@ async def list_package_credits(
     appointment = await db.get(Appointment, appointment_id)
     if appointment is None:
         raise HTTPException(status_code=404, detail="No such appointment.")
-    business = await _business(db)
+    business = await business_or_404(db)
     return {
         "credits": [
             PackageCreditOut(
@@ -195,7 +196,7 @@ async def list_package_credits(
                 credits_remaining=e.remaining,
                 value_cents=e.next_value_cents,
             )
-            for e in await _eligible(db, appointment, _today_in(business))
+            for e in await _eligible(db, appointment, today_in(business.timezone))
             if e.remaining > 0
         ]
     }
