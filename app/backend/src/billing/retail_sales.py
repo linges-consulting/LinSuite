@@ -16,7 +16,7 @@ failure.
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -34,7 +34,14 @@ from billing.models import (
     RetailSale,
     RetailSaleLine,
 )
-from billing.payments import AdminReviewer, balance, lock_lineage, record_refund
+from billing.payments import (
+    AdminReviewer,
+    balance,
+    carry_payments,
+    lock_issued,
+    lock_lineage,
+    record_refund,
+)
 from core.audit import record_event
 from core.db import SessionDep
 from core.models import Business
@@ -87,6 +94,8 @@ class RetailSaleOut(BaseModel):
     customer_id: str | None
     sold_by_staff_id: str
     payment_collector_staff_id: str | None
+    # R15: set on the replacement draft a retail cancel opened.
+    replaces_retail_invoice_id: str | None = None
     lines: list[RetailSaleLineOut]
     subtotal_cents: int
     created_at: datetime
@@ -120,6 +129,14 @@ class RetailInvoiceOut(BaseModel):
     # #76: from the shared payment ledger (`billing/payments.py::balances`).
     outstanding_cents: int
     refunded_cents: int
+    checkout_complete: bool
+    # R12: money a cancelled retail invoice still holds (0 while issued).
+    held_credit_cents: int
+    # R15 lineage, both ways, as `InvoiceOut` carries it.
+    replaces_invoice_id: str | None
+    replaced_by_invoice_id: str | None
+    cancelled_at: datetime | None
+    cancel_reason: str | None
 
 
 class RetailInvoiceSummaryOut(BaseModel):
@@ -153,6 +170,9 @@ def _sale_out(sale: RetailSale) -> RetailSaleOut:
             for line in sale.lines
         ],
         subtotal_cents=sum(line.unit_price_cents * line.quantity for line in sale.lines),
+        replaces_retail_invoice_id=(
+            str(sale.replaces_retail_invoice_id) if sale.replaces_retail_invoice_id else None
+        ),
         created_at=sale.created_at,
         updated_at=sale.updated_at,
     )
@@ -160,9 +180,20 @@ def _sale_out(sale: RetailSale) -> RetailSaleOut:
 
 async def _invoice_out(db: SessionDep, invoice: RetailInvoice) -> RetailInvoiceOut:
     money = await balance(db, invoice)
+    replaced_by = await db.scalar(
+        select(RetailInvoice.id).where(RetailInvoice.replaces_invoice_id == invoice.id)
+    )
     return RetailInvoiceOut(
         outstanding_cents=money.outstanding_cents,
         refunded_cents=money.refunded_cents,
+        checkout_complete=money.checkout_complete,
+        held_credit_cents=money.held_credit_cents,
+        replaces_invoice_id=(
+            str(invoice.replaces_invoice_id) if invoice.replaces_invoice_id else None
+        ),
+        replaced_by_invoice_id=str(replaced_by) if replaced_by else None,
+        cancelled_at=invoice.cancelled_at,
+        cancel_reason=invoice.cancel_reason,
         id=str(invoice.id),
         business_id=invoice.business_id,
         invoice_number=invoice.invoice_number,
@@ -385,6 +416,9 @@ async def issue_retail_sale(
     sale_id: uuid.UUID, actor: RetailSeller, db: SessionDep
 ) -> RetailInvoiceOut:
     business = await _business(db)
+    # R11: the sale's row lock serializes concurrent issues — the loser waits, then reads
+    # `issued` below and gets the ordinary 422, never a unique-constraint 500.
+    await db.execute(select(RetailSale.id).where(RetailSale.id == sale_id).with_for_update())
     sale = await _load_sale(db, sale_id)
 
     if sale.status != "draft":
@@ -407,38 +441,61 @@ async def issue_retail_sale(
         sold_by_staff_id=sale.sold_by_staff_id,
         payment_collector_staff_id=sale.payment_collector_staff_id,
         issued_by=actor.id,
+        replaces_invoice_id=sale.replaces_retail_invoice_id,
     )
     db.add(invoice)
     await db.flush()
 
-    # Variant-id order, not insertion order (`billing/models.py`'s own module section): two
-    # concurrent multi-line sales sharing more than one variant then always take their row
-    # locks in the same order, so neither can deadlock against the other.
+    original = None
+    if sale.replaces_retail_invoice_id is not None:
+        original = await db.get(RetailInvoice, sale.replaces_retail_invoice_id)
+        assert original is not None and original.status == "cancelled"
+        await carry_payments(db, original, invoice, actor.id)
+
+    # One guarded movement per variant, in variant-id order (`billing/models.py`'s own module
+    # section): two concurrent sales sharing more than one variant always take their row locks
+    # in the same order, so neither can deadlock against the other. A replacement (R15) moves
+    # only the difference from what its cancelled original already handed over: an unchanged
+    # item never leaves the shelf twice, a dropped one comes back as a `return` movement, and
+    # an added one is an ordinary `sale` (spec: explicit additional-sale / stock-return
+    # movements for real changes; cancellation alone never moves stock).
+    carried = await _still_with_client(db, original)
+    wanted: dict[uuid.UUID, int] = {}
+    for line in sale.lines:
+        wanted[line.variant_id] = wanted.get(line.variant_id, 0) + line.quantity
     armed_variant_ids: list[uuid.UUID] = []
-    for line in sorted(sale.lines, key=lambda one_line: one_line.variant_id):
+    for variant_id in sorted(wanted.keys() | carried.keys()):
+        delta = carried.get(variant_id, 0) - wanted.get(variant_id, 0)
+        if delta == 0:
+            continue
         try:
             movement = await record_movement(
                 db,
-                variant_id=line.variant_id,
-                kind="sale",
-                quantity_delta=-line.quantity,
+                variant_id=variant_id,
+                kind="sale" if delta < 0 else "return",
+                quantity_delta=delta,
                 actor_user_id=actor.id,
+                reason=(
+                    f"Dropped from the replacement of retail invoice {original.invoice_number}"
+                    if original is not None and delta > 0
+                    else None
+                ),
             )
         except VariantNotFound:
             raise HTTPException(
-                status_code=404, detail=f"No such product variant: {line.variant_id}."
+                status_code=404, detail=f"No such product variant: {variant_id}."
             ) from None
         except InsufficientStock as error:
-            variant = await db.get(ProductVariant, line.variant_id)
-            name = variant.name if variant is not None else str(line.variant_id)
+            variant = await db.get(ProductVariant, variant_id)
+            name = variant.name if variant is not None else str(variant_id)
             raise HTTPException(
                 status_code=409,
                 detail=f"Not enough stock for '{name}' to complete this sale: {error}",
             ) from None
-
         if movement.low_stock_alert_armed:
-            armed_variant_ids.append(line.variant_id)
+            armed_variant_ids.append(variant_id)
 
+    for line in sale.lines:
         db.add(
             RetailInvoiceLine(
                 invoice_id=invoice.id,
@@ -467,6 +524,7 @@ async def issue_retail_sale(
             "retail_sale_id": str(sale_id),
             "invoice_number": invoice_number,
             "grand_total_cents": subtotal_cents,
+            "replaces_invoice_id": str(original.id) if original is not None else None,
         },
     )
     await db.commit()
@@ -566,24 +624,14 @@ async def return_retail_items(
     invoice = await db.get(RetailInvoice, invoice_id, populate_existing=True)
     if invoice is None:
         raise HTTPException(status_code=404, detail="No such retail invoice.")
-    if invoice.status != "issued":
-        raise HTTPException(status_code=422, detail="This retail invoice is not issued.")
     requested = [item.retail_invoice_line_id for item in payload.lines]
     if len(set(requested)) != len(requested):
         raise HTTPException(status_code=422, detail="Each line may appear only once per return.")
 
-    await lock_lineage(db, invoice.id, RetailInvoice)
+    # Status re-read under the lock: a return racing a cancel (R15) never lands on it.
+    await lock_issued(db, invoice, "This retail invoice is not issued.")
     sold = {line.id: line for line in invoice.lines}
-    returned = dict(
-        (
-            await db.execute(
-                select(RetailReturnLine.retail_invoice_line_id, func.sum(RetailReturnLine.quantity))
-                .join(RetailReturn, RetailReturn.id == RetailReturnLine.return_id)
-                .where(RetailReturn.retail_invoice_id == invoice.id)
-                .group_by(RetailReturnLine.retail_invoice_line_id)
-            )
-        ).all()
-    )
+    returned = await _returned_by_line(db, invoice.id)
     for item in payload.lines:
         line = sold.get(item.retail_invoice_line_id)
         if line is None:
@@ -668,4 +716,112 @@ async def return_retail_items(
             )
             for r in ret.lines
         ],
+    )
+
+
+# --- cancel & replace (M4 review R15; mirrors #68) ----------------------------------------------
+
+
+async def _returned_by_line(db: SessionDep, invoice_id: uuid.UUID) -> dict[uuid.UUID, int]:
+    """Units already brought back per line by #76 returns (restocked or not)."""
+    return dict(
+        (
+            await db.execute(
+                select(RetailReturnLine.retail_invoice_line_id, func.sum(RetailReturnLine.quantity))
+                .join(RetailReturn, RetailReturn.id == RetailReturnLine.return_id)
+                .where(RetailReturn.retail_invoice_id == invoice_id)
+                .group_by(RetailReturnLine.retail_invoice_line_id)
+            )
+        ).all()
+    )
+
+
+async def _still_with_client(db: SessionDep, invoice: RetailInvoice | None) -> dict[uuid.UUID, int]:
+    """Per variant: units `invoice` handed over that the client still has (sold less returned).
+    Empty for an ordinary (non-replacement) sale."""
+    if invoice is None:
+        return {}
+    returned = await _returned_by_line(db, invoice.id)
+    kept: dict[uuid.UUID, int] = {}
+    for line in invoice.lines:
+        left = line.quantity - returned.get(line.id, 0)
+        kept[line.variant_id] = kept.get(line.variant_id, 0) + left
+    return kept
+
+
+class CancelRetailInvoiceIn(BaseModel):
+    reason: Annotated[str, Field(min_length=1, max_length=2000)]
+
+
+class CancelledRetailOut(BaseModel):
+    invoice: RetailInvoiceOut
+    # A new draft sale carrying the original's customer, seller, collector and unreturned
+    # lines at their original prices. Edit it, then `POST /retail-sales/{id}/issue` issues the
+    # replacement (moving only the stock difference and carrying the original's money).
+    replacement_sale_id: str
+
+
+@router.post("/retail-invoices/{invoice_id}/cancel")
+async def cancel_retail_invoice(
+    invoice_id: uuid.UUID, payload: CancelRetailInvoiceIn, actor: RetailSeller, db: SessionDep
+) -> CancelledRetailOut:
+    """Voidable cancel (CLAUDE.md), `billing.view` like #68's service cancel: the original
+    keeps its number and every frozen line; only the issued -> cancelled transition
+    `retail_invoices_voidable_guard` permits is written. Cancelling moves no stock — the client
+    still has the goods until a replacement says otherwise — and no money: payments stay on the
+    original (shown as `held_credit_cents`) until the replacement's issue carries them. Under
+    the lineage row lock a retry waits for, then returns, the first call's result."""
+    invoice = await db.get(RetailInvoice, invoice_id)
+    if invoice is None:
+        raise HTTPException(status_code=404, detail="No such retail invoice.")
+    await lock_lineage(db, invoice.id, RetailInvoice)
+    await db.refresh(invoice)
+
+    if invoice.status == "issued":
+        invoice.status = "cancelled"
+        invoice.cancelled_at = datetime.now(UTC)
+        invoice.cancelled_by = actor.id
+        invoice.cancel_reason = payload.reason
+        replacement = RetailSale(
+            customer_id=invoice.customer_id,
+            sold_by_staff_id=invoice.sold_by_staff_id,
+            payment_collector_staff_id=invoice.payment_collector_staff_id,
+            replaces_retail_invoice_id=invoice.id,
+        )
+        db.add(replacement)
+        await db.flush()
+        returned = await _returned_by_line(db, invoice.id)
+        for line in invoice.lines:
+            left = line.quantity - returned.get(line.id, 0)
+            if left > 0:
+                db.add(
+                    RetailSaleLine(
+                        sale_id=replacement.id,
+                        variant_id=line.variant_id,
+                        quantity=left,
+                        unit_price_cents=line.unit_price_cents,
+                    )
+                )
+        record_event(
+            db,
+            "retail_invoice.cancelled",
+            target_type="retail_invoice",
+            target_id=str(invoice.id),
+            actor_user_id=actor.id,
+            metadata={
+                "invoice_number": invoice.invoice_number,
+                "reason": payload.reason,
+                "retail_sale_id": str(invoice.retail_sale_id),
+                "replacement_sale_id": str(replacement.id),
+            },
+        )
+        await db.commit()
+
+    replacement_id = await db.scalar(
+        select(RetailSale.id).where(RetailSale.replaces_retail_invoice_id == invoice_id)
+    )
+    invoice = await db.get(RetailInvoice, invoice_id, populate_existing=True)
+    assert invoice is not None and replacement_id is not None
+    return CancelledRetailOut(
+        invoice=await _invoice_out(db, invoice), replacement_sale_id=str(replacement_id)
     )

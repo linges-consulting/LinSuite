@@ -6,8 +6,13 @@ transaction each:
 - **Standard** (no `exception`): only while no credit has been redeemed. Refunds everything
   the purchase invoice holds (money received less prior refunds) and voids every credit.
 - **Manual exception** (`exception` given): an admin/owner goodwill refund after use. Requires
-  a reason, an explicit amount, an explicit keep-or-cancel choice for the remaining credits,
-  and an explicit preserve-or-reverse choice for commission earned on redeemed sessions.
+  a reason and an explicit amount; the keep-or-cancel choice for the remaining credits
+  (default: cancel on a full refund, keep on a partial one) and the preserve-or-reverse choice
+  for commission earned on redeemed sessions (default: preserve) may be sent explicitly.
+
+The generic `POST /invoices/{id}/refunds` refuses package-purchase invoices (M4 review R13), so
+this route — and its "nonrefundable once a credit is used" standard policy — is the only way a
+package's money goes back.
 
 Either way (owner decision, 2026-09-28) the purchase invoice is first **cancelled** through
 #68's `cancel_issued`, so a refunded package bills nothing and the refund never reopens a
@@ -52,12 +57,15 @@ router = APIRouter(prefix="/packages", tags=["billing"])
 
 
 class RefundException(BaseModel):
-    """Every choice explicit — no server-side defaults. (The UI pre-selects cancel-credits on
-    a full refund and preserve-commission on a goodwill one.)"""
+    """The amount is required; both choices default server-side per spec §154 (M4 review R14):
+    `cancel_remaining_credits` defaults to cancel on a *full* refund (the amount equals
+    everything the purchase still holds) and keep on a partial one; `reverse_commission`
+    defaults to preserve (false) — a goodwill refund keeps earned commission. The resolved
+    choices are logged either way."""
 
     amount_cents: Annotated[int, Field(gt=0)]
-    cancel_remaining_credits: bool
-    reverse_commission: bool
+    cancel_remaining_credits: bool | None = None
+    reverse_commission: bool = False
 
 
 class PackageRefundIn(BaseModel):
@@ -116,6 +124,9 @@ async def refund_package(
             exc.cancel_remaining_credits,
             exc.reverse_commission,
         )
+        if cancel_credits is None:
+            held = await refundable_cents(db, await lock_lineage(db, invoice.id))
+            cancel_credits = amount >= held
 
     refund = None
     if amount > 0:

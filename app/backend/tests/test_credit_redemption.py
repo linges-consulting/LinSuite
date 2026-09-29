@@ -419,7 +419,7 @@ async def test_an_expired_package_is_refused(client):
             await conn.execute(
                 text(
                     "UPDATE package_purchases SET expires_after_days = 1, "
-                    "expires_at = current_date - 1 WHERE id = :p"
+                    "expires_at = current_date - 2 WHERE id = :p"  # UTC date may lead business tz
                 ),
                 {"p": w.purchase["id"]},
             )
