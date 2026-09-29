@@ -171,6 +171,9 @@ class RetailInvoiceLineTaxOut(BaseModel):
 class RetailInvoiceLineOut(BaseModel):
     id: str
     variant_id: str
+    # Joined in for the invoice view (#102) — the same "id plus a name" shape the service
+    # side's `InvoiceLineOut.service_name`/`staff_name` carry.
+    variant_name: str
     quantity: int
     unit_price_cents: int
     discount_cents: int
@@ -190,6 +193,9 @@ class RetailInvoiceOut(BaseModel):
     invoice_number: int
     retail_sale_id: str
     customer_id: str | None
+    # `None` for an anonymous walk-in sale (#102 shows "Walk-in") — never PHI, the same field
+    # `RetailInvoiceSummaryOut` already carries for the Invoices list.
+    customer_name: str | None
     status: str
     subtotal_cents: int
     discount_total_cents: int
@@ -349,6 +355,20 @@ async def _invoice_out(db: SessionDep, invoice: RetailInvoice) -> RetailInvoiceO
     replaced_by = await db.scalar(
         select(RetailInvoice.id).where(RetailInvoice.replaces_invoice_id == invoice.id)
     )
+    customer = (
+        await db.get(Customer, invoice.customer_id) if invoice.customer_id is not None else None
+    )
+    variant_ids = {line.variant_id for line in invoice.lines}
+    variants = (
+        {
+            v.id: v
+            for v in await db.scalars(
+                select(ProductVariant).where(ProductVariant.id.in_(variant_ids))
+            )
+        }
+        if variant_ids
+        else {}
+    )
     return RetailInvoiceOut(
         outstanding_cents=money.outstanding_cents,
         refunded_cents=money.refunded_cents,
@@ -365,6 +385,9 @@ async def _invoice_out(db: SessionDep, invoice: RetailInvoice) -> RetailInvoiceO
         invoice_number=invoice.invoice_number,
         retail_sale_id=str(invoice.retail_sale_id),
         customer_id=str(invoice.customer_id) if invoice.customer_id is not None else None,
+        customer_name=(
+            f"{customer.first_name} {customer.last_name}" if customer is not None else None
+        ),
         status=invoice.status,
         subtotal_cents=invoice.subtotal_cents,
         discount_total_cents=invoice.discount_total_cents,
@@ -383,6 +406,9 @@ async def _invoice_out(db: SessionDep, invoice: RetailInvoice) -> RetailInvoiceO
             RetailInvoiceLineOut(
                 id=str(line.id),
                 variant_id=str(line.variant_id),
+                variant_name=(
+                    variants[line.variant_id].name if line.variant_id in variants else "—"
+                ),
                 quantity=line.quantity,
                 unit_price_cents=line.unit_price_cents,
                 discount_cents=line.discount_cents,

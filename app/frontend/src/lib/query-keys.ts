@@ -105,3 +105,8 @@ export const PACKAGE_LIABILITY_REPORT = ['package-liability-report'] as const
  *  are never merged into one list — filters (date/status/client) and the page follow after. */
 export const INVOICES = ['invoices'] as const
 export const RETAIL_INVOICES = ['retail-invoices'] as const
+/** One invoice (#102): the invoice view's own read, id after — a different key from the list
+ *  above (`INVOICES`/`RETAIL_INVOICES`) since issuing a bill or cancelling an invoice
+ *  invalidates one row's detail without refetching every page of the list. */
+export const INVOICE = ['invoice'] as const
+export const RETAIL_INVOICE = ['retail-invoice'] as const

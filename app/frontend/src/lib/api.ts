@@ -2817,7 +2817,7 @@ export type InvoiceListStatus = 'outstanding' | 'paid' | 'cancelled'
 /** The fields every row of either list carries, beyond its own `id`/`invoice_number`/
  *  `customer_id`/`status`/`issued_at` — the balance breakdown `billing/payments.py::Balance`
  *  computes, the same figures the invoice view (#102) will show in full. */
-type InvoiceListBalance = {
+export type InvoiceListBalance = {
   outstanding_cents: number
   pending_insurer_cents: number
   client_outstanding_cents: number
@@ -2905,6 +2905,134 @@ export type RetailInvoiceList = {
 export async function fetchRetailInvoices(query: InvoiceListQuery = {}): Promise<RetailInvoiceList> {
   const res = await fetch(`/api/retail-invoices?${invoiceListParams(query)}`, { cache: 'no-store' })
   if (!res.ok) throw await failure(res, 'Could not load the retail invoices')
+  return res.json()
+}
+
+// --- one invoice (#102): lines, discounts, per-line tax, the override adjustment, the full
+// balance breakdown and replacement lineage both ways -----------------------------------------
+
+export type InvoiceLineDiscount = {
+  discount_id: string
+  discount_name: string
+  discount_kind: 'percentage' | 'fixed'
+  percentage_bp: number | null
+  amount_cents: number | null
+  resolved_amount_cents: number | null
+}
+
+export type InvoiceLineTax = {
+  component_code: string
+  rate_bp: number
+  amount_cents: number
+}
+
+export type InvoiceLine = {
+  id: string
+  appointment_id: string
+  service_id: string
+  service_name: string
+  staff_id: string
+  staff_name: string
+  price_cents: number
+  discounted_cents: number
+  pretax_cents: number
+  tax_cents: number
+  line_total_cents: number
+  prepaid_cents: number
+  tax_convention: 'inclusive' | 'exclusive'
+  /** Non-zero only under a bill's manual override (spread across the lines at issue). */
+  override_adjustment_cents: number
+  discounts: InvoiceLineDiscount[]
+  taxes: InvoiceLineTax[]
+}
+
+/** `GET /api/invoices/{id}` — a service invoice, frozen at issue (`billing/invoices.py::
+ *  InvoiceOut`). The full balance breakdown (`InvoiceListBalance`) plus lineage both ways. */
+export type Invoice = InvoiceListBalance & {
+  id: string
+  invoice_number: number
+  service_bill_id: string | null
+  package_purchase_id: string | null
+  customer_id: string
+  customer_name: string
+  status: 'issued' | 'cancelled'
+  computed_subtotal_cents: number
+  computed_discount_total_cents: number
+  computed_tax_total_cents: number
+  computed_grand_total_cents: number
+  tax_totals_by_component: Record<string, number>
+  tax_rates_by_component: Record<string, number>
+  override_applied_cents: number | null
+  override_reason: string | null
+  override_tax_convention: 'inclusive' | 'exclusive' | null
+  grand_total_cents: number
+  issued_at: string
+  issued_by: string
+  /** #68 lineage, both ways: what this invoice replaced, and what replaced it. */
+  replaces_invoice_id: string | null
+  replaced_by_invoice_id: string | null
+  cancelled_at: string | null
+  cancel_reason: string | null
+  lines: InvoiceLine[]
+}
+
+export async function fetchInvoice(id: string): Promise<Invoice> {
+  const res = await fetch(`/api/invoices/${encodeURIComponent(id)}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load this invoice')
+  return res.json()
+}
+
+/** #102's other slot: issuing a reviewed bill lands here — `POST /bills/{id}/issue`. */
+export async function issueBill(billId: string): Promise<Invoice> {
+  const res = await send('POST', `/api/bills/${encodeURIComponent(billId)}/issue`, {})
+  if (!res.ok) throw await failure(res, 'Could not issue this invoice')
+  return res.json()
+}
+
+export type RetailInvoiceLine = {
+  id: string
+  variant_id: string
+  variant_name: string
+  quantity: number
+  unit_price_cents: number
+  discount_cents: number
+  tax_cents: number
+  tax_convention: 'inclusive' | 'exclusive'
+  line_total_cents: number
+  discounts: InvoiceLineDiscount[]
+  taxes: InvoiceLineTax[]
+  staff_id: string
+}
+
+/** `GET /api/retail-invoices/{id}` — the retail counterpart of `Invoice`, same balance and
+ *  lineage shape; `customer_id`/`customer_name` are both `null` for an anonymous walk-in
+ *  sale, which the screen renders as "Walk-in". */
+export type RetailInvoice = InvoiceListBalance & {
+  id: string
+  invoice_number: number
+  retail_sale_id: string
+  customer_id: string | null
+  customer_name: string | null
+  status: 'issued' | 'cancelled'
+  subtotal_cents: number
+  discount_total_cents: number
+  tax_total_cents: number
+  tax_totals_by_component: Record<string, number>
+  grand_total_cents: number
+  sold_by_staff_id: string
+  payment_collector_staff_id: string | null
+  issued_at: string
+  issued_by: string
+  lines: RetailInvoiceLine[]
+  replaces_invoice_id: string | null
+  replaced_by_invoice_id: string | null
+  cancelled_at: string | null
+  cancel_reason: string | null
+}
+
+export async function fetchRetailInvoice(id: string): Promise<RetailInvoice> {
+  const res = await fetch(`/api/retail-invoices/${encodeURIComponent(id)}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load this retail invoice')
   return res.json()
 }
 
