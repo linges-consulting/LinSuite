@@ -870,7 +870,11 @@ async def treatment_receipt_pdf(
     ],
 )
 async def email_invoice(
-    customer_id: uuid.UUID, invoice_id: uuid.UUID, actor: BillViewer, db: SessionDep
+    customer_id: uuid.UUID,
+    invoice_id: uuid.UUID,
+    payload: EmailDocumentIn,
+    actor: BillViewer,
+    db: SessionDep,
 ) -> EmailedOut:
     business = await _ready_business(db)
     invoice = await _load_invoice_for_customer(db, customer_id, invoice_id)
@@ -879,7 +883,10 @@ async def email_invoice(
         actor,
         kind="invoice",
         source_id=invoice_id,
-        to=await _customer_email(db, customer_id),
+        # #104: a typed override for a client with no email on file — the same optional-`to`
+        # shape `email_linked_retail_invoice` already carries, extended here so a service
+        # invoice is never a dead end when `_customer_email` would otherwise 422 for good.
+        to=payload.to or await _customer_email(db, customer_id),
         subject=f"Invoice #{invoice.invoice_number} — {business.name}",
         body=f"Your invoice #{invoice.invoice_number} from {business.name} is attached.",
         filename=f"invoice-{invoice.invoice_number}.pdf",
@@ -901,6 +908,7 @@ async def email_treatment_receipt(
     customer_id: uuid.UUID,
     invoice_id: uuid.UUID,
     line_id: uuid.UUID,
+    payload: EmailDocumentIn,
     actor: BillViewer,
     db: SessionDep,
 ) -> EmailedOut:
@@ -911,7 +919,8 @@ async def email_treatment_receipt(
         actor,
         kind=kind,
         source_id=line_id,
-        to=await _customer_email(db, customer_id),
+        # #104: same typed-override fallback as `email_invoice` above.
+        to=payload.to or await _customer_email(db, customer_id),
         subject=f"Your receipt — {business.name}",
         body=f"Your treatment receipt from {business.name} is attached.",
         filename=f"receipt-{invoice.invoice_number}.pdf",
