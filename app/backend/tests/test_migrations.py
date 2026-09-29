@@ -8,6 +8,7 @@ next `upgrade` fail on a fresh `CREATE`.
 
 import asyncio
 import os
+import uuid
 
 from alembic import command
 from alembic.config import Config
@@ -315,3 +316,92 @@ async def test_migration_0030_round_trips(database):
 
     await _upgrade_to("head")
     assert await _form_compliance() == (True, True, True)
+
+
+async def _report_exports_shape() -> tuple[bool, int]:
+    """(`report_exports` exists, count of the legacy `from_date`/`to_date`/`staff_id`
+    columns it should no longer have)."""
+    async with session_scope() as db:
+        table = await db.scalar(text("SELECT to_regclass('report_exports') IS NOT NULL"))
+        legacy = await db.scalar(
+            text(
+                "SELECT count(*) FROM information_schema.columns WHERE table_name = "
+                "'report_exports' AND column_name IN ('from_date', 'to_date', 'staff_id')"
+            )
+        )
+    return bool(table), int(legacy)
+
+
+async def test_migration_0069_migrates_existing_commission_export_rows_and_round_trips(database):
+    """0069 (#86) renames `commission_exports` to `report_exports`, replacing its
+    `from_date`/`to_date`/`staff_id` columns with `kind`/`params`/`expires_at`. `down_revision`
+    is 0066, so downgrading this far and no further reaches the table in its *old* shape —
+    proven against a row inserted there directly: the upgrade must migrate it to
+    `kind='commission'`, its dates and staff id moved into `params`, and
+    `expires_at = created_at + 7 days`; the downgrade must reconstruct the original three
+    columns from `params` well enough for the upgrade to run again."""
+    assert await _report_exports_shape() == (True, 0)
+
+    await _downgrade_to("0066")
+    assert await _report_exports_shape() == (False, 0)
+
+    async with session_scope() as db:
+        user_id = await db.scalar(
+            text(
+                "INSERT INTO users (email, password_hash, role_id) VALUES "
+                "('migration-0069@test.example', 'x', "
+                "(SELECT id FROM roles WHERE name = 'Administrator')) RETURNING id"
+            )
+        )
+        staff_id = uuid.uuid4()
+        export_id = await db.scalar(
+            text(
+                "INSERT INTO commission_exports "
+                "(requested_by, from_date, to_date, staff_id, status, content) VALUES "
+                "(:u, '2026-01-01', '2026-01-31', :s, 'ready', 'a,b\n1,2\n') RETURNING id"
+            ),
+            {"u": user_id, "s": staff_id},
+        )
+        await db.commit()
+
+    await _upgrade_to("head")
+    assert await _report_exports_shape() == (True, 0)
+
+    async with session_scope() as db:
+        row = (
+            await db.execute(
+                text(
+                    "SELECT kind, params, status, content, "
+                    "expires_at = created_at + interval '7 days' AS expiry_matches "
+                    "FROM report_exports WHERE id = :id"
+                ),
+                {"id": export_id},
+            )
+        ).one()
+    assert row.kind == "commission"
+    assert row.params == {
+        "from_date": "2026-01-01",
+        "to_date": "2026-01-31",
+        "staff_id": str(staff_id),
+    }
+    assert (row.status, row.content, row.expiry_matches) == ("ready", "a,b\n1,2\n", True)
+
+    await _downgrade_to("0066")
+    async with session_scope() as db:
+        reconstructed = (
+            await db.execute(
+                text("SELECT from_date, to_date, staff_id FROM commission_exports WHERE id = :id"),
+                {"id": export_id},
+            )
+        ).one()
+        await db.execute(text("DELETE FROM commission_exports WHERE id = :id"), {"id": export_id})
+        await db.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_id})
+        await db.commit()
+    assert (str(reconstructed.from_date), str(reconstructed.to_date), reconstructed.staff_id) == (
+        "2026-01-01",
+        "2026-01-31",
+        staff_id,
+    )
+
+    await _upgrade_to("head")
+    assert await _report_exports_shape() == (True, 0)

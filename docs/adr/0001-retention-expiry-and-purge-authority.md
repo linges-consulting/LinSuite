@@ -74,6 +74,34 @@ Business-keyed documents (ADR-0003) carry their own CRA-clock `retain_until`, no
 
 Nothing here is crypto-shredded — the business key never shreds (ADR-0003 §5) — so row deletion by this guard branch *is* the erasure.
 
+## Amendment — 2026-09-29 (M5, #86): export lifetime
+
+The commission CSV export queue (R29) generalised into `report_exports`, the mechanism
+every report export (commission now; access-log and package-liability from #87/#88) uses:
+`kind` names which report, `params` is that report's own filter shape, and one Celery task
+dispatches on `kind` to a builder the owning domain registers at import time.
+
+**12. Every export expires seven days after it is requested** (`expires_at = created_at + 7
+days`). A download attempted after `expires_at` is refused with 410. This is a retention
+rule of its own, distinct from rules 2–3 and 10 above: an export is a working copy of a report, not
+the record itself, so its lifetime is fixed and short rather than computed from the client's
+hold — the underlying data's own retention is untouched by an export expiring or being
+deleted.
+
+**13. The application role deletes exports directly.** `report_exports` gets no special
+grant beyond the baseline (rule in migration 0001: `linsuite_app` holds SELECT, INSERT,
+UPDATE, DELETE on every table by default) and no purge-role involvement — expired rows are
+deleted by `linsuite_app` itself, nightly (`core.tasks.cleanup_expired_exports`), because a
+CSV sitting in this table is disposable in a way an immutable document or a ledger row is
+not.
+
+**14. An export naming a client is deleted when that client is erased.** An access-log or
+package-liability export filtered to a customer is not itself personal information held
+under a retention hold — it is a copy, and the same erasure request that suppresses the
+profile deletes that customer's exports in the same transaction. (The cascade itself belongs
+to #87/#88, which are what add a `kind` whose `params` names a customer; this ticket only
+records the rule.)
+
 ## Consequences
 
 **Positive**
