@@ -881,7 +881,7 @@ class Invoice(Base):
     override_reason: Mapped[str | None] = mapped_column(Text)
     # The one number actually billed — see the module section above.
     grand_total_cents: Mapped[int] = mapped_column(Integer)
-    # Review R1/R5 (migration 0064; pre-0064 rows keep the defaults). `tax_totals_by_component`
+    # Review R1/R5 (migration 0065; pre-0065 rows keep the defaults). `tax_totals_by_component`
     # is the tax actually billed — under an override, the distributed per-line rows summed —
     # while `computed_*` stay the pre-override numbers. `tax_rates_by_component` is every
     # component's resolved `rate_bp` at issue. `tax_convention` is set only for a package-
@@ -954,7 +954,7 @@ class InvoiceLine(Base):
     # #72: frozen off `ServiceBillLine.prepaid_cents` — the part of `line_total_cents` a
     # redeemed package credit already settled. `billing/payments.py::balances` subtracts it.
     prepaid_cents: Mapped[int] = mapped_column(Integer, server_default=text("0"))
-    # Review R2/R5 (0064): the convention `price_cents`/`discounted_cents` are stated in, and
+    # Review R2/R5 (0065): the convention `price_cents`/`discounted_cents` are stated in, and
     # the signed cents an admin override moved this line by (so price - discounts + this ==
     # discounted_cents). `pretax_cents + tax_cents == line_total_cents` always.
     tax_convention: Mapped[str] = mapped_column(String(16), server_default=text("'exclusive'"))
@@ -991,8 +991,8 @@ class InvoiceLineDiscount(Base):
     discount_name: Mapped[str] = mapped_column(Text)
     discount_kind: Mapped[str] = mapped_column(Text)
     commission_basis: Mapped[str] = mapped_column(Text)
-    # Review R4 (0064): the rule as it stood at issue and the cents it took off this line
-    # (`discount_resolver.resolve_discount_amounts`). NULL only on pre-0064 rows.
+    # Review R4 (0065): the rule as it stood at issue and the cents it took off this line
+    # (`discount_resolver.resolve_discount_amounts`). NULL only on pre-0065 rows.
     percentage_bp: Mapped[int | None] = mapped_column(Integer)
     amount_cents: Mapped[int | None] = mapped_column(Integer)
     stackable: Mapped[bool | None] = mapped_column(Boolean)
@@ -1439,8 +1439,8 @@ class RetailInvoice(Base):
     # later ticket that adds either never has to rename what every reader already calls "the
     # total".
     grand_total_cents: Mapped[int] = mapped_column(Integer)
-    # Review R3 (0064): retail is taxed and discounted like a service line. `subtotal_cents -
-    # discount_total_cents + tax_total_cents == grand_total_cents`. Pre-0064 rows: 0 / {}.
+    # Review R3 (0065): retail is taxed and discounted like a service line. `subtotal_cents -
+    # discount_total_cents + tax_total_cents == grand_total_cents`. Pre-0065 rows: 0 / {}.
     # Guarded by `retail_invoices_tax_snapshot_frozen`.
     discount_total_cents: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     tax_total_cents: Mapped[int] = mapped_column(Integer, server_default=text("0"))
@@ -1502,10 +1502,10 @@ class RetailInvoiceLine(Base):
     staff_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("staff.id", ondelete="RESTRICT"))
     # `Staff.commission_rate_retail_bp`, read fresh and frozen at issue — module section above.
     commission_rate_bp: Mapped[int] = mapped_column(Integer)
-    # Review R3 (0064). `line_total_cents` is the tax-included total; pre-tax is
+    # Review R3 (0065). `line_total_cents` is the tax-included total; pre-tax is
     # `line_total_cents - tax_cents`; `unit_price_cents * quantity - discount_cents` is the
     # discounted amount in `tax_convention`. `commission_basis_cents` is pre-tax with
-    # "absorbed" discounts left out; NULL on pre-0064 rows (then it equals `line_total_cents`).
+    # "absorbed" discounts left out; NULL on pre-0065 rows (then it equals `line_total_cents`).
     discount_cents: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     tax_cents: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     tax_convention: Mapped[str] = mapped_column(String(16), server_default=text("'exclusive'"))
@@ -1947,7 +1947,7 @@ class PackageCreditVoid(Base):
     voided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-# ## retail tax & discounts (review R3/R4, migration 0064)
+# ## retail tax & discounts (review R3/R4, migration 0065)
 #
 # A retail draft carries a bill-level discount selection (`ServiceBillDiscount`'s shape; item
 # eligibility is `("product", variant.product_id)`), and issue freezes each line's discounts

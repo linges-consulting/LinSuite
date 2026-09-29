@@ -80,7 +80,7 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "retail_invoices": ("SELECT", "INSERT", "UPDATE"),
     # Frozen retail invoice snapshot rows: append-only, same shape as `invoice_lines` (#75, 0056).
     "retail_invoice_lines": ("SELECT", "INSERT"),
-    # Review R3/R4, 0064: frozen retail line discounts/taxes, same shape as `invoice_lines`.
+    # Review R3/R4, 0065: frozen retail line discounts/taxes, same shape as `invoice_lines`.
     "retail_invoice_line_discounts": ("SELECT", "INSERT"),
     "retail_invoice_line_taxes": ("SELECT", "INSERT"),
     # The commission ledger (#69, 0057): append-only, a correction is a second row

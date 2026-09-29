@@ -90,7 +90,7 @@ class InvoiceLineDiscountOut(BaseModel):
     discount_id: str
     discount_name: str
     discount_kind: str
-    # Review R4: the rule and resolved cents, frozen at issue (NULL on pre-0064 invoices).
+    # Review R4: the rule and resolved cents, frozen at issue (NULL on pre-0065 invoices).
     percentage_bp: int | None
     amount_cents: int | None
     resolved_amount_cents: int | None

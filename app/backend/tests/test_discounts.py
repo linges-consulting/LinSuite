@@ -29,7 +29,7 @@ async def claimed_instance(client):
     async with session_scope() as db:
         for table in (
             "discount_eligible_items",
-            "retail_sale_discounts",  # review T1, 0064
+            "retail_sale_discounts",  # review T1, 0065
             "discounts",
             "password_reset_tokens",
             "staff",
