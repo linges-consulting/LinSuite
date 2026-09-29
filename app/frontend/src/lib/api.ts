@@ -2752,3 +2752,159 @@ export async function simulateCall(): Promise<CallEvent> {
   if (!res.ok) throw await failure(res, 'Could not simulate a call')
   return res.json()
 }
+
+// --- reports: commission and package liability (#95/#110) --------------------------------
+
+/** One posting behind a staff member's totals (`billing/commission_report.py::CommissionRowOut`
+ *  verbatim) — a report row, never edited here. */
+export type CommissionRow = {
+  id: string
+  posted_at: string
+  kind: string
+  source: 'service' | 'retail'
+  staff_id: string
+  staff_name: string
+  invoice_id: string
+  invoice_number: number
+  invoice_status: string
+  service_id: string | null
+  variant_id: string | null
+  commission_rate_bp: number
+  basis_cents: number
+  amount_cents: number
+  payment_status: 'received' | 'partial' | 'pending' | 'voided'
+  invoice_received_cents: number
+  invoice_pending_cents: number
+  commission_received_cents: number
+  commission_pending_cents: number
+}
+
+export type CommissionSourceTotals = {
+  revenue_cents: number
+  commission_cents: number
+  commission_received_cents: number
+  commission_pending_cents: number
+}
+
+export type CommissionReport = {
+  rows: CommissionRow[]
+  service: CommissionSourceTotals
+  retail: CommissionSourceTotals
+  total_earned_cents: number
+  total_received_cents: number
+  total_pending_cents: number
+  payments_received_cents: number
+  payments_pending_cents: number
+  from: string
+  to: string
+  timezone: string
+}
+
+/** `commission.view`, Admin Mode. `from`/`to` default to the server's own 90-day window when
+ *  omitted (`billing/commission_report.py::DEFAULT_DAYS`). */
+export async function fetchCommissionReport(query: {
+  from?: string
+  to?: string
+  staff_id?: string
+}): Promise<CommissionReport> {
+  const params = new URLSearchParams()
+  if (query.from) params.set('from', query.from)
+  if (query.to) params.set('to', query.to)
+  if (query.staff_id) params.set('staff_id', query.staff_id)
+  const res = await fetch(`/api/admin/reports/commission?${params}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the commission report')
+  return res.json()
+}
+
+export async function requestCommissionExport(query: {
+  from?: string
+  to?: string
+  staff_id?: string
+}): Promise<ExportJob> {
+  const res = await post('/api/admin/reports/commission/exports', {
+    from: query.from,
+    to: query.to,
+    staff_id: query.staff_id,
+  })
+  if (!res.ok) throw await failure(res, 'Could not request the export')
+  return res.json()
+}
+
+export async function fetchCommissionExportStatus(exportId: string): Promise<ExportJob> {
+  const res = await fetch(`/api/admin/reports/commission/exports/${encodeURIComponent(exportId)}`)
+  if (!res.ok) throw await failure(res, 'Could not check the export')
+  return res.json()
+}
+
+export function downloadCommissionExport(exportId: string): Promise<void> {
+  return downloadExportFile(`/api/admin/reports/commission/exports/${encodeURIComponent(exportId)}/csv`)
+}
+
+/** One credit line behind a client's unused package value
+ *  (`billing/package_liability.py::LiabilityRowOut` verbatim). */
+export type PackageLiabilityRow = {
+  customer_id: string
+  customer_name: string
+  package_purchase_id: string
+  package_name: string
+  purchased_at: string
+  expires_at: string | null
+  service_id: string
+  service_name: string
+  credits_total: number
+  credits_redeemed: number
+  credits_remaining: number
+  unused_value_cents: number
+}
+
+export type PackageLiabilityCustomerTotal = {
+  customer_id: string
+  customer_name: string
+  credits_remaining: number
+  unused_value_cents: number
+}
+
+export type PackageLiabilityReport = {
+  rows: PackageLiabilityRow[]
+  customers: PackageLiabilityCustomerTotal[]
+  total_unused_value_cents: number
+  as_of: string
+  from: string | null
+  to: string | null
+  timezone: string
+}
+
+/** `billing.manage`, Admin Mode. Unfiltered by default — every client with credits left. */
+export async function fetchPackageLiabilityReport(query: {
+  customer_id?: string
+}): Promise<PackageLiabilityReport> {
+  const params = new URLSearchParams()
+  if (query.customer_id) params.set('customer_id', query.customer_id)
+  const res = await fetch(`/api/admin/reports/package-liability?${params}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the package-liability report')
+  return res.json()
+}
+
+export async function requestPackageLiabilityExport(query: {
+  customer_id?: string
+}): Promise<ExportJob> {
+  const res = await post('/api/admin/reports/package-liability/exports', {
+    customer_id: query.customer_id,
+  })
+  if (!res.ok) throw await failure(res, 'Could not request the export')
+  return res.json()
+}
+
+export async function fetchPackageLiabilityExportStatus(exportId: string): Promise<ExportJob> {
+  const res = await fetch(
+    `/api/admin/reports/package-liability/exports/${encodeURIComponent(exportId)}`,
+  )
+  if (!res.ok) throw await failure(res, 'Could not check the export')
+  return res.json()
+}
+
+export function downloadPackageLiabilityExport(exportId: string): Promise<void> {
+  return downloadExportFile(
+    `/api/admin/reports/package-liability/exports/${encodeURIComponent(exportId)}/csv`,
+  )
+}

@@ -94,3 +94,8 @@ export const INLINE_ADMIN = ['inline-admin'] as const
  *  the simulate control at all. */
 export const PHONE_LOOKUP = ['phone-lookup'] as const
 export const DEMO_MODE = ['cti-demo-mode'] as const
+/** Reports (#95/#110): the commission report, filtered by date range and staff, and the
+ *  package-liability report, filtered by client — each recomputed live on every read, never
+ *  cached across a filter change beyond what the query params already key on. */
+export const COMMISSION_REPORT = ['commission-report'] as const
+export const PACKAGE_LIABILITY_REPORT = ['package-liability-report'] as const
