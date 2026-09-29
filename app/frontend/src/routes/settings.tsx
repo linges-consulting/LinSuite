@@ -5,6 +5,7 @@ import { ClosuresPanel } from '@/routes/settings-closures'
 import { FormsPanel } from '@/routes/settings-forms'
 import { NoteTemplatesPanel } from '@/routes/settings-notes'
 import { NotificationsPanel } from '@/routes/settings-notifications'
+import { PackagesPanel } from '@/routes/settings-packages'
 import { ProductsPanel } from '@/routes/settings-products'
 import { ResourcesPanel } from '@/routes/settings-resources'
 import { ServicesPanel } from '@/routes/settings-services'
@@ -35,6 +36,7 @@ export function SettingsPage() {
         <TabsTrigger value="resources">Resources</TabsTrigger>
         <TabsTrigger value="services">Services</TabsTrigger>
         <TabsTrigger value="products">Products</TabsTrigger>
+        <TabsTrigger value="packages">Packages</TabsTrigger>
         <TabsTrigger value="tax">Tax</TabsTrigger>
         <TabsTrigger value="forms">Forms</TabsTrigger>
         <TabsTrigger value="notes">Note templates</TabsTrigger>
@@ -62,6 +64,9 @@ export function SettingsPage() {
       </TabsContent>
       <TabsContent value="products">
         <ProductsPanel />
+      </TabsContent>
+      <TabsContent value="packages">
+        <PackagesPanel />
       </TabsContent>
       <TabsContent value="tax">
         <TaxSettingsPanel />
