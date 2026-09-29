@@ -169,7 +169,7 @@ class PackageDefinition(Base):
     # What the customer pays for the whole definition. For a single-service package this is
     # just that service's price for N credits; for a bundle, `billing.allocation
     # .allocate_bundle_price` divides it across the constituent services' *current* regular
-    # prices — a computation #71 runs once, at purchase, and freezes onto its own row.
+    # prices × credits — a computation #71 runs once, at purchase, and freezes onto its own row.
     price_cents: Mapped[int] = mapped_column(Integer)
     # NULL (the default) is "never expires" — an explicit per-definition opt-in, in days
     # counted from the purchase date. Computing an actual expiry timestamp is #71's job; this
@@ -984,11 +984,12 @@ class InvoiceLineTax(Base):
 #   definition never expires.
 # - `PackagePurchaseCredit.credits_total` — each `PackageDefinitionService.credits`, frozen.
 # - `PackagePurchaseCredit.allocated_price_cents` — `billing/allocation.py::
-#   allocate_bundle_price`, called **once**, here, against each named service's *current*
-#   `Service.price_cents` and the purchase's own `price_cents`. For a single-service package
-#   this trivially allocates the whole price to that one service; for a bundle it is the
-#   Hamilton-apportioned split CLAUDE.md calls for ("proportional value allocation for bundles
-#   (frozen at purchase time, not recomputed later)"). Never recomputed after this call — the
+#   allocate_bundle_price`, called **once**, here, weighting each named service by its *current*
+#   `Service.price_cents` × its `credits` (spec §152), against the purchase's own
+#   `price_cents`. For a single-service package this trivially allocates the whole price to
+#   that one service; for a bundle it is the Hamilton-apportioned split CLAUDE.md calls for
+#   ("proportional value allocation for bundles (frozen at purchase time, not recomputed
+#   later)"). Never recomputed after this call — the
 #   whole reason #60 built that function pure and apart from any ORM object.
 #
 # `service_id` on `PackagePurchaseCredit` is a plain FK, display/reference only, the same

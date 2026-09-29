@@ -35,6 +35,7 @@ import {
   fetchProducts,
   reactivateProduct,
   reactivateVariant,
+  receiveStock,
   updateProduct,
   updateVariant,
   type ProductRow,
@@ -53,8 +54,9 @@ import { PRODUCTS } from '@/lib/query-keys'
  * products (`GET /api/catalog/products`); this screen also shows inactive ones, because it is
  * the editing surface.
  *
- * **No stock movements yet.** `quantity_on_hand` here is a starting count an administrator
- * sets directly — the atomic sale/return decrement is a later ticket's own endpoint.
+ * **Stock is never edited in place.** Every change is a movement row (#61): a new variant's
+ * opening count is sent as a receipt (`inventory.receive`) right after it is created, and
+ * editing a variant never touches its count.
  *
  * **Deactivating never deletes.** A product or a variant already sold keeps its row so a
  * historical reference is never orphaned; only new sales stop offering it.
@@ -414,7 +416,8 @@ function ProductDialog(props: { product?: ProductRow; onClose: () => void }) {
 }
 
 /** Create or edit one variant. `price` is typed in dollars and converted to cents the same
- *  way `ServiceDialog` does (`lib/money.ts`); stock and threshold are whole units. */
+ *  way `ServiceDialog` does (`lib/money.ts`); stock and threshold are whole units. Opening
+ *  stock exists only when creating, and goes in as a receipt movement, not a field. */
 function VariantDialog(props: {
   product: ProductRow
   variant?: ProductVariantRow
@@ -426,7 +429,7 @@ function VariantDialog(props: {
   const [sku, setSku] = useState(existing?.sku ?? '')
   const [barcode, setBarcode] = useState(existing?.barcode ?? '')
   const [price, setPrice] = useState(centsToDollars(existing?.price_cents ?? 0))
-  const [quantity, setQuantity] = useState(String(existing?.quantity_on_hand ?? 0))
+  const [quantity, setQuantity] = useState('0')
   const [threshold, setThreshold] = useState(String(existing?.low_stock_threshold ?? 0))
 
   const cents = dollarsToCents(price)
@@ -439,24 +442,28 @@ function VariantDialog(props: {
 
   const problems = {
     price: cents === null ? 'A dollar amount, and never less than nothing.' : undefined,
-    quantity: quantityValue === null ? 'A whole number, and never less than nothing.' : undefined,
+    quantity:
+      !existing && quantityValue === null
+        ? 'A whole number, and never less than nothing.'
+        : undefined,
     threshold: thresholdValue === null ? 'A whole number, and never less than nothing.' : undefined,
   }
   const incomplete = !name.trim() || !sku.trim() || Object.values(problems).some(Boolean)
 
   const save = useMutation({
-    mutationFn: () => {
+    mutationFn: async () => {
       const draft: ProductVariantDraft = {
         name: name.trim(),
         sku: sku.trim(),
         barcode: barcode.trim() || null,
         price_cents: cents as number,
-        quantity_on_hand: quantityValue as number,
         low_stock_threshold: thresholdValue as number,
       }
-      return existing
-        ? updateVariant(props.product.id, existing.id, draft)
-        : createVariant(props.product.id, draft)
+      if (existing) return updateVariant(props.product.id, existing.id, draft)
+      const product = await createVariant(props.product.id, draft)
+      const created = product.variants.find((v) => v.sku.toLowerCase() === draft.sku.toLowerCase())
+      if (!created || !quantityValue) return product
+      return receiveStock(product.id, created.id, quantityValue, 'Opening stock')
     },
     onSuccess: () => {
       toast.success(existing ? `Saved ${name.trim()}` : `Added ${name.trim()}`)
@@ -472,7 +479,11 @@ function VariantDialog(props: {
           <DialogTitle>
             {existing ? `Edit ${existing.name}` : `Add variant to ${props.product.name}`}
           </DialogTitle>
-          <DialogDescription>SKU, barcode, price and the stock on hand.</DialogDescription>
+          <DialogDescription>
+            {existing
+              ? 'SKU, barcode, price and when to warn about low stock.'
+              : 'SKU, barcode, price and the stock you are starting with.'}
+          </DialogDescription>
         </DialogHeader>
         <Form onSubmit={() => !incomplete && save.mutate()}>
           <Field label="Name" htmlFor="variant-name" hint="e.g. “500ml”, “Large / Red”">
@@ -503,7 +514,7 @@ function VariantDialog(props: {
               />
             </Field>
           </div>
-          <div className="grid grid-cols-3 gap-4">
+          <div className={existing ? 'grid grid-cols-2 gap-4' : 'grid grid-cols-3 gap-4'}>
             <Field label="Price" htmlFor="variant-price" error={problems.price} hint="Dollars">
               <Input
                 id="variant-price"
@@ -513,22 +524,24 @@ function VariantDialog(props: {
                 onChange={(e) => setPrice(e.target.value)}
               />
             </Field>
-            <Field
-              label="Stock"
-              htmlFor="variant-quantity"
-              error={problems.quantity}
-              hint="On hand"
-            >
-              <Input
-                id="variant-quantity"
-                type="number"
-                min={0}
-                step={1}
-                className="tabular-nums"
-                value={quantity}
-                onChange={(e) => setQuantity(e.target.value)}
-              />
-            </Field>
+            {!existing && (
+              <Field
+                label="Opening stock"
+                htmlFor="variant-quantity"
+                error={problems.quantity}
+                hint="On hand"
+              >
+                <Input
+                  id="variant-quantity"
+                  type="number"
+                  min={0}
+                  step={1}
+                  className="tabular-nums"
+                  value={quantity}
+                  onChange={(e) => setQuantity(e.target.value)}
+                />
+              </Field>
+            )}
             <Field
               label="Low-stock at"
               htmlFor="variant-threshold"

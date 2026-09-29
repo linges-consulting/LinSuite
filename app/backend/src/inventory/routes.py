@@ -23,7 +23,7 @@ import uuid
 from typing import Annotated, NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -32,9 +32,9 @@ from auth.models import User
 from auth.session import CurrentUser
 from core.audit import record_event
 from core.db import SessionDep
+from core.forms import blank_to_none, refuse_emptied_field
 from inventory.models import Product, ProductVariant
 from inventory.stock import is_below_threshold
-from scheduling._admin_forms import blank_to_none, refuse_emptied_field
 
 router = APIRouter(prefix="/admin/products", tags=["inventory"])
 # The read side: any signed-in account, no capability — see the module docstring.
@@ -60,8 +60,8 @@ class VariantOut(BaseModel):
     low_stock_threshold: int
     # Always shown, regardless of the business's email opt-in (#62's own acceptance
     # criterion) — computed fresh off the live pair below, never off the persisted
-    # `low_stock_alerted` email-dedup flag, so a direct PATCH to either field (bypassing
-    # `inventory/stock.py::record_movement`) can never leave a stale badge on screen.
+    # `low_stock_alerted` email-dedup flag, so a PATCH to the threshold (which does not pass
+    # through `inventory/stock.py::record_movement`) can never leave a stale badge on screen.
     is_low_stock: bool
     tax_component_keys: list[str]
     active: bool
@@ -118,7 +118,7 @@ def _variant_out(variant: ProductVariant) -> VariantOut:
     )
 
 
-def _product_out(product: Product) -> ProductOut:
+def product_out(product: Product) -> ProductOut:
     return ProductOut(
         id=str(product.id),
         name=product.name,
@@ -203,13 +203,19 @@ class ProductPatch(BaseModel):
 
 
 class VariantFields(BaseModel):
-    """Everything an administrator sets on a variant, create and edit alike."""
+    """Everything an administrator sets on a variant, create and edit alike.
+
+    **No `quantity_on_hand`** (#61, spec §162): a new variant starts at zero and every stock
+    change after that is a `stock_movements` row written by `inventory/stock.py::
+    record_movement`, behind `inventory.receive`/`inventory.adjust` (`stock_routes.py`).
+    `extra="forbid"` makes a client still sending it a 422, not a silent no-op."""
+
+    model_config = ConfigDict(extra="forbid")
 
     name: Name
     sku: Sku
     barcode: Barcode = None
     price_cents: Price = 0
-    quantity_on_hand: Count = 0
     low_stock_threshold: Count = 0
     tax_component_keys: list[str] = []
     sort_order: int = 0
@@ -231,7 +237,6 @@ _VARIANT_NOT_NULLABLE = (
     "name",
     "sku",
     "price_cents",
-    "quantity_on_hand",
     "low_stock_threshold",
     "tax_component_keys",
     "sort_order",
@@ -239,11 +244,13 @@ _VARIANT_NOT_NULLABLE = (
 
 
 class VariantPatch(BaseModel):
+    # No `quantity_on_hand` — see `VariantFields`.
+    model_config = ConfigDict(extra="forbid")
+
     name: Annotated[str | None, Field(min_length=1, max_length=200)] = None
     sku: Annotated[str | None, Field(min_length=1, max_length=64)] = None
     barcode: Barcode = None
     price_cents: Price | None = None
-    quantity_on_hand: Count | None = None
     low_stock_threshold: Count | None = None
     tax_component_keys: list[str] | None = None
     sort_order: int | None = None
@@ -316,7 +323,7 @@ async def list_products(
     _: CatalogManager, db: SessionDep, include_inactive: bool = False
 ) -> dict[str, list[ProductOut]]:
     return {
-        "products": [_product_out(p) for p in await _roster(db, include_inactive=include_inactive)]
+        "products": [product_out(p) for p in await _roster(db, include_inactive=include_inactive)]
     }
 
 
@@ -328,7 +335,7 @@ async def catalog(_: CurrentUser, db: SessionDep) -> dict[str, list[CatalogProdu
     return {"products": [_catalog_out(p) for p in products]}
 
 
-async def _load_product(db: SessionDep, product_id: uuid.UUID) -> Product:
+async def load_product(db: SessionDep, product_id: uuid.UUID) -> Product:
     product = await db.scalar(
         select(Product).where(Product.id == product_id).execution_options(populate_existing=True)
     )
@@ -337,7 +344,7 @@ async def _load_product(db: SessionDep, product_id: uuid.UUID) -> Product:
     return product
 
 
-async def _load_variant(
+async def load_variant(
     db: SessionDep, product_id: uuid.UUID, variant_id: uuid.UUID
 ) -> ProductVariant:
     variant = await db.scalar(
@@ -374,14 +381,14 @@ async def create_product(
         metadata={"name": product.name},
     )
     await db.commit()
-    return _product_out(await _load_product(db, product.id))
+    return product_out(await load_product(db, product.id))
 
 
 @router.patch("/{product_id}")
 async def update_product(
     product_id: uuid.UUID, payload: ProductPatch, admin: CatalogManager, db: SessionDep
 ) -> ProductOut:
-    product = await _load_product(db, product_id)
+    product = await load_product(db, product_id)
     sent = payload.model_dump(exclude_unset=True)
     refuse_emptied_field(sent, _PRODUCT_NOT_NULLABLE)
 
@@ -407,7 +414,7 @@ async def update_product(
             metadata={"changed": sorted(changed)},
         )
     await db.commit()
-    return _product_out(await _load_product(db, product_id))
+    return product_out(await load_product(db, product_id))
 
 
 @router.post("/{product_id}/deactivate")
@@ -431,9 +438,9 @@ async def _set_product_active(
     must never point at nothing. Variants keep whatever `active` state they already had — a
     product coming back does not silently resurrect a variant somebody deliberately retired.
     """
-    product = await _load_product(db, product_id)
+    product = await load_product(db, product_id)
     if product.active == active:
-        return _product_out(product)
+        return product_out(product)
 
     product.active = active
     record_event(
@@ -445,7 +452,7 @@ async def _set_product_active(
         metadata={"name": product.name},
     )
     await db.commit()
-    return _product_out(await _load_product(db, product_id))
+    return product_out(await load_product(db, product_id))
 
 
 # --- variants: creating and editing ---------------------------------------------------------
@@ -455,7 +462,7 @@ async def _set_product_active(
 async def create_variant(
     product_id: uuid.UUID, payload: VariantFields, admin: CatalogManager, db: SessionDep
 ) -> ProductOut:
-    await _load_product(db, product_id)  # 404 before anything is written
+    await load_product(db, product_id)  # 404 before anything is written
     variant = ProductVariant(**payload.model_dump(), product_id=product_id, active=True)
     db.add(variant)
     try:
@@ -473,7 +480,7 @@ async def create_variant(
         metadata={"product_id": str(product_id), "name": variant.name, "sku": variant.sku},
     )
     await db.commit()
-    return _product_out(await _load_product(db, product_id))
+    return product_out(await load_product(db, product_id))
 
 
 @router.patch("/{product_id}/variants/{variant_id}")
@@ -484,7 +491,7 @@ async def update_variant(
     admin: CatalogManager,
     db: SessionDep,
 ) -> ProductOut:
-    variant = await _load_variant(db, product_id, variant_id)
+    variant = await load_variant(db, product_id, variant_id)
     sent = payload.model_dump(exclude_unset=True)
     refuse_emptied_field(sent, _VARIANT_NOT_NULLABLE)
 
@@ -510,7 +517,7 @@ async def update_variant(
             metadata={"changed": sorted(changed)},
         )
     await db.commit()
-    return _product_out(await _load_product(db, product_id))
+    return product_out(await load_product(db, product_id))
 
 
 @router.post("/{product_id}/variants/{variant_id}/deactivate")
@@ -537,7 +544,7 @@ async def _set_variant_active(
 ) -> ProductOut:
     """No hard delete: an invoice line that already sold this variant must never lose what
     it points at."""
-    variant = await _load_variant(db, product_id, variant_id)
+    variant = await load_variant(db, product_id, variant_id)
     if variant.active != active:
         variant.active = active
         record_event(
@@ -549,4 +556,4 @@ async def _set_variant_active(
             metadata={"sku": variant.sku},
         )
         await db.commit()
-    return _product_out(await _load_product(db, product_id))
+    return product_out(await load_product(db, product_id))

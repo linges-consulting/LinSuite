@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, test, vi } from 'vitest'
 import { renderApp, stubApi } from './harness'
@@ -49,6 +49,7 @@ function line(overrides: Record<string, unknown> = {}) {
     service: { id: 'sv1', name: 'Swedish Massage' },
     staff: { id: 'st1', name: 'Ana Rossi' },
     price_cents: 12000,
+    prepaid_cents: 0,
     applied_discount_ids: [],
     discounted_cents: 12000,
     tax: { pretax_cents: 12000, component_cents: {}, tax_cents: 0, total_cents: 12000 },
@@ -274,6 +275,23 @@ test('shows the draft bill with no discount applied yet', async () => {
   expect(await screen.findByRole('heading', { name: 'Priya Nair' })).toBeInTheDocument()
   expect(screen.getByRole('checkbox', { name: /Autumn 10%/ })).not.toBeChecked()
   expect(screen.getAllByText('$120.00').length).toBeGreaterThan(0)
+})
+
+test('a line paid by a package credit carries a Prepaid badge; a charged one does not', async () => {
+  billsStub({
+    bill: bill({
+      lines: [
+        line({ id: 'l1', prepaid_cents: 9600, service: { id: 'sv1', name: 'Swedish Massage' } }),
+        line({ id: 'l2', appointment_id: 'a2', service: { id: 'sv2', name: 'Hot Stone' } }),
+      ],
+    }),
+  })
+  renderApp('/bills/b1')
+
+  const prepaid = (await screen.findByText('Swedish Massage')).closest('tr')!
+  expect(within(prepaid).getByText('Prepaid')).toBeInTheDocument()
+  const charged = screen.getByText('Hot Stone').closest('tr')!
+  expect(within(charged).queryByText('Prepaid')).not.toBeInTheDocument()
 })
 
 test('applying an eligible discount recomputes the total live', async () => {

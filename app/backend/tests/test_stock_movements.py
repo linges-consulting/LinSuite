@@ -183,6 +183,39 @@ async def test_receiving_against_an_unknown_variant_404s(client):
     assert resp.status_code == 404, resp.text
 
 
+# --- the catalog routes never touch stock (R16) ----------------------------------------------
+
+
+async def test_the_variant_patch_cannot_change_stock_and_history_stays_complete(client):
+    """A new variant starts at zero; only receive/adjust move it, each with a movement row, so
+    the movements always sum to what is on hand. The catalog PATCH (`catalog.manage`) and the
+    create both refuse a stock count outright."""
+    await as_admin(client)
+    product = await make_product(client)
+    created = await client.post(
+        f"{PRODUCTS}/{product['id']}/variants",
+        json={"name": "500ml", "sku": "SHMP-500", "quantity_on_hand": 40},
+    )
+    assert created.status_code == 422, created.text
+    variant = (
+        await client.post(
+            f"{PRODUCTS}/{product['id']}/variants", json={"name": "500ml", "sku": "SHMP-500"}
+        )
+    ).json()["variants"][0]
+    assert variant["quantity_on_hand"] == 0
+
+    assert (await client.post(receive_url(variant), json={"quantity": 7})).status_code == 200
+    patched = await client.patch(
+        f"{PRODUCTS}/{product['id']}/variants/{variant['id']}", json={"quantity_on_hand": 99}
+    )
+    assert patched.status_code == 422, patched.text
+    adjusted = await client.post(adjust_url(variant), json={"quantity_delta": -2, "reason": "x"})
+    assert adjusted.status_code == 200, adjusted.text
+
+    assert await quantity_on_hand(variant["id"]) == 5
+    assert sum(m["quantity_delta"] for m in await movements(variant["id"])) == 5
+
+
 # --- adjusting --------------------------------------------------------------------------------
 
 

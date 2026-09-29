@@ -175,7 +175,12 @@ export function BillReviewPage() {
           <TableBody>
             {data.lines.map((line) => (
               <TableRow key={line.id} className="h-12">
-                <TableCell className="pl-4">{line.service.name}</TableCell>
+                <TableCell className="pl-4">
+                  <span className="inline-flex items-center gap-2">
+                    {line.service.name}
+                    {line.prepaid_cents > 0 && <Badge variant="info">Prepaid</Badge>}
+                  </span>
+                </TableCell>
                 <TableCell>{line.staff.name}</TableCell>
                 <TableCell className="text-right tabular-nums">{money(line.price_cents)}</TableCell>
                 <TableCell className="text-right tabular-nums text-muted-foreground">

@@ -345,6 +345,50 @@ async def test_session_values_sum_exactly_to_the_allocation(client):
     assert values == [3334, 3333, 3333]
 
 
+async def test_a_bundle_values_each_session_by_price_times_credits(client):
+    """Spec §152 end to end: assessment 120 ×1 + follow-up 60 ×2, bundle 200 -> the three
+    redeemed sessions carry 100 / 50 / 50."""
+    w = await world(client, credits=1, pay=False)  # assessment = w.service_id at 120
+    follow_up = await make_service(client, [w.staff_id], name="Follow-up", price_cents=6000)
+    package = await client.post(
+        PACKAGES,
+        json={
+            "name": "Assessment Bundle",
+            "description": "",
+            "price_cents": 20000,
+            "services": [
+                {"service_id": w.service_id, "credits": 1},
+                {"service_id": follow_up, "credits": 2},
+            ],
+        },
+    )
+    assert package.status_code == 201, package.text
+    bought = await client.post(
+        f"/api/packages/{package.json()['id']}/purchase", json={"customer_id": w.customer_id}
+    )
+    assert bought.status_code == 201, bought.text
+    await pay_invoice(client, bought.json()["invoice_id"], bought.json()["grand_total_cents"])
+
+    values = []
+    for slot, service_id in enumerate((w.service_id, follow_up, follow_up)):
+        resp = await client.post(
+            APPOINTMENTS,
+            json={
+                "service_id": service_id,
+                "staff_id": w.staff_id,
+                "starts_at": w.slots[slot],
+                "customer_id": w.customer_id,
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        appointment_id = resp.json()["id"]
+        done = await complete(client, appointment_id, bought.json()["id"])
+        assert done.status_code == 200, done.text
+        values.append((await bill_of(client, appointment_id))["lines"][0]["prepaid_cents"])
+
+    assert values == [10000, 5000, 5000]
+
+
 # --- only completion deducts -----------------------------------------------------------------
 
 
@@ -416,10 +460,11 @@ async def test_an_expired_package_is_refused(client):
     owner = create_async_engine(os.environ["DATABASE_URL_MIGRATE"])
     try:
         async with owner.begin() as conn:
+            # `- 2`: Postgres's UTC `current_date` can already be tomorrow in the business tz.
             await conn.execute(
                 text(
                     "UPDATE package_purchases SET expires_after_days = 1, "
-                    "expires_at = current_date - 1 WHERE id = :p"
+                    "expires_at = current_date - 2 WHERE id = :p"
                 ),
                 {"p": w.purchase["id"]},
             )
