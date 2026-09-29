@@ -28,10 +28,11 @@ from datetime import UTC, datetime
 import pytest
 from sqlalchemy import text
 
-from core.db import get_purge_engine, session_scope
+from core.db import session_scope
 from core.redis import get_redis
 from scheduling.palette import PALETTE
 from settings.branding import WHITE, contrast
+from tests.conftest import get_owner_engine
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -50,8 +51,8 @@ COOKIE = "linsuite_session"
 
 @pytest.fixture(autouse=True)
 async def claimed_instance(client):
-    async with get_purge_engine().begin() as purge:
-        await purge.execute(text("DELETE FROM audit_events"))
+    async with get_owner_engine().begin() as owner:
+        await owner.execute(text("DELETE FROM audit_events"))
     async with session_scope() as db:
         # "queue_entries" first: a leftover row (Phase 7 Task 1, #12) FKs to staff with no
         # cascade, and would block the delete below.

@@ -1,11 +1,15 @@
 import asyncio
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from core.celery_app import celery_app
 from core.config import get_settings
+from core.healthcheck import ping_maintenance
 from core.partitions import ensure_access_log_partitions
+
+_CLEANUP_EXPIRED_EXPORTS = text("DELETE FROM report_exports WHERE expires_at < now()")
 
 
 @celery_app.task
@@ -26,6 +30,27 @@ async def _maintain_partitions() -> list[str]:
     engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
     try:
         async with engine.begin() as conn:
-            return await ensure_access_log_partitions(conn)
+            created = await ensure_access_log_partitions(conn)
+    finally:
+        await engine.dispose()
+    await ping_maintenance()
+    return created
+
+
+@celery_app.task
+def cleanup_expired_exports() -> int:
+    """Nightly from beat (#86): deletes `report_exports` rows past their 7-day `expires_at`.
+    The app role's own DELETE grant (baseline default, 0001) — no purge engine, since these
+    are working copies of a report, never records under retention. Idempotent: a row already
+    deleted (by a previous run, or by an erasure cascade) just isn't matched again."""
+    return asyncio.run(_cleanup_expired_exports())
+
+
+async def _cleanup_expired_exports() -> int:
+    engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as conn:
+            result = await conn.execute(_CLEANUP_EXPIRED_EXPORTS)
+            return result.rowcount
     finally:
         await engine.dispose()

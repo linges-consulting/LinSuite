@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from core.db import get_purge_engine, session_scope
 from forms import links
+from tests.conftest import get_owner_engine
 from tests.test_access_log import add_role
 from tests.test_appointments import (  # noqa: F401 — the autouse fixture comes along
     CUSTOMERS,
@@ -307,8 +308,10 @@ async def test_the_public_form_carries_the_form_the_business_and_a_first_name_on
     template = await published_template(client)
     customer_id = await make_customer(client)
     token = token_of((await issue(client, customer_id, template["id"])).json()["url"])
-    async with get_purge_engine().begin() as purge:
-        await purge.execute(text("DELETE FROM audit_access_log"))
+    # #83: the access log is not among the purge role's four permitted tables — reset as the
+    # schema owner instead.
+    async with get_owner_engine().begin() as owner:
+        await owner.execute(text("DELETE FROM audit_access_log"))
 
     # Signed in or not, the same answer, and the staff session is neither read nor renewed.
     for signed_in in (True, False):

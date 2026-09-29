@@ -4,6 +4,10 @@
 .env.*
 !.env.example
 
+# On-prem TLS material (docs/runbook.md), bind-mounted into traefik by infra/compose.yaml.
+# Never committed: this is the private key an operator generates or receives per tenant.
+/certs/
+
 __pycache__/
 *.py[cod]
 .venv/

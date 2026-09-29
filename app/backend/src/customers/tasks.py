@@ -25,6 +25,12 @@ nothing: a client from before 0024 never had one.
 **Idempotent, by construction.** Every step is conditional on the state it changes, so
 running any of this twice — after a crash, or after a restore brought wrapped keys back from
 a backup (the runbook's action: run `purge_expired`) — does the remaining work and no more.
+
+**A third, unrelated step (#84; ADR-0001 amendment) rides along in the same nightly run:**
+business-keyed financial documents whose own CRA `retain_until` has passed and whose linked
+client, if any, is not under a clinical hold. Nothing is crypto-shredded here — the business
+key never shreds (ADR-0003 §5) — a `document.purged` audit row, then the row's own DELETE, is
+the erasure. Same guard-refusal-means-held pattern as the key shred, same idempotence.
 """
 
 import json
@@ -36,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from core.celery_app import celery_app
 from core.db import get_task_engines, run_task
+from core.healthcheck import ping_maintenance
 from customers.models import ALWAYS_ERASED, ERASED_NAMES
 
 log = logging.getLogger(__name__)
@@ -179,9 +186,48 @@ async def _finish_one(request_id: str) -> bool:
         await purge.dispose()
 
 
+async def _purge_document(purge: AsyncEngine, document_id: str, kind: str) -> bool:
+    """Destroy one eligible business-keyed financial document (#84; ADR-0001 amendment),
+    audited first, in its own purge transaction — the same audit-then-delete order as `_shred`.
+
+    The guard's own read of `retain_until` and any linked client's hold is what actually
+    decides eligibility; this function's caller only selected a candidate to try. A guard
+    refusal means "held, try another night", never an error. True if the document went."""
+    metadata = json.dumps({"authority": PURGE_AUTHORITY, "kind": kind, "document_id": document_id})
+    async with purge.connect() as conn:
+        transaction = await conn.begin()
+        try:
+            await conn.execute(
+                text(
+                    "INSERT INTO audit_events (event_type, target_type, target_id, metadata) "
+                    "VALUES ('document.purged', 'document', :d, cast(:m AS jsonb))"
+                ),
+                {"d": document_id, "m": metadata},
+            )
+            deleted = (
+                await conn.execute(text("DELETE FROM documents WHERE id = :d"), {"d": document_id})
+            ).rowcount
+        except DBAPIError as error:
+            await transaction.rollback()
+            _, message, _ = _postgres(error)
+            if _refused_by_guard(message):
+                return False  # held: the guard said no, which is its job
+            raise
+        if deleted:
+            await transaction.commit()
+        else:
+            await transaction.rollback()  # already gone: a re-run, nothing to record
+        return bool(deleted)
+
+
 async def _purge_expired() -> dict[str, int]:
     app, purge = get_task_engines()
-    counts = {"requests_finished": 0, "keys_destroyed": 0, "failed": 0}
+    counts = {
+        "requests_finished": 0,
+        "keys_destroyed": 0,
+        "financial_documents_purged": 0,
+        "failed": 0,
+    }
     try:
         # 1. Requests whose hold is gone (or never was, and the enqueue was lost).
         async with app.connect() as conn:
@@ -220,10 +266,36 @@ async def _purge_expired() -> dict[str, int]:
             except Exception:
                 counts["failed"] += 1
                 log.exception("key for customer %s could not be destroyed", customer_id)
+        # 3. Financial documents (#84; ADR-0001 amendment): business-keyed rows whose own CRA
+        # clock has passed and whose linked client, if any, is not itself under a clinical
+        # hold. Nothing is crypto-shredded here — the business key never shreds (ADR-0003 §5)
+        # — row deletion is the erasure. The guard re-checks both conditions at DELETE time;
+        # this query only proposes candidates.
+        async with app.connect() as conn:
+            financial = (
+                await conn.execute(
+                    text(
+                        "SELECT d.id, d.kind FROM documents d "
+                        "LEFT JOIN customers c ON c.id = d.linked_customer_id "
+                        "WHERE d.key_owner = 'business' AND d.retain_until < now() "
+                        "AND (d.linked_customer_id IS NULL OR "
+                        "c.retention_expires_at IS NULL OR c.retention_expires_at < now())"
+                    )
+                )
+            ).all()
+        for document in financial:
+            try:
+                counts["financial_documents_purged"] += await _purge_document(
+                    purge, str(document.id), document.kind
+                )
+            except Exception:
+                counts["failed"] += 1
+                log.exception("financial document %s could not be purged", document.id)
     finally:
         await app.dispose()
         await purge.dispose()
     log.info("purge_expired", extra=counts)
+    await ping_maintenance()  # #85: dead-man ping, after the counts are final
     return counts
 
 

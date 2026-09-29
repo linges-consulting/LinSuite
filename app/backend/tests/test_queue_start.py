@@ -15,10 +15,10 @@ from zoneinfo import ZoneInfo
 import pytest
 from sqlalchemy import text
 
-from core.db import get_purge_engine, session_scope
+from core.db import session_scope
 from core.redis import get_redis
 from scheduling import cache as avail_cache
-from tests.conftest import wipe_document_keys
+from tests.conftest import get_owner_engine, wipe_document_keys
 
 TORONTO = ZoneInfo("America/Toronto")
 
@@ -51,10 +51,12 @@ FULL_WEEK = [(w, 0, 24 * 60) for w in range(7)]
 @pytest.fixture(autouse=True)
 async def claimed_instance(client):
     async def wipe():
-        async with get_purge_engine().begin() as purge:
-            await purge.execute(text("DELETE FROM audit_events"))
-            await purge.execute(text("DELETE FROM erasure_requests"))
-            await purge.execute(text("DELETE FROM form_links"))
+        # #83: none of these are among the purge role's four permitted tables — reset as the
+        # schema owner instead.
+        async with get_owner_engine().begin() as owner:
+            await owner.execute(text("DELETE FROM audit_events"))
+            await owner.execute(text("DELETE FROM erasure_requests"))
+            await owner.execute(text("DELETE FROM form_links"))
         await wipe_document_keys()
         async with session_scope() as db:
             for table in (

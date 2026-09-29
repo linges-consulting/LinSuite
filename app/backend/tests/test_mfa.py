@@ -21,10 +21,10 @@ from auth import mfa, throttle
 from auth import session as session_mod
 from core import crypto
 from core.config import Settings, get_settings
-from core.db import get_purge_engine, session_scope
+from core.db import session_scope
 from core.redis import get_redis
 from core.security import hash_password
-from tests.conftest import add_account
+from tests.conftest import add_account, get_owner_engine
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -44,8 +44,8 @@ ADMIN_ENDPOINT = "/api/admin/business"
 @pytest.fixture(autouse=True)
 async def claimed_instance(client):
     """A set-up instance with the MFA policy off, so each test turns on only what it is about."""
-    async with get_purge_engine().begin() as purge:
-        await purge.execute(text("DELETE FROM audit_events"))
+    async with get_owner_engine().begin() as owner:
+        await owner.execute(text("DELETE FROM audit_events"))
     async with session_scope() as db:
         for table in ("mfa_recovery_codes", "users", "businesses", "setup_token"):
             await db.execute(text(f"DELETE FROM {table}"))

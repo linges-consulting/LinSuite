@@ -36,7 +36,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from core.access_log import declares_a_model, response_phi_fields
-from core.db import get_purge_engine, session_scope
+from core.db import session_scope
+from tests.conftest import get_owner_engine
 from tests.test_appointments import (  # noqa: F401 — the autouse fixture comes along
     CUSTOMERS,
     EMAIL,
@@ -106,8 +107,10 @@ PROBE = "/api/customers/{customer_id}/probe"
 
 @pytest.fixture(autouse=True)
 async def clean_access_log(claimed_instance):  # noqa: F811 — the imported fixture, by name
-    async with get_purge_engine().begin() as purge:
-        await purge.execute(text(f"DELETE FROM {TABLE}"))
+    # #83: the purge role's DELETE is now exactly its four permitted tables, and the access
+    # log is not one of them — the reset runs as the schema owner instead.
+    async with get_owner_engine().begin() as owner:
+        await owner.execute(text(f"DELETE FROM {TABLE}"))
     yield
 
 

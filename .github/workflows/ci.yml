@@ -37,3 +37,17 @@ jobs:
       - uses: actions/checkout@v4
       - run: cp .env.example .env
       - run: docker compose build
+
+  # #89: prove a backup can actually be restored, on every PR — not just that the compose
+  # service builds. Plain docker (not compose): a throwaway Postgres, the real backup image,
+  # and `uv run` for the app's own migration/seed/compare code. See infra/backup/rehearse.sh.
+  backup-rehearsal:
+    runs-on: ubuntu-latest
+    defaults:
+      run: { working-directory: app/backend }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: { enable-cache: true }
+      - run: uv sync --frozen
+      - run: ../../infra/backup/rehearse.sh

@@ -118,7 +118,7 @@ Constraints any implementation must honor:
 
 ### Out of scope for v1 — don't build these
 
-- i18n (English only) · live VoIP webhook/WebSocket transport (phone lookup and screen-pop UI ship; a demo-mode toggle drives simulated events) · cold-storage archive tiering, replaced by yearly table partitioning · Sentry/error tracking · CD pipeline.
+- i18n (English only) · live VoIP webhook/WebSocket transport (phone lookup and screen-pop UI ship; a demo-mode toggle drives simulated events) · cold-storage archive tiering, replaced by yearly table partitioning of the access log only — appointments and documents are revisited at roughly one million rows, since partitioning either forces the partition key into every foreign key that points at them, and the resource `EXCLUDE` constraint would only hold within one partition, letting a booking crossing New Year's escape double-booking protection · Sentry/error tracking · CD pipeline.
 - There is **no WebSocket layer in v1**. Deferring CTI is what keeps it out — don't reintroduce it casually.
 
 ## Agent skills

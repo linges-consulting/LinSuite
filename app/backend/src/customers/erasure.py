@@ -4,9 +4,11 @@ The business honours what it lawfully can, at once, and says what it must keep (
 D5a/D5b). **Split by privilege:** this handler runs as `linsuite_app` and does only what that
 role may — in one transaction it records the request, removes contact details, contacts and
 notes (always), replaces names and DOB (only when nothing holds them), suppresses the profile,
-and audits `customer.erasure_requested`. It then enqueues `customers.tasks.finish_erasure`,
-which destroys the document key on the purge role. The purge role is never reached from
-here: this module imports the task, never an engine.
+deletes any `report_exports` row naming this client (`core.exports.delete_customer_exports`,
+ADR-0001 rule 14 — a package-liability or access-log export filtered to them is a copy, not
+a record under retention), and audits `customer.erasure_requested`. It then enqueues
+`customers.tasks.finish_erasure`, which destroys the document key on the purge role. The
+purge role is never reached from here: this module imports the task, never an engine.
 
 **Held** = `retention_expires_at` is non-null and has not passed; `'infinity'` (a chart with
 no DOB) is held. A held client keeps name, DOB and visit history — the chart must still
@@ -42,6 +44,7 @@ from auth.session import CurrentUser
 from core.access_log import LogAccess
 from core.audit import record_event
 from core.db import SessionDep
+from core.exports import delete_customer_exports
 from customers import retention, tasks
 from customers.models import ALWAYS_ERASED, ERASED_NAMES, Customer, ErasureRequest
 from forms.links import revoke_open_links
@@ -179,6 +182,9 @@ async def request_erasure(
     )
     db.add(request)
     await db.flush()
+    # ADR-0001 rule 14: any export naming this client (`params["customer_id"]`) goes in the
+    # same transaction as the request itself.
+    await delete_customer_exports(db, customer.id)
     record_event(
         db,
         "customer.erasure_requested",

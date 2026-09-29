@@ -184,16 +184,37 @@ async def log_each_named(
     decision for the package-liability report), all committed before the response is built —
     if the insert fails the report is never returned, the same fail-closed order `_record`
     keeps."""
+    await log_each_named_as(
+        db,
+        user.id,
+        user.role.name,
+        request.client.host if request.client else None,
+        customer_ids,
+        resource_type,
+    )
+
+
+async def log_each_named_as(
+    db: SessionDep,
+    actor_user_id: uuid.UUID,
+    actor_role: str,
+    ip: str | None,
+    customer_ids: list[uuid.UUID],
+    resource_type: str,
+) -> None:
+    """`log_each_named`'s own insert, for a caller with no `CurrentUser`/`Request` to read
+    them off — a Celery worker building a report export (#88), attributed to the actor and
+    IP captured at request time rather than the worker's own (nonexistent) request."""
     for customer_id in dict.fromkeys(customer_ids):
         db.add(
             AccessLogEntry(
-                actor_user_id=user.id,
-                actor_role=user.role.name,
+                actor_user_id=actor_user_id,
+                actor_role=actor_role,
                 customer_id=customer_id,
                 resource_type=resource_type,
                 resource_id=str(customer_id),
                 action=VIEW,
-                ip=request.client.host if request.client else None,
+                ip=ip,
             )
         )
     await db.commit()

@@ -64,6 +64,59 @@ Phase 9 (#9, migration 0031): `session_notes.customer_id` also references the ke
 
 **9. A restore brings shredded keys back.** Backups taken before a purge still contain the wrapped keys it destroyed. After any restore, run `customers.tasks.purge_expired` before the system is used again; it is idempotent, re-shreds every key whose hold has passed, and finishes every unheld erasure request (`docs/tech-stack.md` §10).
 
+## Amendment — 2026-09-29 (M5, #84): the financial PDF purge
+
+Business-keyed documents (ADR-0003) carry their own CRA-clock `retain_until`, not a customer's clinical hold, so this rule needed its own branch rather than reuse of rule 4's trigger predicate as written.
+
+**10. `public.customer_record_guard()` (0026, migration 0068) permits `linsuite_purge` to `DELETE` a business-keyed `documents` row only when all of: `retain_until` has passed, and either the row has no `linked_customer_id` or that customer is not held** — `retention_expires_at` null or past, `'infinity'` counts as held, the same predicate rule 4 already uses. The customer-keyed branch is unchanged. Retention takes the later date by construction: an invoice linked to a still-held client is refused regardless of its own CRA clock having passed.
+
+**11. The nightly `purge_expired` gains a third step**, after finishing erasure requests and shredding expired keys: select business-keyed documents whose `retain_until` has passed and whose linked customer (if any) is not held, and delete each on the purge connection in its own transaction — a `document.purged` audit row (`{authority, kind, document_id}`, no content, no names) first, then the `DELETE`. A guard refusal reads as "held, try another night", the same distinction rule 4's shred already makes from a real fault. Idempotent: nothing is written when a row is already gone.
+
+Nothing here is crypto-shredded — the business key never shreds (ADR-0003 §5) — so row deletion by this guard branch *is* the erasure.
+
+## Amendment — 2026-09-29 (M5, #86): export lifetime
+
+The commission CSV export queue (R29) generalised into `report_exports`, the mechanism
+every report export (commission now; access-log and package-liability from #87/#88) uses:
+`kind` names which report, `params` is that report's own filter shape, and one Celery task
+dispatches on `kind` to a builder the owning domain registers at import time.
+
+**12. Every export expires seven days after it is requested** (`expires_at = created_at + 7
+days`). A download attempted after `expires_at` is refused with 410. This is a retention
+rule of its own, distinct from rules 2–3 and 10 above: an export is a working copy of a report, not
+the record itself, so its lifetime is fixed and short rather than computed from the client's
+hold — the underlying data's own retention is untouched by an export expiring or being
+deleted.
+
+**13. The application role deletes exports directly.** `report_exports` gets no special
+grant beyond the baseline (rule in migration 0001: `linsuite_app` holds SELECT, INSERT,
+UPDATE, DELETE on every table by default) and no purge-role involvement — expired rows are
+deleted by `linsuite_app` itself, nightly (`core.tasks.cleanup_expired_exports`), because a
+CSV sitting in this table is disposable in a way an immutable document or a ledger row is
+not.
+
+**14. An export naming a client is deleted when that client is erased.** An access-log or
+package-liability export filtered to a customer is not itself personal information held
+under a retention hold — it is a copy, and the same erasure request that suppresses the
+profile deletes that customer's exports in the same transaction. (The cascade itself belongs
+to #87/#88, which are what add a `kind` whose `params` names a customer; this ticket only
+records the rule.)
+
+## Amendment — 2026-09-29 (#83; M5 spec #82): purge-role default-deny
+
+Written when pre-flight for M5 found the hole rule 4's own baseline left open: `0001_baseline`'s `ALTER DEFAULT PRIVILEGES` handed `linsuite_purge` `SELECT, DELETE` on *every* table, present and future, not only the ones retention expiry actually purges — and every ledger and audit trigger built since (the M4 wave's invoices, stock movements, commission postings, package purchases and redemptions, retail sales and returns; the two audit logs) copied the same "let the purge role through unconditionally" shape as a convenience for test teardown. A leaked purge credential, or a grant restored by mistake, could therefore have erased the financial ledger or either audit log — exactly the records this ADR's trigger design was meant to make erasure-proof for everything the purge role does not need to touch.
+
+**15. The purge role's authority is narrowed to exactly the four tables `customers/tasks.py::_shred` deletes from:** `documents`, `form_submissions`, `session_notes`, `customer_document_keys`. Everywhere else it is `SELECT` only, by construction rather than convention:
+
+- `ALTER DEFAULT PRIVILEGES` now grants the purge role `SELECT` alone on tables the schema owner creates from here on, so a future migration that never thinks about the purge role at all still ships closed rather than open.
+- Every existing table's `DELETE` is revoked from the purge role and re-granted on exactly the four — parents and partitions alike, so `audit_access_log`'s existing yearly children lose it too, not only the parent a revoke on it alone would leave untouched (rule 4's own asymmetry, first flagged in migration 0019's docstring).
+- `ensure_access_log_partitions()` (migration 0021) — the one path that grants directly rather than through the default-privileges mechanism, since `linsuite_app` cannot `CREATE TABLE` — stops granting `DELETE` to the purge role on a partition it creates, so a January nobody has reached yet is never a table the purge role can delete from either.
+- Every ledger and audit trigger function is redefined without the `current_user = 'linsuite_purge'` half of its bypass check; the schema-owner half stays, because migrations and an operator's own recovery must not be blocked. `documents`, `form_submissions`, `session_notes` and `customer_document_keys` are untouched — their own guards already condition the purge role's `DELETE` on the client's retention hold (rules 4 and 7) rather than letting it through unconditionally, which is the shape every other trigger is now brought to resemble the *absence* of, since these four are the only tables the purge role should still reach at all.
+
+**16. Test teardown that used the purge role for tables outside the four now runs as the schema owner instead** — the same connection `wipe_document_keys` (`tests/conftest.py`) already used for `business_document_keys`, and the one an operator's own recovery would connect as. No test depends on the purge role deleting outside its four tables; several new ones (`tests/test_schema.py`) pin that it cannot, including with the grant restored by hand and the trigger alone standing in the way.
+
+migration 0067 (`0067_purge_role_default_deny.py`) is the whole change; its downgrade restores rule 4's original shape exactly, function bodies included.
+
 ## Consequences
 
 **Positive**

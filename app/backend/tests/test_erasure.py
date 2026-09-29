@@ -35,6 +35,7 @@ from tests.test_appointments import (  # noqa: F401 — the autouse fixture come
     at,
     book,
     claimed_instance,
+    make_customer,
     make_service,
     me_staff_id,
     put_hours,
@@ -527,6 +528,41 @@ async def test_an_unknown_client_is_404(client):
     assert (await erase(client, str(uuid.uuid4()))).status_code == 404
 
 
+# --- ADR-0001 rule 14: an export naming a client is deleted when they are erased (#88) -----
+
+
+async def export_ids() -> list[str]:
+    async with session_scope() as db:
+        return [str(i) for i in await db.scalars(text("SELECT id FROM report_exports"))]
+
+
+async def test_requesting_erasure_deletes_liability_exports_filtered_to_that_client(client):
+    customer_id, _, _ = await ready_customer(client)
+    other = await client.post(CUSTOMERS, json={"first_name": "Zed", "last_name": "Nair"})
+    assert other.status_code == 201, other.text
+    other_id = other.json()["id"]
+    theirs = await client.post(
+        "/api/admin/reports/package-liability/exports", json={"customer_id": customer_id}
+    )
+    assert theirs.status_code == 202, theirs.text
+    someone_elses = await client.post(
+        "/api/admin/reports/package-liability/exports", json={"customer_id": other_id}
+    )
+    assert someone_elses.status_code == 202, someone_elses.text
+    unfiltered = await client.post("/api/admin/reports/package-liability/exports", json={})
+    assert unfiltered.status_code == 202, unfiltered.text
+    assert sorted(await export_ids()) == sorted(
+        [theirs.json()["id"], someone_elses.json()["id"], unfiltered.json()["id"]]
+    )
+
+    assert (await erase(client, customer_id)).status_code == 201
+
+    remaining = await export_ids()
+    assert theirs.json()["id"] not in remaining
+    assert someone_elses.json()["id"] in remaining
+    assert unfiltered.json()["id"] in remaining
+
+
 # --- fix round 1 -------------------------------------------------------------------------
 
 
@@ -863,3 +899,68 @@ async def test_an_erased_clients_past_booking_cannot_be_moved_into_the_future(cl
 
     assert moved.status_code == 422, moved.text
     assert moved.json()["code"] == "customer_suppressed"
+
+
+# --- #87: erasure deletes this client's report exports, same transaction (ADR-0001 rule 14) --
+
+
+async def test_erasure_deletes_the_clients_access_log_exports_pending_or_ready(client):
+    await as_admin(client)
+    customer_id, _, _ = await ready_customer(client)
+    await fill_profile(client, customer_id, years_ago(30))
+    exports_url = f"/api/admin/customers/{customer_id}/access-log/exports"
+    ready = await client.post(exports_url, json={})
+    assert ready.status_code == 202, ready.text
+    assert (await client.get(f"{exports_url}/{ready.json()['id']}")).json()["status"] == "ready"
+
+    # A second, still-`pending` export naming the same client — the app role's own row, as
+    # `request_export` would leave it before the worker ran.
+    async with session_scope() as db:
+        pending_id = await db.scalar(
+            text(
+                "INSERT INTO report_exports (kind, params, requested_by, status) "
+                "VALUES ('access_log', CAST(:params AS jsonb), :requested_by, 'pending') "
+                "RETURNING id"
+            ),
+            {
+                "params": (
+                    f'{{"customer_id": "{customer_id}", "from": "2026-01-01", "to": "2026-01-31"}}'
+                ),
+                "requested_by": await admin_id(),
+            },
+        )
+        await db.commit()
+    async with session_scope() as db:
+        before = await db.scalar(text("SELECT count(*) FROM report_exports"))
+    assert before == 2
+
+    resp = await erase(client, customer_id)
+
+    assert resp.status_code == 201, resp.text
+    async with session_scope() as db:
+        remaining = list(
+            await db.scalars(
+                text("SELECT id FROM report_exports WHERE id = :a OR id = :b"),
+                {"a": ready.json()["id"], "b": str(pending_id)},
+            )
+        )
+    assert remaining == []
+
+
+async def test_erasure_leaves_another_clients_access_log_export_alone(client):
+    await as_admin(client)
+    keep_id, _, _ = await ready_customer(client)
+    await fill_profile(client, keep_id, years_ago(31))
+    gone_id = await make_customer(client)
+    exports_url = f"/api/admin/customers/{keep_id}/access-log/exports"
+    kept = await client.post(exports_url, json={})
+    assert kept.status_code == 202, kept.text
+
+    resp = await erase(client, gone_id)
+
+    assert resp.status_code == 201, resp.text
+    async with session_scope() as db:
+        remaining = await db.scalar(
+            text("SELECT count(*) FROM report_exports WHERE id = :id"), {"id": kept.json()["id"]}
+        )
+    assert remaining == 1
