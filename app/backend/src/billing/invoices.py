@@ -64,9 +64,9 @@ from billing.models import (
     InvoiceLine,
     InvoiceLineDiscount,
     InvoiceLineTax,
-    InvoicePaymentTransfer,
+    ServiceBill,
 )
-from billing.payments import balance, balances, ledger_sums
+from billing.payments import balance, balances, carry_payments
 from core.access_log import LogAccess
 from core.audit import record_event
 from core.db import SessionDep
@@ -156,6 +156,8 @@ class InvoiceOut(BaseModel):
     checkout_complete: bool
     refunded_cents: int
     prepaid_cents: int
+    # M4 review R12: money a cancelled invoice still holds (0 while issued) — see `Balance`.
+    held_credit_cents: int
 
 
 class InvoiceSummaryOut(BaseModel):
@@ -171,6 +173,8 @@ class InvoiceSummaryOut(BaseModel):
     checkout_complete: bool
     refunded_cents: int
     prepaid_cents: int
+    # M4 review R12: money a cancelled invoice still holds (0 while issued) — see `Balance`.
+    held_credit_cents: int
 
 
 def _line_out(line: InvoiceLine) -> InvoiceLineOut:
@@ -251,6 +255,9 @@ async def _load_invoice(db: SessionDep, invoice_id: uuid.UUID) -> Invoice:
 @router.post("/bills/{bill_id}/issue", status_code=201)
 async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -> InvoiceOut:
     business = await _business(db)
+    # R11: the bill's row lock serializes concurrent issues of one draft — the loser waits,
+    # then reads `issued` below and gets the ordinary 422, never a unique-index 500.
+    await db.execute(select(ServiceBill.id).where(ServiceBill.id == bill_id).with_for_update())
     bill = await _load_bill(db, bill_id)
 
     if bill.status != "draft":
@@ -332,34 +339,8 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
     await db.flush()
 
     if replaces is not None:
-        # Carry every cent the original holds (its own payments plus anything it inherited)
-        # onto the replacement — never charged again, never counted twice. An increase is then
-        # an ordinary new payment; a decrease leaves a credit for #67's approved refund.
-        received, pending, received_insurer, _refunded = (await ledger_sums(db, [replaces.id])).get(
-            replaces.id, (0, 0, 0, 0)
-        )
-        db.add(
-            InvoicePaymentTransfer(
-                from_invoice_id=replaces.id,
-                to_invoice_id=invoice.id,
-                received_cents=received,
-                received_insurer_cents=received_insurer,
-                pending_insurer_cents=pending,
-                transferred_by=actor.id,
-            )
-        )
-        record_event(
-            db,
-            "invoice.payments_transferred",
-            target_type="invoice",
-            target_id=str(invoice.id),
-            actor_user_id=actor.id,
-            metadata={
-                "from_invoice_id": str(replaces.id),
-                "received_cents": received,
-                "pending_insurer_cents": pending,
-            },
-        )
+        # Under the lineage lock (R9) — see `carry_payments`.
+        await carry_payments(db, replaces, invoice, actor.id)
 
     # Discount definitions frozen at this exact moment — one more query, never a live re-join
     # once this transaction commits (module section in `billing/models.py`).

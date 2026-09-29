@@ -81,19 +81,25 @@ async def test_zero_use_refund_returns_what_was_paid_and_cancels_the_entitlement
     )
 
 
-async def test_zero_use_refund_deducts_prior_refunds(client):
+@pytest.mark.parametrize("used", [False, True])
+async def test_the_generic_refund_route_refuses_package_invoices(client, used):
+    """R13: a package's money leaves only through the package route — the generic invoice
+    refund would bypass the standard policy (nonrefundable once a credit is used) and its
+    credit/commission choices."""
     w = await world(client, credits=10, price_cents=96000)
-    prior = await client.post(
+    if used:
+        await redeem_and_issue(client, w)
+
+    resp = await client.post(
         f"/api/invoices/{w.purchase['invoice_id']}/refunds",
         json={"amount_cents": 1000, "reason": "Overcharged"},
     )
-    assert prior.status_code == 201, prior.text
 
-    resp = await refund(client, w.purchase["id"])
-
-    assert resp.status_code == 201, resp.text
-    assert resp.json()["refund"]["amount_cents"] == 96000 - 1000
-    assert resp.json()["invoice"]["outstanding_cents"] == 0
+    assert resp.status_code == 422, resp.text
+    assert refund_url(w.purchase["id"]) in resp.json()["detail"]
+    assert await scalar("SELECT count(*) FROM invoice_refunds") == 0
+    invoice = (await client.get(f"/api/invoices/{w.purchase['invoice_id']}")).json()
+    assert invoice["status"] == "issued"
 
 
 async def test_an_unpaid_zero_use_package_is_cancelled_with_no_refund_row(client):
@@ -158,16 +164,54 @@ async def test_an_unknown_purchase_is_404(client):
 # --- the manual admin/owner exception ---------------------------------------------------------
 
 
-async def test_the_exception_requires_every_explicit_choice(client):
+async def test_the_exception_requires_an_amount_and_a_reason(client):
     w = await world(client)
-    full = {"amount_cents": 100, "cancel_remaining_credits": True, "reverse_commission": False}
-    for missing in full:
-        body = {k: v for k, v in full.items() if k != missing}
-        resp = await refund(client, w.purchase["id"], exception=body)
-        assert resp.status_code == 422, (missing, resp.text)
-    no_reason = await client.post(refund_url(w.purchase["id"]), json={"exception": full})
+    no_amount = await refund(client, w.purchase["id"], exception={"reverse_commission": False})
+    assert no_amount.status_code == 422, no_amount.text
+    no_reason = await client.post(
+        refund_url(w.purchase["id"]), json={"exception": {"amount_cents": 100}}
+    )
     assert no_reason.status_code == 422
     assert await scalar("SELECT count(*) FROM invoice_refunds") == 0
+
+
+@pytest.mark.parametrize(("amount", "voided"), [(96000, True), (20000, False)])
+async def test_exception_defaults_cancel_on_full_refund_and_preserve_commission(
+    client, amount, voided
+):
+    """R14 (spec §154): only the amount is required. Credits cancel by default on a full
+    refund and are kept on a partial one; earned commission is preserved by default."""
+    w = await world(client, credits=10, price_cents=96000)
+    await redeem_and_issue(client, w)
+
+    resp = await refund(client, w.purchase["id"], exception={"amount_cents": amount})
+
+    assert resp.status_code == 201, resp.text
+    assert (resp.json()["credits_voided"], resp.json()["commission_reversals"]) == (voided, 0)
+    assert await scalar("SELECT count(*) FROM commission_postings WHERE kind = 'reversal'") == 0
+    logged = await scalar(
+        "SELECT metadata->>'cancel_remaining_credits' FROM audit_events "
+        "WHERE event_type = 'package_purchase.refunded'"
+    )
+    assert logged == str(voided).lower()
+
+
+async def test_a_partial_goodwill_refund_leaves_held_credit_not_a_negative_balance(client):
+    """R12: the purchase invoice is cancelled, so it owes nothing; what it keeps is explicit."""
+    w = await world(client, credits=10, price_cents=96000)
+    await redeem_and_issue(client, w)
+
+    resp = await refund(
+        client,
+        w.purchase["id"],
+        exception={"amount_cents": 20000, "cancel_remaining_credits": False},
+    )
+
+    assert resp.status_code == 201, resp.text
+    invoice = resp.json()["invoice"]
+    assert invoice["status"] == "cancelled"
+    assert (invoice["outstanding_cents"], invoice["client_outstanding_cents"]) == (0, 0)
+    assert (invoice["held_credit_cents"], invoice["refunded_cents"]) == (76000, 20000)
 
 
 async def test_goodwill_refund_after_use_keeps_credits_and_preserves_commission(client):

@@ -152,8 +152,10 @@ async def test_payments_transfer_to_the_replacement_and_are_never_charged_again(
     body = await cancel(client, invoice_id)
 
     # Held as a credit on the cancelled original until the replacement exists.
+    # R12: a cancelled invoice owes nothing; the retained money is its own explicit figure.
     held = (await client.get(f"{INVOICES}/{invoice_id}")).json()
-    assert held["outstanding_cents"] == -12000
+    assert (held["outstanding_cents"], held["held_credit_cents"]) == (0, 12000)
+    assert (held["client_outstanding_cents"], held["pending_insurer_cents"]) == (0, 0)
     # Payments are refused on a cancelled invoice (#66).
     refused = await client.post(
         payments_url(invoice_id),

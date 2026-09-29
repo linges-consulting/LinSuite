@@ -1282,6 +1282,11 @@ class RetailSale(Base):
     payment_collector_staff_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("staff.id", ondelete="RESTRICT")
     )
+    # M4 review R15: set on the replacement draft a retail cancel opens (0064); issuing it
+    # links `RetailInvoice.replaces_invoice_id` and carries the original's money.
+    replaces_retail_invoice_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("retail_invoices.id", ondelete="SET NULL"), unique=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -1321,8 +1326,10 @@ class RetailSaleLine(Base):
 class RetailInvoice(Base):
     """One issued retail invoice — the voidable document class (CLAUDE.md), created once, at
     #75's own atomic issue, and never combined with a service invoice (module section above).
-    No cancel route is built by this ticket (the same scope line #65 drew for its own cancel
-    transition) — the voidable shape and its trigger are ready for #76 (retail returns)."""
+    Cancel & replace (M4 review R15, `POST /retail-invoices/{id}/cancel`) writes the one
+    issued -> cancelled transition the voidable trigger permits and opens a new draft
+    `RetailSale` naming it (`replaces_retail_invoice_id`); issuing that draft sets
+    `replaces_invoice_id` here, carries the money and moves only the stock difference."""
 
     __tablename__ = "retail_invoices"
     __table_args__ = (
@@ -1736,12 +1743,23 @@ class InvoiceBalanceAuthorization(Base):
             name="ck_invoice_balance_authorizations_outstanding",
         ),
         Index("ix_invoice_balance_authorizations_invoice", "invoice_id"),
+        # M4 review R8: retail invoices get the same exception (0064), same pair shape as #76.
+        CheckConstraint(
+            "num_nonnulls(invoice_id, retail_invoice_id) = 1",
+            name="ck_invoice_balance_authorizations_one_invoice",
+        ),
+        Index("ix_invoice_balance_authorizations_retail_invoice", "retail_invoice_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True, server_default=text("gen_random_uuid()")
     )
-    invoice_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoices.id", ondelete="CASCADE"))
+    invoice_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("invoices.id", ondelete="CASCADE")
+    )
+    retail_invoice_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("retail_invoices.id", ondelete="CASCADE")
+    )
     authorized_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     reason: Mapped[str] = mapped_column(Text)
     outstanding_cents_at_authorization: Mapped[int] = mapped_column(Integer)
@@ -1765,15 +1783,32 @@ class InvoicePaymentTransfer(Base):
             "received_cents >= 0 AND received_insurer_cents >= 0 AND pending_insurer_cents >= 0",
             name="ck_invoice_payment_transfers_amounts",
         ),
+        # M4 review R15: a retail replacement carries money the same way (0064) — both ends
+        # service invoices, or both ends retail invoices.
+        CheckConstraint(
+            "(from_invoice_id IS NOT NULL AND to_invoice_id IS NOT NULL "
+            "AND from_retail_invoice_id IS NULL AND to_retail_invoice_id IS NULL) OR "
+            "(from_invoice_id IS NULL AND to_invoice_id IS NULL "
+            "AND from_retail_invoice_id IS NOT NULL AND to_retail_invoice_id IS NOT NULL)",
+            name="ck_invoice_payment_transfers_one_kind",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True, server_default=text("gen_random_uuid()")
     )
-    from_invoice_id: Mapped[uuid.UUID] = mapped_column(
+    from_invoice_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("invoices.id", ondelete="RESTRICT")
     )
-    to_invoice_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoices.id", ondelete="RESTRICT"))
+    to_invoice_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("invoices.id", ondelete="RESTRICT")
+    )
+    from_retail_invoice_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("retail_invoices.id", ondelete="RESTRICT"), unique=True
+    )
+    to_retail_invoice_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("retail_invoices.id", ondelete="RESTRICT"), unique=True
+    )
     received_cents: Mapped[int] = mapped_column(Integer)
     received_insurer_cents: Mapped[int] = mapped_column(Integer)
     pending_insurer_cents: Mapped[int] = mapped_column(Integer)
