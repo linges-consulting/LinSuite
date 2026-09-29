@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from auth.capabilities import Requires
+from auth.capabilities import Requires, RequiresAny
 from auth.models import User
 from auth.session import CurrentUser
 from billing.tax_routes import TaxConvention, normalize_tax_component_keys
@@ -42,6 +42,11 @@ router = APIRouter(prefix="/admin/products", tags=["inventory"])
 public = APIRouter(prefix="/catalog", tags=["inventory"])
 
 CatalogManager = Annotated[User, Depends(Requires("catalog.manage"))]
+# #95: `list_products` also backs Settings → Products for a receive- or adjust-only lead, who
+# needs the roster to pick a variant but holds neither write capability.
+ProductReader = Annotated[
+    User, Depends(RequiresAny("catalog.manage", "inventory.receive", "inventory.adjust"))
+]
 
 # --- what goes over the wire ---------------------------------------------------------------
 
@@ -328,7 +333,7 @@ async def _roster(db: SessionDep, *, include_inactive: bool) -> list[Product]:
 
 @router.get("")
 async def list_products(
-    _: CatalogManager, db: SessionDep, include_inactive: bool = False
+    _: ProductReader, db: SessionDep, include_inactive: bool = False
 ) -> dict[str, list[ProductOut]]:
     return {
         "products": [product_out(p) for p in await _roster(db, include_inactive=include_inactive)]

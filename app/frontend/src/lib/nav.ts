@@ -40,7 +40,19 @@ export type NavItem = {
  * Hiding is a courtesy, not the enforcement: `Requires` on each route is what actually
  * refuses, and typing the URL still gets the honest refusal rather than the screen.
  */
-const ADMINISTRATIVE = ['admin', 'roles.manage', 'users.manage', 'catalog.manage', 'forms.manage']
+// #95: `billing.manage` (Settings → Packages), `inventory.receive` and `inventory.adjust`
+// (Settings → Products) each independently open a Settings sub-screen without `catalog.manage`
+// — the nav entry has to show for any of them, or the screen underneath is unreachable.
+const ADMINISTRATIVE = [
+  'admin',
+  'roles.manage',
+  'users.manage',
+  'catalog.manage',
+  'forms.manage',
+  'billing.manage',
+  'inventory.receive',
+  'inventory.adjust',
+]
 
 export const NAV: NavItem[] = [
   { to: '/schedule', label: 'Schedule', icon: CalendarDays },
