@@ -19,7 +19,7 @@ from sqlalchemy.exc import IntegrityError
 
 from core.db import get_purge_engine, session_scope
 from scheduling.clock import localize
-from tests.conftest import wipe_document_keys
+from tests.conftest import get_owner_engine, wipe_document_keys
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -52,12 +52,13 @@ CUSTOMER = {"first_name": "Priya", "last_name": "Nair", "phone": "416-555-0199"}
 @pytest.fixture(autouse=True)
 async def claimed_instance(client):
     async def wipe():
-        async with get_purge_engine().begin() as purge:
-            await purge.execute(text("DELETE FROM audit_events"))
-            # The app role may not delete an erasure request (0025); the purge role may.
-            await purge.execute(text("DELETE FROM erasure_requests"))
-            # The app role may not delete a form link (0028); the purge role may.
-            await purge.execute(text("DELETE FROM form_links"))
+        # Neither runtime role may delete these (0025, 0028) — and since #83 the purge role's
+        # own DELETE is exactly its four permitted tables, none of which these are — so the
+        # reset runs as the schema owner.
+        async with get_owner_engine().begin() as owner:
+            await owner.execute(text("DELETE FROM audit_events"))
+            await owner.execute(text("DELETE FROM erasure_requests"))
+            await owner.execute(text("DELETE FROM form_links"))
         await wipe_document_keys()
         async with session_scope() as db:
             for table in (

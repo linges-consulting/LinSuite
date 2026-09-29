@@ -15,9 +15,9 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from core.db import get_purge_engine, session_scope
+from core.db import session_scope
 from scheduling.clock import today_in
-from tests.conftest import wipe_document_keys
+from tests.conftest import get_owner_engine, wipe_document_keys
 from tests.test_bill_review import (
     APPOINTMENTS,
     EMAIL,
@@ -37,7 +37,9 @@ TAX_COMPONENTS = "/api/admin/billing/tax-components"
 @pytest.fixture(autouse=True)
 async def claimed_instance(client):
     async def wipe():
-        async with get_purge_engine().begin() as purge:
+        # #83: none of these are among the purge role's four permitted tables — reset as the
+        # schema owner instead.
+        async with get_owner_engine().begin() as owner:
             for table in (
                 "audit_events",
                 "erasure_requests",
@@ -59,7 +61,7 @@ async def claimed_instance(client):
                 "package_purchases",
                 "business_invoice_counters",
             ):
-                await purge.execute(text(f"DELETE FROM {table}"))
+                await owner.execute(text(f"DELETE FROM {table}"))
         await wipe_document_keys()
         async with session_scope() as db:
             for table in (

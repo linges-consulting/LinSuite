@@ -18,7 +18,8 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
-from core.db import get_purge_engine, session_scope
+from core.db import session_scope
+from tests.conftest import get_owner_engine
 from tests.test_inventory import as_admin, make_product, make_variant
 
 TABLE = "stock_movements"
@@ -39,12 +40,13 @@ PRODUCTS = "/api/admin/products"
 
 @pytest.fixture(autouse=True)
 async def claimed_instance(client):
-    async with get_purge_engine().begin() as purge:
-        await purge.execute(text("DELETE FROM audit_events"))
-        # Append-only: the app role holds no DELETE on this table (the migration's own
-        # grant/trigger pair), so resetting it between tests goes through the purge role,
-        # the same way `test_inventory.py`'s own fixture already resets `audit_events`.
-        await purge.execute(text(f"DELETE FROM {TABLE}"))
+    async with get_owner_engine().begin() as owner:
+        await owner.execute(text("DELETE FROM audit_events"))
+        # Append-only: neither runtime role holds DELETE on this table (the migration's own
+        # grant/trigger pair, tightened further by #83) — the purge role's DELETE is now
+        # exactly its four permitted tables, and this is not one of them — so resetting it
+        # between tests goes through the schema owner instead.
+        await owner.execute(text(f"DELETE FROM {TABLE}"))
     async with session_scope() as db:
         for table in (
             "product_variants",

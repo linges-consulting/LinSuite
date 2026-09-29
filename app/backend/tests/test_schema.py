@@ -101,14 +101,22 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "package_credit_redemptions": ("SELECT", "INSERT"),
     "package_credit_voids": ("SELECT", "INSERT"),  # #73, 0062
 }
-# The purge role reads and deletes everywhere and writes nowhere — except the fact of its own
-# purge, which ADR-0001 §6 puts in the purge transaction (0024, pre-flight D11).
-PURGE_PRIVILEGES = ("SELECT", "DELETE")
+# The purge role reads everywhere and deletes from exactly four tables (#83; ADR-0001
+# amendment "purge-role default-deny") — the ones `customers/tasks.py::_shred` actually
+# deletes from. Everywhere else it is `SELECT` only, including the fact of its own purge,
+# which ADR-0001 §6 puts in the purge transaction as an INSERT (0024, pre-flight D11).
+PURGE_PRIVILEGES = ("SELECT",)
 PURGE_EXCEPTIONS: dict[str, tuple[str, ...]] = {
-    "audit_events": ("SELECT", "INSERT", "DELETE"),
+    "audit_events": ("SELECT", "INSERT"),
     # Never destroyed by the purge role either (0044) — there is no crypto-shred of the
-    # business's own key in v1.
+    # business's own key in v1. Already the new default; kept explicit for the reason.
     "business_document_keys": ("SELECT",),
+    # The four tables `_shred` actually deletes from (ADR-0001 rules 7-8) — the purge role's
+    # entire remaining DELETE authority in the system.
+    "documents": ("SELECT", "DELETE"),
+    "form_submissions": ("SELECT", "DELETE"),
+    "session_notes": ("SELECT", "DELETE"),
+    "customer_document_keys": ("SELECT", "DELETE"),
 }
 # (table, trigger) pairs that must be attached and firing.
 TRIGGERS = (
@@ -283,6 +291,135 @@ async def test_audit_events_no_rewrite_refuses_an_update_even_with_the_grant_res
             await db.execute(text("UPDATE audit_events SET event_type = 'x'"))
         await db.rollback()
     assert getattr(still_refused.value.orig, "sqlstate", None) == "42501"
+
+
+# --- #83: the purge role's DELETE is exactly the four tables (ADR-0001 amendment) ------------
+
+
+@pytest.mark.parametrize(
+    "table",
+    ["invoices", "commission_postings", "stock_movements", "audit_events", "audit_access_log"],
+)
+async def test_the_purge_role_is_refused_delete_outside_its_four_tables(database, table):
+    """The behavioural half of `test_both_roles_hold_the_privileges_they_are_meant_to_on_every_
+    table`'s catalog check, over ledger and audit tables by name: a real `DELETE`, not just
+    `has_table_privilege`. No row needs to exist — the grant check runs before any row is
+    matched, so a bare statement against an empty table already proves the grant is gone."""
+    from core.db import get_purge_engine
+
+    with pytest.raises(DBAPIError) as refused:
+        async with get_purge_engine().begin() as purge:
+            await purge.execute(text(f"DELETE FROM {table}"))
+    assert getattr(refused.value.orig, "sqlstate", None) == "42501", refused.value
+
+
+async def _insert_a_probe_row(conn, table: str) -> None:
+    """One real row on `table`, inserted as the schema owner — a `FOR EACH ROW` trigger never
+    runs its body against zero matched rows, so "the grant is restored and a DELETE is still
+    refused" needs something to delete in the first place."""
+    if table == "audit_events":
+        await conn.execute(
+            text("INSERT INTO audit_events (event_type, target_type) VALUES ('probe', 'probe')")
+        )
+    elif table == "audit_access_log":
+        await conn.execute(
+            text(
+                "INSERT INTO audit_access_log (actor_user_id, actor_role, customer_id, "
+                "resource_type, resource_id, action) VALUES (gen_random_uuid(), 'Staff', "
+                "gen_random_uuid(), 'probe', 'probe', 'view')"
+            )
+        )
+    elif table == "stock_movements":
+        # No business/customer chain to satisfy — `products`/`product_variants` stand alone.
+        product_id = await conn.scalar(
+            text("INSERT INTO products (name) VALUES ('Purge-role probe') RETURNING id")
+        )
+        variant_id = await conn.scalar(
+            text(
+                "INSERT INTO product_variants (product_id, name, sku) "
+                "VALUES (:p, 'Purge-role probe variant', 'purge-role-probe-sku') RETURNING id"
+            ),
+            {"p": product_id},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO stock_movements (variant_id, kind, quantity_delta) "
+                "VALUES (:v, 'receipt', 1)"
+            ),
+            {"v": variant_id},
+        )
+    else:
+        raise AssertionError(f"no probe-row recipe for {table}")
+
+
+@pytest.mark.parametrize("table", ["stock_movements", "audit_events", "audit_access_log"])
+async def test_the_purge_role_is_refused_delete_even_with_the_grant_restored(database, table):
+    """`stock_movements` for "a ledger table", `audit_events` and `audit_access_log` for "both
+    audit tables" (#83's own acceptance criteria) — the same recipe as
+    `test_audit_events_no_rewrite_refuses_an_update_even_with_the_grant_restored` above, one
+    role over: the grant restored in a rolled-back owner transaction, real for the one
+    statement and never committed, so the refusal that follows can only be the trigger's own."""
+    owner = create_async_engine(get_settings().database_url_migrate)
+    try:
+        async with owner.connect() as conn:
+            await conn.begin()
+            try:
+                await conn.execute(text(f"GRANT DELETE ON {table} TO linsuite_purge"))
+                await _insert_a_probe_row(conn, table)
+                await conn.execute(text("SET ROLE linsuite_purge"))
+                with pytest.raises(DBAPIError) as refused:
+                    await conn.execute(text(f"DELETE FROM {table}"))
+                assert getattr(refused.value.orig, "sqlstate", None) == "42501", refused.value
+                assert "is not permitted" in str(refused.value)
+            finally:
+                await conn.rollback()
+    finally:
+        await owner.dispose()
+
+
+async def test_a_table_created_after_the_migration_grants_the_purge_role_select_only(database):
+    """0067's whole point: a future migration that never thinks about the purge role at all
+    still ships safe, because the default itself changed. Rolled back, so nothing is actually
+    left behind for another test to trip over."""
+    owner = create_async_engine(get_settings().database_url_migrate)
+    try:
+        async with owner.connect() as conn:
+            await conn.begin()
+            try:
+                await conn.execute(text("CREATE TABLE purge_default_deny_probe (id int)"))
+
+                async def may(privilege: str) -> bool:
+                    return await conn.scalar(
+                        text(
+                            "SELECT has_table_privilege('linsuite_purge', "
+                            "'purge_default_deny_probe', :p)"
+                        ),
+                        {"p": privilege},
+                    )
+
+                assert await may("SELECT") is True
+                assert await may("DELETE") is False
+                assert await may("INSERT") is False
+                assert await may("UPDATE") is False
+            finally:
+                await conn.rollback()
+    finally:
+        await owner.dispose()
+
+
+async def test_the_partition_function_grants_the_purge_role_select_only_on_a_new_partition(
+    database,
+):
+    """`ensure_access_log_partitions()` (0021) grants directly rather than through
+    `ALTER DEFAULT PRIVILEGES`, so (1) above does not reach it on its own — pinned here at the
+    function's own source, the same seam `test_every_trigger_and_security_definer_function_
+    pins_its_search_path` already reads `pg_proc` through."""
+    async with session_scope() as db:
+        source = await db.scalar(
+            text("SELECT prosrc FROM pg_proc WHERE proname = 'ensure_access_log_partitions'")
+        )
+    assert "GRANT SELECT ON public.%I TO linsuite_purge" in source
+    assert "DELETE" not in source
 
 
 # Every trigger function, and every SECURITY DEFINER one, runs with a `search_path` it did not

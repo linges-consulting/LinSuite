@@ -34,6 +34,7 @@ from core.db import get_purge_engine, session_scope
 from customers import retention, tasks
 from forms import submissions
 from forms.models import FormSubmission
+from tests.conftest import get_owner_engine
 from tests.test_appointments import (  # noqa: F401 — the autouse fixture comes along
     CUSTOMERS,
     OTHER_PASSWORD,
@@ -859,8 +860,10 @@ async def access_rows() -> list:
 
 async def test_the_list_is_metadata_and_unlogged_and_the_read_is_logged(client):
     customer_id, submission_id = await submitted(client)
-    async with get_purge_engine().begin() as purge:
-        await purge.execute(text("DELETE FROM audit_access_log"))
+    # #83: the access log is not among the purge role's four permitted tables — reset as the
+    # schema owner instead.
+    async with get_owner_engine().begin() as owner:
+        await owner.execute(text("DELETE FROM audit_access_log"))
 
     listed = await client.get(f"{CUSTOMERS}/{customer_id}/forms")
     assert listed.status_code == 200, listed.text

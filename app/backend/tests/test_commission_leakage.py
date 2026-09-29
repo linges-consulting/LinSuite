@@ -14,8 +14,8 @@ Mode gate (proven separately in `tests/test_commission_report.py`).
 import pytest
 from sqlalchemy import text
 
-from core.db import get_purge_engine, session_scope
-from tests.conftest import wipe_document_keys
+from core.db import session_scope
+from tests.conftest import get_owner_engine, wipe_document_keys
 from tests.test_bill_review import (
     BILLS,
     EMAIL,
@@ -33,29 +33,31 @@ from tests.test_invoice_issue import INVOICES, issue_url
 @pytest.fixture(autouse=True)
 async def claimed_instance(client):
     async def wipe():
-        async with get_purge_engine().begin() as purge:
-            await purge.execute(text("DELETE FROM audit_events"))
-            await purge.execute(text("DELETE FROM erasure_requests"))
-            await purge.execute(text("DELETE FROM form_links"))
-            await purge.execute(text("DELETE FROM retail_return_lines"))  # R26: retail too
-            await purge.execute(text("DELETE FROM retail_returns"))
-            await purge.execute(text("DELETE FROM invoice_payments"))
-            await purge.execute(text("DELETE FROM invoice_balance_authorizations"))
-            await purge.execute(text("DELETE FROM invoice_payment_transfers"))  # #68
-            await purge.execute(text("DELETE FROM commission_postings"))
-            await purge.execute(text("DELETE FROM retail_invoice_line_taxes"))
-            await purge.execute(text("DELETE FROM retail_invoice_line_discounts"))
-            await purge.execute(text("DELETE FROM retail_invoice_lines"))
-            await purge.execute(text("DELETE FROM invoice_line_taxes"))
-            await purge.execute(text("DELETE FROM invoice_line_discounts"))
-            await purge.execute(text("DELETE FROM invoice_lines"))
-            await purge.execute(text("DELETE FROM retail_return_lines"))  # #76
-            await purge.execute(text("DELETE FROM retail_returns"))  # #76
-            await purge.execute(text("DELETE FROM invoice_refunds"))  # #67
-            await purge.execute(text("DELETE FROM retail_invoices"))
-            await purge.execute(text("DELETE FROM invoices"))
-            await purge.execute(text("DELETE FROM business_invoice_counters"))
-            await purge.execute(text("DELETE FROM stock_movements"))
+        # #83: none of these are among the purge role's four permitted tables — reset as the
+        # schema owner instead.
+        async with get_owner_engine().begin() as owner:
+            await owner.execute(text("DELETE FROM audit_events"))
+            await owner.execute(text("DELETE FROM erasure_requests"))
+            await owner.execute(text("DELETE FROM form_links"))
+            await owner.execute(text("DELETE FROM retail_return_lines"))  # R26: retail too
+            await owner.execute(text("DELETE FROM retail_returns"))
+            await owner.execute(text("DELETE FROM invoice_payments"))
+            await owner.execute(text("DELETE FROM invoice_balance_authorizations"))
+            await owner.execute(text("DELETE FROM invoice_payment_transfers"))  # #68
+            await owner.execute(text("DELETE FROM commission_postings"))
+            await owner.execute(text("DELETE FROM retail_invoice_line_taxes"))
+            await owner.execute(text("DELETE FROM retail_invoice_line_discounts"))
+            await owner.execute(text("DELETE FROM retail_invoice_lines"))
+            await owner.execute(text("DELETE FROM invoice_line_taxes"))
+            await owner.execute(text("DELETE FROM invoice_line_discounts"))
+            await owner.execute(text("DELETE FROM invoice_lines"))
+            await owner.execute(text("DELETE FROM retail_return_lines"))  # #76
+            await owner.execute(text("DELETE FROM retail_returns"))  # #76
+            await owner.execute(text("DELETE FROM invoice_refunds"))  # #67
+            await owner.execute(text("DELETE FROM retail_invoices"))
+            await owner.execute(text("DELETE FROM invoices"))
+            await owner.execute(text("DELETE FROM business_invoice_counters"))
+            await owner.execute(text("DELETE FROM stock_movements"))
         await wipe_document_keys()
         async with session_scope() as db:
             for table in (

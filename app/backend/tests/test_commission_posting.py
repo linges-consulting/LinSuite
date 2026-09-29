@@ -14,8 +14,8 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
-from core.db import get_purge_engine, session_scope
-from tests.conftest import wipe_document_keys
+from core.db import session_scope
+from tests.conftest import get_owner_engine, wipe_document_keys
 from tests.test_bill_review import (
     BILLS,
     EMAIL,
@@ -35,23 +35,25 @@ from tests.test_invoice_issue import INVOICES, issue_url
 @pytest.fixture(autouse=True)
 async def claimed_instance(client):
     async def wipe():
-        async with get_purge_engine().begin() as purge:
-            await purge.execute(text("DELETE FROM audit_events"))
-            await purge.execute(text("DELETE FROM erasure_requests"))
-            await purge.execute(text("DELETE FROM form_links"))
+        # #83: none of these are among the purge role's four permitted tables — reset as the
+        # schema owner instead.
+        async with get_owner_engine().begin() as owner:
+            await owner.execute(text("DELETE FROM audit_events"))
+            await owner.execute(text("DELETE FROM erasure_requests"))
+            await owner.execute(text("DELETE FROM form_links"))
             # Children before parents (`ON DELETE RESTRICT` all the way down): the commission
             # ledger references `invoice_lines`/`invoices`, both of which #65's own tables
             # already reference `service_bills`/`appointments`/etc.
-            await purge.execute(text("DELETE FROM invoice_payment_transfers"))  # #68
-            await purge.execute(text("DELETE FROM commission_postings"))
-            await purge.execute(text("DELETE FROM invoice_line_taxes"))
-            await purge.execute(text("DELETE FROM invoice_line_discounts"))
-            await purge.execute(text("DELETE FROM invoice_lines"))
-            await purge.execute(text("DELETE FROM retail_return_lines"))  # #76
-            await purge.execute(text("DELETE FROM retail_returns"))  # #76
-            await purge.execute(text("DELETE FROM invoice_refunds"))  # #67
-            await purge.execute(text("DELETE FROM invoices"))
-            await purge.execute(text("DELETE FROM business_invoice_counters"))
+            await owner.execute(text("DELETE FROM invoice_payment_transfers"))  # #68
+            await owner.execute(text("DELETE FROM commission_postings"))
+            await owner.execute(text("DELETE FROM invoice_line_taxes"))
+            await owner.execute(text("DELETE FROM invoice_line_discounts"))
+            await owner.execute(text("DELETE FROM invoice_lines"))
+            await owner.execute(text("DELETE FROM retail_return_lines"))  # #76
+            await owner.execute(text("DELETE FROM retail_returns"))  # #76
+            await owner.execute(text("DELETE FROM invoice_refunds"))  # #67
+            await owner.execute(text("DELETE FROM invoices"))
+            await owner.execute(text("DELETE FROM business_invoice_counters"))
         await wipe_document_keys()
         async with session_scope() as db:
             for table in (

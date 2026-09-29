@@ -15,15 +15,31 @@ the response is returned.
 
 import os
 from collections.abc import AsyncIterator, Iterator
+from functools import lru_cache
 
 import pytest
 from alembic import command
 from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from testcontainers.community.postgres import PostgresContainer
 from testcontainers.community.redis import RedisContainer
 
 BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+@lru_cache
+def get_owner_engine() -> AsyncEngine:
+    """The schema owner's connection (`DATABASE_URL_MIGRATE`), test-only.
+
+    #83 narrowed the purge role's DELETE grant to exactly its four tables (documents,
+    form_submissions, session_notes, customer_document_keys — ADR-0001 amendment). Every
+    other table, from the audit log to the whole financial ledger, no longer accepts a purge-
+    role DELETE at all, so test teardown that used to reach for `get_purge_engine()` there —
+    for the same reason no production code ever did — now reaches for this instead: the same
+    owner connection `wipe_document_keys` below already uses, and the role an operator's own
+    recovery would connect as."""
+    return create_async_engine(os.environ["DATABASE_URL_MIGRATE"])
 
 
 @pytest.fixture(scope="session")

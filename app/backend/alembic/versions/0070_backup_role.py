@@ -20,11 +20,9 @@ privileges (its own docstring explains why — a REVOKE on the parent does not r
 created afterwards), so this migration re-`CREATE OR REPLACE`s it, adding exactly one
 `GRANT SELECT ... TO linsuite_backup` line. Nothing else in the function body changes.
 
-NOTE FOR THE INTEGRATOR (#83, purge-role default-deny): that ticket may also
-`CREATE OR REPLACE` this same function, to stop granting DELETE to `linsuite_purge` on new
-partitions. Both changes are additive one-liners inside the same `FOR y IN ...` loop body —
-merge by keeping both `EXECUTE format('GRANT ...')` lines, dropping whichever one of us
-duplicated the unchanged parts of the function.
+0067 (#83, purge-role default-deny) replaced this function first, so the purge role gets
+SELECT only on a new partition; both bodies below carry that forward — the upgrade adds the
+backup grant to 0067's version, and the downgrade restores 0067's version, not 0021's.
 """
 
 from collections.abc import Sequence
@@ -40,8 +38,9 @@ depends_on: str | Sequence[str] | None = None
 ROLE = "linsuite_backup"
 FUNCTION = "public.ensure_access_log_partitions()"
 
-# 0021's body, verbatim, plus the one added GRANT line (marked below). Kept whole rather than
-# diffed because `CREATE OR REPLACE FUNCTION` always replaces the entire body.
+# 0067's body (0021 with the purge role on SELECT only), plus the one added GRANT line
+# (marked below). Kept whole rather than diffed because `CREATE OR REPLACE FUNCTION`
+# always replaces the entire body.
 _PARTITION_FUNCTION = f"""
 CREATE OR REPLACE FUNCTION {FUNCTION} RETURNS text[]
 LANGUAGE plpgsql
@@ -79,7 +78,7 @@ BEGIN
             child
         );
         EXECUTE format('GRANT SELECT, INSERT ON public.%I TO linsuite_app', child);
-        EXECUTE format('GRANT SELECT, DELETE ON public.%I TO linsuite_purge', child);
+        EXECUTE format('GRANT SELECT ON public.%I TO linsuite_purge', child);
         -- 0070: the backup role reads every partition, including ones made after it existed.
         EXECUTE format('GRANT SELECT ON public.%I TO linsuite_backup', child);
         created := created || child;
@@ -88,7 +87,7 @@ BEGIN
 END $$;
 """
 
-# 0021's original body, verbatim, for downgrade — identical except it never mentions
+# 0067's body, verbatim, for downgrade — identical except it never mentions
 # linsuite_backup. Kept as its own literal (not derived from the string above) so this file
 # has no string-surgery to get wrong.
 _PARTITION_FUNCTION_PRE_0070 = f"""
@@ -127,7 +126,7 @@ BEGIN
             'REVOKE ALL ON public.%I FROM PUBLIC, linsuite_app, linsuite_purge', child
         );
         EXECUTE format('GRANT SELECT, INSERT ON public.%I TO linsuite_app', child);
-        EXECUTE format('GRANT SELECT, DELETE ON public.%I TO linsuite_purge', child);
+        EXECUTE format('GRANT SELECT ON public.%I TO linsuite_purge', child);
         created := created || child;
     END LOOP;
     RETURN created;

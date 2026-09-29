@@ -22,8 +22,8 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
-from core.db import get_purge_engine, session_scope
-from tests.conftest import wipe_document_keys
+from core.db import session_scope
+from tests.conftest import get_owner_engine, wipe_document_keys
 from tests.test_bill_review import (
     EMAIL,
     SETUP,
@@ -44,31 +44,33 @@ async def wipe() -> None:
     """Everything this file creates, children first. Run on teardown too: a retail sale left
     behind still references its customer and seller, so a later file that deletes
     `customers`/`staff` without knowing about `retail_sales` would hit the FK."""
-    async with get_purge_engine().begin() as purge:
-        await purge.execute(text("DELETE FROM audit_events"))
-        await purge.execute(text("DELETE FROM erasure_requests"))
-        await purge.execute(text("DELETE FROM form_links"))
-        # #75's own append-only/voidable tables (purge-role-bypassed, migration 0056), #65's
-        # own (0054) — one test here issues a *service* invoice too, to prove the shared
-        # numbering series — and #61's own ledger (0050). All must go before the rows they
-        # reference below ("children before parents", `test_invoice_issue.py`'s own ordering).
-        await purge.execute(text("DELETE FROM retail_return_lines"))  # #76
-        await purge.execute(text("DELETE FROM retail_returns"))  # #76
-        await purge.execute(text("DELETE FROM invoice_payments"))  # #66/#76
-        await purge.execute(text("DELETE FROM invoice_balance_authorizations"))  # R8
-        await purge.execute(text("DELETE FROM invoice_payment_transfers"))  # #68, R15
-        await purge.execute(text("DELETE FROM commission_postings"))  # #69; retail since R27
-        await purge.execute(text("DELETE FROM retail_invoice_line_taxes"))  # 0065
-        await purge.execute(text("DELETE FROM retail_invoice_line_discounts"))  # 0065
-        await purge.execute(text("DELETE FROM retail_invoice_lines"))
-        await purge.execute(text("DELETE FROM retail_invoices"))
-        await purge.execute(text("DELETE FROM invoice_line_taxes"))
-        await purge.execute(text("DELETE FROM invoice_line_discounts"))
-        await purge.execute(text("DELETE FROM invoice_lines"))
-        await purge.execute(text("DELETE FROM invoice_refunds"))  # #67
-        await purge.execute(text("DELETE FROM invoices"))
-        await purge.execute(text("DELETE FROM business_invoice_counters"))
-        await purge.execute(text("DELETE FROM stock_movements"))
+    # #83: none of these are among the purge role's four permitted tables — reset as the
+    # schema owner instead.
+    async with get_owner_engine().begin() as owner:
+        await owner.execute(text("DELETE FROM audit_events"))
+        await owner.execute(text("DELETE FROM erasure_requests"))
+        await owner.execute(text("DELETE FROM form_links"))
+        # #75's own append-only/voidable tables (migration 0056), #65's own (0054) — one test
+        # here issues a *service* invoice too, to prove the shared numbering series — and #61's
+        # own ledger (0050). All must go before the rows they reference below ("children before
+        # parents", `test_invoice_issue.py`'s own ordering).
+        await owner.execute(text("DELETE FROM retail_return_lines"))  # #76
+        await owner.execute(text("DELETE FROM retail_returns"))  # #76
+        await owner.execute(text("DELETE FROM invoice_payments"))  # #66/#76
+        await owner.execute(text("DELETE FROM invoice_balance_authorizations"))  # R8
+        await owner.execute(text("DELETE FROM invoice_payment_transfers"))  # #68, R15
+        await owner.execute(text("DELETE FROM commission_postings"))  # #69; retail since R27
+        await owner.execute(text("DELETE FROM retail_invoice_line_taxes"))  # 0065
+        await owner.execute(text("DELETE FROM retail_invoice_line_discounts"))  # 0065
+        await owner.execute(text("DELETE FROM retail_invoice_lines"))
+        await owner.execute(text("DELETE FROM retail_invoices"))
+        await owner.execute(text("DELETE FROM invoice_line_taxes"))
+        await owner.execute(text("DELETE FROM invoice_line_discounts"))
+        await owner.execute(text("DELETE FROM invoice_lines"))
+        await owner.execute(text("DELETE FROM invoice_refunds"))  # #67
+        await owner.execute(text("DELETE FROM invoices"))
+        await owner.execute(text("DELETE FROM business_invoice_counters"))
+        await owner.execute(text("DELETE FROM stock_movements"))
     await wipe_document_keys()
     async with session_scope() as db:
         for table in (

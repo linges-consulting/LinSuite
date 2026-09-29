@@ -15,6 +15,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from core.db import get_purge_engine, session_scope
+from tests.conftest import get_owner_engine
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -63,8 +64,10 @@ async def _wipe_forms() -> None:
 @pytest.fixture(autouse=True)
 async def claimed_instance(client):
     await _wipe_forms()
-    async with get_purge_engine().begin() as purge:
-        await purge.execute(text("DELETE FROM audit_events"))
+    # #83: the purge role's DELETE is now exactly its four permitted tables — `audit_events`
+    # is not one of them — so this reset runs as the schema owner instead.
+    async with get_owner_engine().begin() as owner:
+        await owner.execute(text("DELETE FROM audit_events"))
     async with session_scope() as db:
         # "queue_entries" first: a leftover row (Phase 7 Task 1, #12) FKs to staff with no
         # cascade, and would block the delete below.

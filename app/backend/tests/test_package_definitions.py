@@ -8,7 +8,8 @@ count-of-several cases through the same endpoints. `billing.manage` gates all of
 import pytest
 from sqlalchemy import text
 
-from core.db import get_purge_engine, session_scope
+from core.db import session_scope
+from tests.conftest import get_owner_engine
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -26,8 +27,8 @@ SERVICES = "/api/admin/services"
 
 @pytest.fixture(autouse=True)
 async def claimed_instance(client):
-    async with get_purge_engine().begin() as purge:
-        await purge.execute(text("DELETE FROM audit_events"))
+    async with get_owner_engine().begin() as owner:
+        await owner.execute(text("DELETE FROM audit_events"))
     async with session_scope() as db:
         for table in (
             "package_definition_services",
