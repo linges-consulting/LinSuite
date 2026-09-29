@@ -21,6 +21,9 @@ import { Link, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
 import { ClassificationBadge } from '@/components/classification-badge'
 import { ClientFormsCard, type ClientFormsCardHandle } from '@/components/client-forms'
+import { ClientInvoicesCard } from '@/components/client-invoices'
+import { ClientPackagesCard } from '@/components/client-packages'
+import { ExportControl } from '@/components/export-control'
 import { SessionNotesCard } from '@/components/session-notes'
 import { EmptyState } from '@/components/empty-state'
 import { Field as FormField, Form, FormError } from '@/components/form'
@@ -49,11 +52,14 @@ import { Textarea } from '@/components/ui/textarea'
 import {
   ApiError,
   createCustomer,
+  downloadAccessLogExport,
   fetchAccessLog,
+  fetchAccessLogExportStatus,
   fetchCustomerCompliance,
   fetchCustomerProfile,
   fetchCustomers,
   fieldErrors,
+  requestAccessLogExport,
   requestErasure,
   updateCustomer,
   type AccessEntry,
@@ -354,6 +360,8 @@ export function ClientPage() {
   const canViewForms = user?.capabilities.includes('forms.view') ?? false
   const canViewNotes = user?.capabilities.includes('notes.view') ?? false
   const canWriteNotes = user?.capabilities.includes('notes.write') ?? false
+  // #97/#95: front-desk billing read, same capability as Billing and Sell — never Admin Mode.
+  const canViewBilling = user?.capabilities.includes('billing.view') ?? false
   // An Admin Mode capability: offered only while the window is open, never as a refusal.
   const canErase =
     (user?.capabilities.includes('customers.erase') ?? false) && user?.mode === 'admin'
@@ -588,6 +596,10 @@ export function ClientPage() {
             />
           )}
           {canViewNotes && <SessionNotesCard customerId={id} timezone={profile.data.timezone} suppressed={profile.data.customer.suppressed} canWrite={canWriteNotes} />}
+          {canViewBilling && <ClientInvoicesCard customerId={id} />}
+          {canViewBilling && (
+            <ClientPackagesCard customerId={id} purchaserName={fullName(profile.data.customer)} />
+          )}
 
           {editing && (
             <ClientEditDialog customer={profile.data.customer} onClose={() => setEditing(false)} />
@@ -986,6 +998,14 @@ function AccessHistory({ customerId, adminMode }: { customerId: string; adminMod
                 onChange={(e) => choose({ to: e.target.value })}
               />
             </div>
+            <ExportControl
+              label="Export CSV"
+              requestExport={() =>
+                requestAccessLogExport(customerId, { from: from || undefined, to: to || undefined })
+              }
+              pollExport={(exportId) => fetchAccessLogExportStatus(customerId, exportId)}
+              downloadExport={(exportId) => downloadAccessLogExport(customerId, exportId)}
+            />
           </div>
         )}
       </CardHeader>

@@ -22,28 +22,33 @@ resolved discounts (rule + cents) and tax components (rate + cents).
 """
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Annotated
+from datetime import date as Date
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 
 from auth.capabilities import Requires
 from auth.models import User
 from billing.bill_review import (
+    INVOICE_LIST_MAX_PAGE_SIZE,
+    INVOICE_LIST_PAGE_SIZE,
+    DiscountChoiceOut,
     LineTaxOut,
     applicable_components,
     business_or_404,
     components_for,
     discount_input,
     eligible_discounts,
+    invoice_list_window,
     tax_out,
 )
 from billing.commission import commission_amount_cents
 from billing.commission_ledger import reverse_commission
-from billing.discount_resolver import DiscountConflict
+from billing.discount_resolver import DiscountConflict, DiscountEligibility, is_eligible
 from billing.documents import render_retail_invoice_document
 from billing.invoice_numbering import allocate_invoice_number
 from billing.models import (
@@ -61,8 +66,11 @@ from billing.models import (
 )
 from billing.payments import (
     AdminReviewer,
+    ListStatus,
     balance,
+    balances,
     carry_payments,
+    invoice_list_status,
     lock_issued,
     lock_lineage,
     record_refund,
@@ -82,6 +90,9 @@ from scheduling.models import Staff
 router = APIRouter(tags=["billing"])
 
 RetailSeller = Annotated[User, Depends(Requires("billing.view"))]
+
+# #106: a till that never closes a draft should still load fast — newest first, capped.
+OPEN_DRAFT_SALES_LIMIT = 20
 
 
 # --- what goes over the wire -----------------------------------------------------------------
@@ -122,6 +133,21 @@ class RetailSaleLineOut(BaseModel):
     line_total_cents: int
 
 
+class RetailSaleSummaryOut(BaseModel):
+    """The Sell screen's resume list (#106, spec #95 story 43): enough to recognize a draft at
+    a glance, none of the live pricing `RetailSaleOut` recomputes on a full read — a sale
+    interrupted by a phone call or a refresh is found by who it is for and when it was
+    started, not by its running total."""
+
+    id: str
+    customer_id: str | None
+    customer_name: str | None
+    sold_by_staff_id: str
+    line_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
 class RetailSaleOut(BaseModel):
     id: str
     status: str
@@ -131,6 +157,11 @@ class RetailSaleOut(BaseModel):
     # R15: set on the replacement draft a retail cancel opened.
     replaces_retail_invoice_id: str | None = None
     lines: list[RetailSaleLineOut]
+    # Sell's discount picker (#106), the same shape `bill_review.py::BillOut.eligible_discounts`
+    # already gives the service side: every enabled discount eligible for *any* line's product,
+    # each carrying whether it is in the current selection — `PUT .../discounts` replaces that
+    # selection whole, the same as a bill's own discount toggle.
+    eligible_discounts: list[DiscountChoiceOut]
     # The applied selection; `subtotal - discount_total + tax_total == grand_total`.
     discount_ids: list[str]
     subtotal_cents: int
@@ -164,6 +195,9 @@ class RetailInvoiceLineTaxOut(BaseModel):
 class RetailInvoiceLineOut(BaseModel):
     id: str
     variant_id: str
+    # Joined in for the invoice view (#102) — the same "id plus a name" shape the service
+    # side's `InvoiceLineOut.service_name`/`staff_name` carry.
+    variant_name: str
     quantity: int
     unit_price_cents: int
     discount_cents: int
@@ -175,6 +209,11 @@ class RetailInvoiceLineOut(BaseModel):
     # R26: no commission rate or basis — this payload is staff-facing (`billing.view`); the
     # admin-only commission report (`commission.view`) is where retail commission is read.
     staff_id: str
+    # #105: units already brought back by a #76 return (restocked or not) — `quantity -
+    # returned_quantity` is what the Returns dialog may still select for this line. Least
+    # invasive addition to this read model: reuses #76's own `_returned_by_line` rather than a
+    # new endpoint.
+    returned_quantity: int
 
 
 class RetailInvoiceOut(BaseModel):
@@ -183,6 +222,9 @@ class RetailInvoiceOut(BaseModel):
     invoice_number: int
     retail_sale_id: str
     customer_id: str | None
+    # `None` for an anonymous walk-in sale (#102 shows "Walk-in") — never PHI, the same field
+    # `RetailInvoiceSummaryOut` already carries for the Invoices list.
+    customer_name: str | None
     status: str
     subtotal_cents: int
     discount_total_cents: int
@@ -211,14 +253,38 @@ class RetailInvoiceSummaryOut(BaseModel):
     id: str
     invoice_number: int
     customer_id: str | None
+    # `None` for an anonymous walk-in sale — the row reads "Walk-in". Never PHI, joined in the
+    # same way `billing/invoices.py::InvoiceSummaryOut.customer_name` is.
+    customer_name: str | None
     status: str
+    # #99: the Invoices list's status badge — see `billing/invoices.py::InvoiceSummaryOut`'s
+    # own field for the same reasoning.
+    list_status: ListStatus
     grand_total_cents: int
     issued_at: datetime
+    # The list's "balance" column, and the rest of `Balance` alongside it — the same fields
+    # `InvoiceSummaryOut` carries, so the Invoices tab reads one shape for either kind.
+    outstanding_cents: int
+    pending_insurer_cents: int
+    client_outstanding_cents: int
+    checkout_complete: bool
+    refunded_cents: int
+    prepaid_cents: int
+    held_credit_cents: int
+
+
+class RetailInvoiceListOut(BaseModel):
+    retail_invoices: list[RetailInvoiceSummaryOut]
+    total: int
+    from_: Date = Field(serialization_alias="from")
+    to: Date
+    timezone: str
 
 
 @dataclass
 class _PricedRetailLine:
     line: RetailSaleLine
+    product_id: uuid.UUID
     discounts: list[Discount]
     components: list[ComponentRate]
     priced: PricedLine
@@ -265,8 +331,17 @@ async def _price_sale(
             )
         except DiscountConflict as error:
             raise HTTPException(status_code=422, detail=f"{variant.name}: {error}") from error
-        priced_lines.append(_PricedRetailLine(line, applied, components, priced))
+        priced_lines.append(
+            _PricedRetailLine(line, variant.product_id, applied, components, priced)
+        )
     return priced_lines, pool
+
+
+def _discount_eligibility(discount: Discount) -> DiscountEligibility:
+    return DiscountEligibility(
+        applies_to_all=discount.eligibility_scope == "all",
+        eligible_items=frozenset((i.item_type, i.item_id) for i in discount.eligible_items),
+    )
 
 
 async def _sale_out(db: SessionDep, sale: RetailSale) -> RetailSaleOut:
@@ -276,6 +351,15 @@ async def _sale_out(db: SessionDep, sale: RetailSale) -> RetailSaleOut:
     tax_total = sum(tax_totals.values())
     grand_total = sum(p.priced.tax.total_cents for p in priced_lines)
     discount_total = sum(sum(p.priced.discount_amounts.values()) for p in priced_lines)
+    # Every enabled discount eligible for *any* line's product (`bill_review.py::BillOut.
+    # eligible_discounts`'s own shape) — the picker's full offer, not just what is selected.
+    enabled = list(await db.scalars(select(Discount).where(Discount.enabled)))
+    product_ids = {p.product_id for p in priced_lines}
+    eligible_any = [
+        d
+        for d in enabled
+        if any(is_eligible(_discount_eligibility(d), "product", pid) for pid in product_ids)
+    ]
     return RetailSaleOut(
         id=str(sale.id),
         status=sale.status,
@@ -300,6 +384,18 @@ async def _sale_out(db: SessionDep, sale: RetailSale) -> RetailSaleOut:
             )
             for p in priced_lines
         ],
+        eligible_discounts=[
+            DiscountChoiceOut(
+                id=str(d.id),
+                name=d.name,
+                kind=d.kind,
+                percentage_bp=d.percentage_bp,
+                amount_cents=d.amount_cents,
+                stackable=d.stackable,
+                applied=d.id in selected,
+            )
+            for d in eligible_any
+        ],
         discount_ids=sorted(str(i) for i in selected),
         subtotal_cents=grand_total - tax_total + discount_total,
         discount_total_cents=discount_total,
@@ -319,6 +415,21 @@ async def _invoice_out(db: SessionDep, invoice: RetailInvoice) -> RetailInvoiceO
     replaced_by = await db.scalar(
         select(RetailInvoice.id).where(RetailInvoice.replaces_invoice_id == invoice.id)
     )
+    customer = (
+        await db.get(Customer, invoice.customer_id) if invoice.customer_id is not None else None
+    )
+    variant_ids = {line.variant_id for line in invoice.lines}
+    variants = (
+        {
+            v.id: v
+            for v in await db.scalars(
+                select(ProductVariant).where(ProductVariant.id.in_(variant_ids))
+            )
+        }
+        if variant_ids
+        else {}
+    )
+    returned = await _returned_by_line(db, invoice.id)
     return RetailInvoiceOut(
         outstanding_cents=money.outstanding_cents,
         refunded_cents=money.refunded_cents,
@@ -335,6 +446,9 @@ async def _invoice_out(db: SessionDep, invoice: RetailInvoice) -> RetailInvoiceO
         invoice_number=invoice.invoice_number,
         retail_sale_id=str(invoice.retail_sale_id),
         customer_id=str(invoice.customer_id) if invoice.customer_id is not None else None,
+        customer_name=(
+            f"{customer.first_name} {customer.last_name}" if customer is not None else None
+        ),
         status=invoice.status,
         subtotal_cents=invoice.subtotal_cents,
         discount_total_cents=invoice.discount_total_cents,
@@ -353,6 +467,9 @@ async def _invoice_out(db: SessionDep, invoice: RetailInvoice) -> RetailInvoiceO
             RetailInvoiceLineOut(
                 id=str(line.id),
                 variant_id=str(line.variant_id),
+                variant_name=(
+                    variants[line.variant_id].name if line.variant_id in variants else "—"
+                ),
                 quantity=line.quantity,
                 unit_price_cents=line.unit_price_cents,
                 discount_cents=line.discount_cents,
@@ -379,6 +496,7 @@ async def _invoice_out(db: SessionDep, invoice: RetailInvoice) -> RetailInvoiceO
                     for t in line.taxes
                 ],
                 staff_id=str(line.staff_id),
+                returned_quantity=returned.get(line.id, 0),
             )
             for line in invoice.lines
         ],
@@ -459,6 +577,45 @@ async def start_retail_sale(
 @router.get("/retail-sales/{sale_id}")
 async def get_retail_sale(sale_id: uuid.UUID, _: RetailSeller, db: SessionDep) -> RetailSaleOut:
     return await _sale_out(db, await _load_sale(db, sale_id))
+
+
+@router.get("/retail-sales")
+async def list_open_retail_sales(
+    _: RetailSeller, db: SessionDep
+) -> dict[str, list[RetailSaleSummaryOut]]:
+    """Open drafts (#106, spec #95 story 43): a sale interrupted by a phone call or a page
+    refresh is not lost. Newest first, capped at `OPEN_DRAFT_SALES_LIMIT`."""
+    sales = list(
+        await db.scalars(
+            select(RetailSale)
+            .where(RetailSale.status == "draft")
+            .order_by(RetailSale.created_at.desc())
+            .limit(OPEN_DRAFT_SALES_LIMIT)
+        )
+    )
+    customer_ids = {s.customer_id for s in sales if s.customer_id is not None}
+    names = (
+        {
+            c.id: f"{c.first_name} {c.last_name}"
+            for c in await db.scalars(select(Customer).where(Customer.id.in_(customer_ids)))
+        }
+        if customer_ids
+        else {}
+    )
+    return {
+        "retail_sales": [
+            RetailSaleSummaryOut(
+                id=str(s.id),
+                customer_id=str(s.customer_id) if s.customer_id is not None else None,
+                customer_name=names.get(s.customer_id) if s.customer_id is not None else None,
+                sold_by_staff_id=str(s.sold_by_staff_id),
+                line_count=len(s.lines),
+                created_at=s.created_at,
+                updated_at=s.updated_at,
+            )
+            for s in sales
+        ]
+    }
 
 
 @router.patch("/retail-sales/{sale_id}")
@@ -796,26 +953,60 @@ async def issue_retail_sale(
     ],
 )
 async def list_retail_invoices(
-    _: RetailSeller, db: SessionDep, customer_id: uuid.UUID | None = None
-) -> dict[str, list[RetailInvoiceSummaryOut]]:
-    """`?customer_id=` narrows to one client's retail history (a linked sale's invoice)."""
-    query = select(RetailInvoice).order_by(RetailInvoice.invoice_number)
+    _: RetailSeller,
+    db: SessionDep,
+    customer_id: uuid.UUID | None = None,
+    from_: Annotated[Date | None, Query(alias="from")] = None,
+    to: Date | None = None,
+    status: Literal["outstanding", "paid", "cancelled"] | None = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=INVOICE_LIST_MAX_PAGE_SIZE)] = INVOICE_LIST_PAGE_SIZE,
+) -> RetailInvoiceListOut:
+    """The retail half of the Invoices tab (#99) — `?customer_id=` narrows to one client's
+    retail history (a linked sale's invoice), the same date/status/pagination shape
+    `billing/invoices.py::list_invoices` gives the service side, kept as a separate list and a
+    separate numbering series (CLAUDE.md: "Services and retail invoice separately")."""
+    from_date, to_date, start, end, timezone = await invoice_list_window(
+        db, from_, to, whole_history=customer_id is not None
+    )
+    # Outer join: an anonymous walk-in sale has no customer row at all (the row reads
+    # "Walk-in" client-side) — never PHI either way, same reasoning as the service list.
+    query = (
+        select(RetailInvoice, Customer.first_name, Customer.last_name)
+        .outerjoin(Customer, Customer.id == RetailInvoice.customer_id)
+        .where(RetailInvoice.issued_at >= start, RetailInvoice.issued_at < end)
+    )
     if customer_id is not None:
         query = query.where(RetailInvoice.customer_id == customer_id)
-    invoices = await db.scalars(query)
-    return {
-        "retail_invoices": [
+    rows = list(await db.execute(query.order_by(RetailInvoice.invoice_number.desc())))
+    invoices = [r[0] for r in rows]
+    names = {r[0].id: (f"{r[1]} {r[2]}" if r[1] is not None else None) for r in rows}
+    by_id = await balances(db, invoices)
+    if status is not None:
+        invoices = [i for i in invoices if invoice_list_status(i, by_id[i.id]) == status]
+    total = len(invoices)
+    start_row = (page - 1) * page_size
+    page_rows = invoices[start_row : start_row + page_size]
+    return RetailInvoiceListOut(
+        retail_invoices=[
             RetailInvoiceSummaryOut(
                 id=str(i.id),
                 invoice_number=i.invoice_number,
                 customer_id=str(i.customer_id) if i.customer_id is not None else None,
+                customer_name=names[i.id],
                 status=i.status,
+                list_status=invoice_list_status(i, by_id[i.id]),
                 grand_total_cents=i.grand_total_cents,
                 issued_at=i.issued_at,
+                **asdict(by_id[i.id]),
             )
-            for i in invoices
-        ]
-    }
+            for i in page_rows
+        ],
+        total=total,
+        from_=from_date,
+        to=to_date,
+        timezone=timezone,
+    )
 
 
 @router.get(

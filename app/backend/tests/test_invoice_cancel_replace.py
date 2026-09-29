@@ -97,6 +97,34 @@ async def test_cancel_retains_the_original_and_reopens_its_bill_as_the_replaceme
     assert len(draft.json()["lines"]) == len(original["lines"])
 
 
+async def test_the_reopened_draft_exposes_which_invoice_it_replaces(client):
+    """#107: `BillOut.replaces_invoice_id` — the frontend's own "Replaces #N" banner looks the
+    original number and reason up by this id (`GET /invoices/{id}`), the same shape as retail's
+    `RetailSale.replaces_retail_invoice_id`, so both cancel flows read the same way."""
+    invoice_id = await issue_an_invoice(client, price_cents=12000)
+    bill_id = (await cancel(client, invoice_id))["replacement_bill_id"]
+
+    draft = (await client.get(f"/api/bills/{bill_id}")).json()
+    assert draft["replaces_invoice_id"] == invoice_id
+
+    # Reissuing then cancelling again moves the pointer to the newer cancelled invoice — the
+    # same bill, since a cancel always reopens the one bill it was issued from.
+    replacement = await reissue(client, bill_id)
+    again = await cancel(client, replacement["id"], reason="Still wrong")
+    assert again["replacement_bill_id"] == bill_id
+    draft_again = (await client.get(f"/api/bills/{bill_id}")).json()
+    assert draft_again["replaces_invoice_id"] == replacement["id"]
+
+
+async def test_an_ordinary_draft_bill_replaces_nothing(client):
+    await as_admin(client)
+    bill_id, _ = await complete_a_visit(client, price_cents=5000)
+
+    draft = (await client.get(f"/api/bills/{bill_id}")).json()
+
+    assert draft["replaces_invoice_id"] is None
+
+
 async def test_a_still_valid_override_carries_onto_the_replacement_draft(client):
     await as_admin(client)
     bill_id, _ = await complete_a_visit(client, price_cents=12000)
@@ -122,8 +150,10 @@ async def test_reissuing_the_draft_links_the_lineage_both_ways_with_a_new_number
     original = (await client.get(f"{INVOICES}/{invoice_id}")).json()
     assert original["replaced_by_invoice_id"] == replacement["id"]
     assert original["status"] == "cancelled"
+    # #99: the list is newest-issued first now (`billing/invoices.py::list_invoices`), so the
+    # replacement (the higher invoice number) leads.
     listed = (await client.get(INVOICES)).json()["invoices"]
-    assert [i["status"] for i in listed] == ["cancelled", "issued"]
+    assert [i["status"] for i in listed] == ["issued", "cancelled"]
 
 
 async def test_cancelling_an_unknown_invoice_404s(client):

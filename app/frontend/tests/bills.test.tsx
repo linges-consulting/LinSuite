@@ -80,6 +80,9 @@ function bill(overrides: Record<string, unknown> = {}) {
     override_reason: null,
     bill_override_requests_enabled: false,
     inline_admin_bill_edit_enabled: false,
+    // #107: null for an ordinary draft — set only while this draft is a cancel & replace
+    // reopening.
+    replaces_invoice_id: null,
     ...overrides,
   }
 }
@@ -89,9 +92,12 @@ function billsStub(
     capabilities?: string[]
     bill?: ReturnType<typeof bill>
     applyResponse?: { status: number; body: unknown }
+    /** #107: the cancelled invoice `bill.replaces_invoice_id` points at — the "Replaces #N"
+     *  banner's own fallback read (`GET /api/invoices/{id}`) when there is no router state. */
+    replacesInvoice?: { id: string; invoice_number: number; cancel_reason: string }
   } = {},
 ) {
-  const { capabilities = ['billing.view'], applyResponse } = opts
+  const { capabilities = ['billing.view'], applyResponse, replacesInvoice } = opts
   let current = opts.bill ?? bill()
   const applied: string[][] = []
   const requests: any[] = []
@@ -223,6 +229,9 @@ function billsStub(
         }
         return Response.json(current)
       }
+      if (replacesInvoice && parsed.pathname === `/api/invoices/${replacesInvoice.id}`) {
+        return Response.json(replacesInvoice)
+      }
       const billMatch = parsed.pathname.match(/^\/api\/bills\/([^/]+)$/)
       if (billMatch) {
         if (billMatch[1] !== current.id) {
@@ -238,19 +247,19 @@ function billsStub(
 
 // --- nav gating -----------------------------------------------------------------------------
 
-test('the Bills nav entry is offered when billing.view is held', async () => {
+test('the Billing nav entry is offered when billing.view is held', async () => {
   billsStub()
   renderApp('/')
 
-  expect(await screen.findByRole('link', { name: 'Bills' })).toBeInTheDocument()
+  expect(await screen.findByRole('link', { name: 'Billing' })).toBeInTheDocument()
 })
 
-test('without billing.view there is no Bills nav entry', async () => {
+test('without billing.view there is no Billing nav entry', async () => {
   billsStub({ capabilities: ['schedule.view'] })
   renderApp('/')
 
   await screen.findByRole('link', { name: 'Schedule' })
-  await waitFor(() => expect(screen.queryByRole('link', { name: 'Bills' })).not.toBeInTheDocument())
+  await waitFor(() => expect(screen.queryByRole('link', { name: 'Billing' })).not.toBeInTheDocument())
 })
 
 // --- the list and the detail screen ---------------------------------------------------------
@@ -404,4 +413,28 @@ test('a wrong admin password on the inline auth dialog is refused', async () => 
   await user.click(screen.getByRole('button', { name: 'Continue' }))
 
   expect(await screen.findByRole('alert')).toHaveTextContent('Incorrect email or password')
+})
+
+// --- cancel & replace's "Replaces #N" banner (#107) ------------------------------------------
+
+test('a reopened draft with no router state fetches the cancelled original for its Replaces banner', async () => {
+  // The direct-link/reload case: no `navigate(..., { state })` to read, so the banner comes
+  // from `bill.replaces_invoice_id` (#107's own backend field) plus a fetch of that invoice.
+  billsStub({
+    bill: bill({ replaces_invoice_id: 'inv1' }),
+    replacesInvoice: { id: 'inv1', invoice_number: 42, cancel_reason: 'Booked the wrong service' },
+  })
+  renderApp('/bills/b1')
+
+  await screen.findByRole('heading', { name: 'Priya Nair' })
+  expect(await screen.findByText('Replaces #42')).toBeInTheDocument()
+  expect(screen.getByText('Booked the wrong service')).toBeInTheDocument()
+})
+
+test('an ordinary draft bill shows no Replaces banner', async () => {
+  billsStub()
+  renderApp('/bills/b1')
+
+  await screen.findByRole('heading', { name: 'Priya Nair' })
+  expect(screen.queryByText(/^Replaces #/)).not.toBeInTheDocument()
 })

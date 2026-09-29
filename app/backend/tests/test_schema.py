@@ -100,6 +100,9 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     # #72, 0061: the package credit redemption ledger — spending a credit is a new row.
     "package_credit_redemptions": ("SELECT", "INSERT"),
     "package_credit_voids": ("SELECT", "INSERT"),  # #73, 0062
+    # #111, 0072: the transfer ledger — append-only, `commission_postings`'s own shape, minus
+    # the purge-role bypass those older tables still carry (created after 0067's default-deny).
+    "package_transfers": ("SELECT", "INSERT"),
 }
 # The purge role reads everywhere and deletes from exactly four tables (#83; ADR-0001
 # amendment "purge-role default-deny") — the ones `customers/tasks.py::_shred` actually
@@ -153,6 +156,7 @@ TRIGGERS = (
     ("retail_return_lines", "retail_return_lines_no_rewrite"),
     ("package_credit_redemptions", "package_credit_redemptions_guard"),
     ("package_credit_voids", "package_credit_voids_no_rewrite"),
+    ("package_transfers", "package_transfers_no_rewrite"),
 )
 
 

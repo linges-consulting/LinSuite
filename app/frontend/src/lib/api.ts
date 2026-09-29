@@ -1256,6 +1256,22 @@ export async function receiveStock(
   return res.json()
 }
 
+/** A counted correction (`inventory.adjust`): `delta` is signed, already computed from the
+ *  counted quantity against on-hand — the server records exactly what is sent. */
+export async function adjustStock(
+  productId: string,
+  variantId: string,
+  quantityDelta: number,
+  reason: string,
+): Promise<ProductRow> {
+  const res = await send('POST', `/api/admin/products/${productId}/variants/${variantId}/adjust`, {
+    quantity_delta: quantityDelta,
+    reason,
+  })
+  if (!res.ok) throw await failure(res, 'Could not adjust the stock')
+  return res.json()
+}
+
 export async function createVariant(
   productId: string,
   draft: ProductVariantDraft,
@@ -1293,6 +1309,324 @@ export async function reactivateVariant(productId: string, variantId: string): P
   )
   if (!res.ok) throw await failure(res, 'Could not reactivate the variant')
   return res.json()
+}
+
+// --- packages: prepaid credit definitions (Settings → Packages, #101) ----------------------
+
+/** One service a package definition carries credits for. `service_active` is carried the
+ *  same way `ServiceRequirement.resource_active` is — a definition that already named a
+ *  service which has since been deactivated has to say so rather than go quietly wrong. */
+export type PackageDefinitionServiceRow = {
+  service_id: string
+  service_name: string
+  service_active: boolean
+  credits: number
+}
+
+/** A package or bundle definition: what it costs, how long a purchase is good for, and the
+ *  services and credit counts it carries. `services` is never empty — see
+ *  `billing/packages.py`'s module docstring for why a definition with none is not
+ *  representable at all, not just an edge case of a real one. */
+export type PackageDefinitionRow = {
+  id: string
+  name: string
+  description: string | null
+  price_cents: number
+  /** Null: never expires. Otherwise, days from the purchase date. */
+  expires_after_days: number | null
+  transferable: boolean
+  tax_component_keys: string[]
+  tax_convention: TaxConvention
+  active: boolean
+  services: PackageDefinitionServiceRow[]
+}
+
+export type PackageDefinitionServiceDraft = { service_id: string; credits: number }
+
+/** The scalar fields, on both create and edit. `services` is its own field on create (the
+ *  whole set, required) and its own endpoint on edit (`PUT /{id}/services`) — the same split
+ *  `ServiceDraft` keeps for eligible staff and requirements. */
+export type PackageDefinitionDraft = {
+  name: string
+  description: string | null
+  price_cents: number
+  expires_after_days: number | null
+  transferable: boolean
+  tax_component_keys: string[]
+  tax_convention: TaxConvention
+}
+
+export async function fetchPackageDefinitions(
+  includeInactive = false,
+): Promise<PackageDefinitionRow[]> {
+  const res = await fetch(`/api/admin/packages${includeInactive ? '?include_inactive=true' : ''}`)
+  if (!res.ok) throw await failure(res, 'Could not load the packages')
+  return (await res.json()).packages
+}
+
+export async function createPackageDefinition(
+  draft: PackageDefinitionDraft & { services: PackageDefinitionServiceDraft[] },
+): Promise<PackageDefinitionRow> {
+  const res = await send('POST', '/api/admin/packages', draft)
+  if (!res.ok) throw await failure(res, 'Could not create the package')
+  return res.json()
+}
+
+export async function updatePackageDefinition(
+  id: string,
+  draft: Partial<PackageDefinitionDraft>,
+): Promise<PackageDefinitionRow> {
+  const res = await send('PATCH', `/api/admin/packages/${id}`, draft)
+  if (!res.ok) throw await failure(res, 'Could not save the package')
+  return res.json()
+}
+
+/** The whole services set, replaced — the same "nothing half-saved" shape
+ *  `replaceServiceRequirements` uses. */
+export async function replacePackageDefinitionServices(
+  id: string,
+  services: PackageDefinitionServiceDraft[],
+): Promise<PackageDefinitionRow> {
+  const res = await send('PUT', `/api/admin/packages/${id}/services`, { services })
+  if (!res.ok) throw await failure(res, "Could not save the package's services")
+  return res.json()
+}
+
+export async function deactivatePackageDefinition(id: string): Promise<PackageDefinitionRow> {
+  const res = await send('POST', `/api/admin/packages/${id}/deactivate`, {})
+  if (!res.ok) throw await failure(res, 'Could not deactivate the package')
+  return res.json()
+}
+
+export async function reactivatePackageDefinition(id: string): Promise<PackageDefinitionRow> {
+  const res = await send('POST', `/api/admin/packages/${id}/reactivate`, {})
+  if (!res.ok) throw await failure(res, 'Could not reactivate the package')
+  return res.json()
+}
+
+// --- packages: selling and holding one (client Packages tab, #108) -------------------------
+
+/** What front desk sees to sell (`GET /api/packages`, `billing.view`, Staff Mode) — active
+ *  packages only, and only what selling one needs: unlike `PackageDefinitionRow`, no
+ *  `description`/`transferable`/`active`, which stay the admin screen's own fields. */
+export type SellablePackageServiceRow = { service_id: string; service_name: string; credits: number }
+export type SellablePackageRow = {
+  id: string
+  name: string
+  price_cents: number
+  expires_after_days: number | null
+  tax_convention: TaxConvention
+  services: SellablePackageServiceRow[]
+}
+
+export async function fetchSellablePackages(): Promise<SellablePackageRow[]> {
+  const res = await fetch('/api/packages', { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the packages')
+  return (await res.json()).packages
+}
+
+export async function purchasePackage(
+  definitionId: string,
+  customerId: string,
+): Promise<PackagePurchase> {
+  const res = await send('POST', `/api/packages/${definitionId}/purchase`, {
+    customer_id: customerId,
+  })
+  if (!res.ok) throw await failure(res, 'Could not sell this package')
+  return res.json()
+}
+
+/** One credit grant on a purchase (`GET /api/packages/{purchase_id}` / the purchase endpoint's
+ *  own frozen allocation, distinct from `ClientPackagePurchaseCredit` below, which tracks
+ *  remaining/used rather than the allocation). */
+export type PackagePurchaseCredit = {
+  service_id: string
+  credits_total: number
+  allocated_price_cents: number
+}
+
+/** `POST /api/packages/{id}/purchase`'s response — the frozen purchase plus the invoice it was
+ *  issued as. `invoice_id` is a plain service `invoices` row (`ck_invoices_source_xor`): the
+ *  same invoice view a service invoice opens in, at `/bills/invoices/{invoice_id}`. */
+export type PackagePurchase = {
+  id: string
+  package_definition_id: string
+  customer_id: string
+  name: string
+  price_cents: number
+  expires_after_days: number | null
+  expires_at: string | null
+  purchased_at: string
+  credits_activated: boolean
+  activated_at: string | null
+  credits_voided_at: string | null
+  credits: PackagePurchaseCredit[]
+  invoice_id: string
+  invoice_number: number
+  computed_subtotal_cents: number
+  computed_tax_total_cents: number
+  tax_totals_by_component: Record<string, number>
+  grand_total_cents: number
+}
+
+/** `GET /api/packages/purchases/{id}` — the frozen purchase shape (`billing.view`, logged like
+ *  any other client-scoped financial read): what was actually bought, independent of credits
+ *  used since. The invoice view (#102 gap fix) reads this to show a package invoice's contents
+ *  in place of its always-empty `lines`, since `InvoiceOut` deliberately does not duplicate
+ *  this module's response shape (`billing/invoices.py::InvoiceOut`'s own docstring). */
+export async function fetchPackagePurchase(purchaseId: string): Promise<PackagePurchase> {
+  const res = await fetch(`/api/packages/purchases/${encodeURIComponent(purchaseId)}`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) throw await failure(res, 'Could not load this package purchase')
+  return res.json()
+}
+
+/** #109: `POST /api/packages/purchases/{id}/refund` — `billing.manage`, Admin Mode. Standard
+ *  (no `exception`) refunds everything the purchase invoice holds and voids every credit, but
+ *  only while nothing has been redeemed. `exception` is the manual goodwill path
+ *  (`billing/package_refund.py::RefundException`): the amount is required; the two choices
+ *  default server-side when omitted (`cancel_remaining_credits`: cancel on a full refund, keep
+ *  on a partial one; `reverse_commission`: preserve/`false`) but the resolved choices are
+ *  always logged. */
+export type PackageRefundBody = {
+  reason: string
+  exception?: {
+    amount_cents: number
+    cancel_remaining_credits?: boolean | null
+    reverse_commission?: boolean
+  }
+}
+
+export type PackageRefundResult = {
+  package_purchase_id: string
+  invoice: Invoice
+  refund: RefundEntry | null
+  credits_voided: boolean
+  commission_reversals: number
+}
+
+export async function refundPackagePurchase(
+  purchaseId: string,
+  body: PackageRefundBody,
+): Promise<PackageRefundResult> {
+  const res = await send('POST', `/api/packages/purchases/${encodeURIComponent(purchaseId)}/refund`, body)
+  if (!res.ok) throw await failure(res, 'Could not refund this package')
+  return res.json()
+}
+
+/** One service's remaining/used credits on a client's purchase
+ *  (`ClientPackagePurchaseCreditOut`). `used_by_you` (#111) is this tab's own client's
+ *  redemptions specifically — the old holder's own history on a transferred-out purchase,
+ *  distinct from `credits_used`, which is every holder's combined usage. */
+export type ClientPackagePurchaseCredit = {
+  service_id: string
+  service_name: string
+  credits_total: number
+  credits_used: number
+  credits_remaining: number
+  used_by_you: number
+}
+
+/** One hop of a purchase's transfer chain (`TransferHopOut`, #111). */
+export type PackageTransferHop = {
+  id: string
+  from_customer_id: string
+  from_customer_name: string
+  to_customer_id: string
+  to_customer_name: string
+  reason: string
+  override: boolean
+  transferred_at: string
+}
+
+/** A client's Packages tab (`GET /api/customers/{id}/package-purchases`, `billing.view`,
+ *  logged like any other client-scoped financial read — `core/access_log.py`). `customer_id`
+ *  is the purchaser, permanently. #111: `current_holder_id`/`current_holder_name` are derived
+ *  (the `to` of the purchase's latest transfer, else the purchaser); `held_by_viewer` says
+ *  whether *this* tab's client is that holder — false on a transferred-out purchase, which
+ *  still lists here (spec #96 story 22) so the old holder keeps their history. */
+export type ClientPackagePurchase = {
+  id: string
+  package_definition_id: string
+  name: string
+  price_cents: number
+  customer_id: string
+  purchaser_name: string
+  current_holder_id: string
+  current_holder_name: string
+  held_by_viewer: boolean
+  transferable: boolean
+  transfers: PackageTransferHop[]
+  purchased_at: string
+  expires_at: string | null
+  credits_activated: boolean
+  credits_voided_at: string | null
+  invoice_id: string
+  invoice_number: number
+  credits: ClientPackagePurchaseCredit[]
+}
+
+export async function fetchClientPackagePurchases(
+  customerId: string,
+): Promise<ClientPackagePurchase[]> {
+  const res = await fetch(`/api/customers/${customerId}/package-purchases`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load this client’s packages')
+  return (await res.json()).purchases
+}
+
+/** #111: `POST /api/packages/purchases/{id}/transfer` — `billing.manage`, Admin Mode. Moves
+ *  the purchase's whole remaining balance to `to_customer_id`; `from_customer_id` is the
+ *  admin's belief about the current holder, checked against the row-locked truth (refused
+ *  409 if someone already transferred it). `override` is required — checked server-side — only
+ *  when the package definition is non-transferable. */
+export type PackageTransferBody = {
+  to_customer_id: string
+  from_customer_id: string
+  reason: string
+  override: boolean
+}
+
+export type PackageTransferResult = {
+  package_purchase_id: string
+  current_holder_id: string
+  current_holder_name: string
+  transfers: PackageTransferHop[]
+}
+
+export async function transferPackagePurchase(
+  purchaseId: string,
+  body: PackageTransferBody,
+): Promise<PackageTransferResult> {
+  const res = await send(
+    'POST',
+    `/api/packages/purchases/${encodeURIComponent(purchaseId)}/transfer`,
+    body,
+  )
+  if (!res.ok) throw await failure(res, 'Could not transfer this package')
+  return res.json()
+}
+
+/** The transfer dialog's own warning (#111, spec #96 story 18): the current holder's upcoming
+ *  confirmed appointments for the services this purchase credits — not a refusal, since
+ *  credits deduct on completion, not booking; those visits simply won't find the credits once
+ *  the holder changes. */
+export type UpcomingAppointmentForTransfer = {
+  id: string
+  starts_at: string
+  service_name: string
+  staff_name: string
+}
+
+export async function fetchUpcomingAppointmentsForTransfer(
+  purchaseId: string,
+): Promise<UpcomingAppointmentForTransfer[]> {
+  const res = await fetch(
+    `/api/packages/purchases/${encodeURIComponent(purchaseId)}/upcoming-appointments`,
+    { cache: 'no-store' },
+  )
+  if (!res.ok) throw await failure(res, 'Could not load upcoming appointments')
+  return (await res.json()).appointments
 }
 
 // --- forms: templates and their frozen versions (Settings → Forms) ---------------------------
@@ -1855,6 +2189,63 @@ export async function fetchAccessLog(
   const res = await fetch(`/api/admin/customers/${encodeURIComponent(id)}/access-log?${params}`)
   if (!res.ok) throw await failure(res, 'Could not load the access history')
   return res.json()
+}
+
+// --- CSV exports (#86/#95's shared mechanism): request, poll, download -----------------
+
+/** The one shape every export kind's request/poll endpoint answers in
+ *  (`core/exports.py`'s `ReportExport`, as `access_log`/`commission`/`package_liability`
+ *  each serialise it) — `<ExportControl>` (`components/export-control.tsx`) knows only this
+ *  shape, never a report's own params. */
+export type ExportJob = {
+  id: string
+  status: 'pending' | 'ready' | 'failed'
+  created_at: string
+  completed_at: string | null
+  download_url: string | null
+}
+
+/** Fetches a ready export and saves it under the filename the server chose
+ *  (`Content-Disposition`, never guessed client-side) — the one download mechanics every
+ *  export kind shares. Rejects with the same `ApiError` a 410/409 always throws. */
+async function downloadExportFile(url: string): Promise<void> {
+  const res = await fetch(url, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not download the export')
+  const filename = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') ?? '')?.[1] ?? 'export.csv'
+  const blobUrl = URL.createObjectURL(await res.blob())
+  const link = document.createElement('a')
+  link.href = blobUrl
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(blobUrl)
+}
+
+/** Requests the client access-log CSV (#87) for the panel's own range — `audit.view`, Admin
+ *  Mode. Polled with `fetchAccessLogExportStatus`, downloaded with `downloadAccessLogExport`. */
+export async function requestAccessLogExport(
+  customerId: string,
+  query: { from?: string; to?: string },
+): Promise<ExportJob> {
+  const res = await post(
+    `/api/admin/customers/${encodeURIComponent(customerId)}/access-log/exports`,
+    { from: query.from, to: query.to },
+  )
+  if (!res.ok) throw await failure(res, 'Could not request the export')
+  return res.json()
+}
+
+export async function fetchAccessLogExportStatus(customerId: string, exportId: string): Promise<ExportJob> {
+  const res = await fetch(
+    `/api/admin/customers/${encodeURIComponent(customerId)}/access-log/exports/${encodeURIComponent(exportId)}`,
+  )
+  if (!res.ok) throw await failure(res, 'Could not check the export')
+  return res.json()
+}
+
+export function downloadAccessLogExport(customerId: string, exportId: string): Promise<void> {
+  return downloadExportFile(
+    `/api/admin/customers/${encodeURIComponent(customerId)}/access-log/exports/${encodeURIComponent(exportId)}/csv`,
+  )
 }
 
 /** Every field the edit dialog can send. A key left out of the object is left alone on the
@@ -2503,6 +2894,10 @@ export type Bill = {
   override_reason: string | null
   bill_override_requests_enabled: boolean
   inline_admin_bill_edit_enabled: boolean
+  /** #107: set while this draft is a cancel & replace reopening of a still-unreissued
+   *  cancelled invoice — `fetchInvoice(replaces_invoice_id)` gets its number and reason for
+   *  the "Replaces #N" banner. */
+  replaces_invoice_id: string | null
 }
 
 export type BillSummary = {
@@ -2642,6 +3037,535 @@ export async function applyInlineAdminEdit(
   return res.json()
 }
 
+// --- the Invoices lists: service and retail, filtered and paginated (#99) -----------------
+
+/** `outstanding | paid | cancelled` — derived server-side from the same balance the invoice
+ *  view itself reads (`billing/payments.py::invoice_list_status`), never computed here. */
+export type InvoiceListStatus = 'outstanding' | 'paid' | 'cancelled'
+
+/** The fields every row of either list carries, beyond its own `id`/`invoice_number`/
+ *  `customer_id`/`status`/`issued_at` — the balance breakdown `billing/payments.py::Balance`
+ *  computes, the same figures the invoice view (#102) will show in full. */
+export type InvoiceListBalance = {
+  outstanding_cents: number
+  pending_insurer_cents: number
+  client_outstanding_cents: number
+  checkout_complete: boolean
+  refunded_cents: number
+  prepaid_cents: number
+  held_credit_cents: number
+}
+
+export type InvoiceSummary = InvoiceListBalance & {
+  id: string
+  invoice_number: number
+  customer_id: string
+  /** Never PHI — joined in server-side, so the row never triggers an audited profile read. */
+  customer_name: string
+  /** The raw ledger status (`issued`/`cancelled`) — `list_status` is the badge to show. */
+  status: 'issued' | 'cancelled'
+  list_status: InvoiceListStatus
+  grand_total_cents: number
+  issued_at: string
+}
+
+export type RetailInvoiceSummary = InvoiceListBalance & {
+  id: string
+  invoice_number: number
+  /** `null` for an anonymous walk-in sale — the row reads "Walk-in". */
+  customer_id: string | null
+  customer_name: string | null
+  status: 'issued' | 'cancelled'
+  list_status: InvoiceListStatus
+  grand_total_cents: number
+  issued_at: string
+}
+
+/** Query params both lists share; `from`/`to` are business-local dates (server default: the
+ *  last 30 days). */
+type InvoiceListQuery = {
+  customer_id?: string
+  from?: string
+  to?: string
+  status?: InvoiceListStatus
+  page?: number
+  page_size?: number
+}
+
+function invoiceListParams(query: InvoiceListQuery): URLSearchParams {
+  const params = new URLSearchParams()
+  if (query.customer_id) params.set('customer_id', query.customer_id)
+  if (query.from) params.set('from', query.from)
+  if (query.to) params.set('to', query.to)
+  if (query.status) params.set('status', query.status)
+  if (query.page) params.set('page', String(query.page))
+  if (query.page_size) params.set('page_size', String(query.page_size))
+  return params
+}
+
+export type InvoiceList = {
+  invoices: InvoiceSummary[]
+  total: number
+  /** The date range actually applied — the server's 30-day default when none was sent. */
+  from: string
+  to: string
+  timezone: string
+}
+
+/** Service invoices only — `billing/invoices.py::list_invoices`. `?customer_id=` is the same
+ *  narrowing (and the same audited read, logged only when filtered) a client's own Invoices
+ *  tab reuses this call for. */
+export async function fetchInvoices(query: InvoiceListQuery = {}): Promise<InvoiceList> {
+  const res = await fetch(`/api/invoices?${invoiceListParams(query)}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the invoices')
+  return res.json()
+}
+
+export type RetailInvoiceList = {
+  retail_invoices: RetailInvoiceSummary[]
+  total: number
+  from: string
+  to: string
+  timezone: string
+}
+
+/** Retail invoices only — `billing/retail_sales.py::list_retail_invoices`, kept as its own
+ *  list and its own numbering series (never merged with the service list). */
+export async function fetchRetailInvoices(query: InvoiceListQuery = {}): Promise<RetailInvoiceList> {
+  const res = await fetch(`/api/retail-invoices?${invoiceListParams(query)}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the retail invoices')
+  return res.json()
+}
+
+// --- one invoice (#102): lines, discounts, per-line tax, the override adjustment, the full
+// balance breakdown and replacement lineage both ways -----------------------------------------
+
+export type InvoiceLineDiscount = {
+  discount_id: string
+  discount_name: string
+  discount_kind: 'percentage' | 'fixed'
+  percentage_bp: number | null
+  amount_cents: number | null
+  resolved_amount_cents: number | null
+}
+
+export type InvoiceLineTax = {
+  component_code: string
+  rate_bp: number
+  amount_cents: number
+}
+
+export type InvoiceLine = {
+  id: string
+  appointment_id: string
+  service_id: string
+  service_name: string
+  staff_id: string
+  staff_name: string
+  price_cents: number
+  discounted_cents: number
+  pretax_cents: number
+  tax_cents: number
+  line_total_cents: number
+  prepaid_cents: number
+  tax_convention: 'inclusive' | 'exclusive'
+  /** Non-zero only under a bill's manual override (spread across the lines at issue). */
+  override_adjustment_cents: number
+  discounts: InvoiceLineDiscount[]
+  taxes: InvoiceLineTax[]
+}
+
+/** `GET /api/invoices/{id}` — a service invoice, frozen at issue (`billing/invoices.py::
+ *  InvoiceOut`). The full balance breakdown (`InvoiceListBalance`) plus lineage both ways. */
+export type Invoice = InvoiceListBalance & {
+  id: string
+  invoice_number: number
+  service_bill_id: string | null
+  package_purchase_id: string | null
+  customer_id: string
+  customer_name: string
+  status: 'issued' | 'cancelled'
+  computed_subtotal_cents: number
+  computed_discount_total_cents: number
+  computed_tax_total_cents: number
+  computed_grand_total_cents: number
+  tax_totals_by_component: Record<string, number>
+  tax_rates_by_component: Record<string, number>
+  override_applied_cents: number | null
+  override_reason: string | null
+  override_tax_convention: 'inclusive' | 'exclusive' | null
+  grand_total_cents: number
+  issued_at: string
+  issued_by: string
+  /** #68 lineage, both ways: what this invoice replaced, and what replaced it. */
+  replaces_invoice_id: string | null
+  replaced_by_invoice_id: string | null
+  cancelled_at: string | null
+  cancel_reason: string | null
+  lines: InvoiceLine[]
+}
+
+export async function fetchInvoice(id: string): Promise<Invoice> {
+  const res = await fetch(`/api/invoices/${encodeURIComponent(id)}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load this invoice')
+  return res.json()
+}
+
+/** #102's other slot: issuing a reviewed bill lands here — `POST /bills/{id}/issue`. */
+export async function issueBill(billId: string): Promise<Invoice> {
+  const res = await send('POST', `/api/bills/${encodeURIComponent(billId)}/issue`, {})
+  if (!res.ok) throw await failure(res, 'Could not issue this invoice')
+  return res.json()
+}
+
+/** `POST /api/invoices/{id}/cancel` (`billing/invoices.py::CancelledOut`) — #107's cancel &
+ *  replace. `replacement_bill_id` is the original's own bill, reopened as a draft with its
+ *  lines, discounts and (if still valid) override carried over; `bill.replaces_invoice_id`
+ *  (once fetched) is how that draft finds its way back to `invoice.invoice_number`/
+ *  `cancel_reason` for the "Replaces #N" banner. */
+export type CancelledInvoiceOut = { invoice: Invoice; replacement_bill_id: string }
+
+export async function cancelInvoice(invoiceId: string, reason: string): Promise<CancelledInvoiceOut> {
+  const res = await send('POST', `/api/invoices/${encodeURIComponent(invoiceId)}/cancel`, { reason })
+  if (!res.ok) throw await failure(res, 'Could not cancel this invoice')
+  return res.json()
+}
+
+export type RetailInvoiceLine = {
+  id: string
+  variant_id: string
+  variant_name: string
+  quantity: number
+  unit_price_cents: number
+  discount_cents: number
+  tax_cents: number
+  tax_convention: 'inclusive' | 'exclusive'
+  line_total_cents: number
+  discounts: InvoiceLineDiscount[]
+  taxes: InvoiceLineTax[]
+  staff_id: string
+  /** #105: units already brought back by a return (restocked or not) — `quantity -
+   *  returned_quantity` is what the Returns dialog may still select. */
+  returned_quantity: number
+}
+
+/** `GET /api/retail-invoices/{id}` — the retail counterpart of `Invoice`, same balance and
+ *  lineage shape; `customer_id`/`customer_name` are both `null` for an anonymous walk-in
+ *  sale, which the screen renders as "Walk-in". */
+export type RetailInvoice = InvoiceListBalance & {
+  id: string
+  invoice_number: number
+  retail_sale_id: string
+  customer_id: string | null
+  customer_name: string | null
+  status: 'issued' | 'cancelled'
+  subtotal_cents: number
+  discount_total_cents: number
+  tax_total_cents: number
+  tax_totals_by_component: Record<string, number>
+  grand_total_cents: number
+  sold_by_staff_id: string
+  payment_collector_staff_id: string | null
+  issued_at: string
+  issued_by: string
+  lines: RetailInvoiceLine[]
+  replaces_invoice_id: string | null
+  replaced_by_invoice_id: string | null
+  cancelled_at: string | null
+  cancel_reason: string | null
+}
+
+export async function fetchRetailInvoice(id: string): Promise<RetailInvoice> {
+  const res = await fetch(`/api/retail-invoices/${encodeURIComponent(id)}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load this retail invoice')
+  return res.json()
+}
+
+/** `POST /api/retail-invoices/{id}/cancel` (`billing/retail_sales.py::CancelledRetailOut`) —
+ *  #107's retail cancel & replace. `replacement_sale_id` is a fresh draft sale carrying the
+ *  original's customer and unreturned lines; that draft's own `RetailSale.
+ *  replaces_retail_invoice_id` is how Sell finds its way back to this invoice's number/reason. */
+export type CancelledRetailInvoiceOut = { invoice: RetailInvoice; replacement_sale_id: string }
+
+export async function cancelRetailInvoice(
+  invoiceId: string,
+  reason: string,
+): Promise<CancelledRetailInvoiceOut> {
+  const res = await send('POST', `/api/retail-invoices/${encodeURIComponent(invoiceId)}/cancel`, {
+    reason,
+  })
+  if (!res.ok) throw await failure(res, 'Could not cancel this retail invoice')
+  return res.json()
+}
+
+// --- payments, corrections, refunds and balance exceptions (#103) -----------------------------
+// The same ledger for both invoice kinds (`billing/payments.py`) — `invoiceBase` picks the one
+// URL prefix difference, and every call below reads identically for a service or a retail id.
+
+export type PaymentPayerType = 'client' | 'insurer'
+export type PaymentMethod = 'cash' | 'e_transfer' | 'card' | 'insurer'
+export type PaymentStatus = 'pending' | 'received'
+
+export type PaymentEntry = {
+  id: string
+  invoice_id: string | null
+  retail_invoice_id: string | null
+  payer_type: PaymentPayerType
+  method: PaymentMethod
+  status: PaymentStatus
+  amount_cents: number
+  reference: string | null
+  collected_by: string
+  recorded_at: string
+  /** Set on the *new* entry a correction creates — the id of the entry it supersedes. */
+  corrects_payment_id: string | null
+  correction_reason: string | null
+}
+
+export type PaymentTransfer = {
+  id: string
+  from_invoice_id: string
+  to_invoice_id: string
+  received_cents: number
+  received_insurer_cents: number
+  pending_insurer_cents: number
+  transferred_by: string
+  transferred_at: string
+}
+
+export type RefundEntry = {
+  id: string
+  invoice_id: string | null
+  retail_invoice_id: string | null
+  amount_cents: number
+  reason: string
+  approved_by: string
+  refunded_at: string
+}
+
+export type BalanceException = {
+  id: string
+  invoice_id: string | null
+  retail_invoice_id: string | null
+  authorized_by: string
+  reason: string
+  outstanding_cents_at_authorization: number
+  authorized_at: string
+}
+
+export type RecordPaymentBody = {
+  payer_type: PaymentPayerType
+  method: PaymentMethod
+  amount_cents: number
+  status?: PaymentStatus
+  reference?: string | null
+}
+
+/** Only the fields being changed; the rest carry over from the entry being corrected
+ *  (`billing/payments.py::CorrectPaymentIn`). */
+export type CorrectPaymentBody = {
+  reason: string
+  payer_type?: PaymentPayerType
+  method?: PaymentMethod
+  amount_cents?: number
+  reference?: string | null
+}
+
+function invoiceBase(kind: 'service' | 'retail', invoiceId: string): string {
+  const prefix = kind === 'retail' ? '/api/retail-invoices' : '/api/invoices'
+  return `${prefix}/${encodeURIComponent(invoiceId)}`
+}
+
+export async function fetchPayments(
+  kind: 'service' | 'retail',
+  invoiceId: string,
+): Promise<{ payments: PaymentEntry[]; transfers: PaymentTransfer[] }> {
+  const res = await fetch(`${invoiceBase(kind, invoiceId)}/payments`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load payments')
+  return res.json()
+}
+
+export async function recordPayment(
+  kind: 'service' | 'retail',
+  invoiceId: string,
+  body: RecordPaymentBody,
+): Promise<PaymentEntry> {
+  const res = await send('POST', `${invoiceBase(kind, invoiceId)}/payments`, body)
+  if (!res.ok) throw await failure(res, 'Could not record this payment')
+  return res.json()
+}
+
+export async function correctPayment(
+  kind: 'service' | 'retail',
+  invoiceId: string,
+  paymentId: string,
+  body: CorrectPaymentBody,
+): Promise<PaymentEntry> {
+  const res = await send(
+    'POST',
+    `${invoiceBase(kind, invoiceId)}/payments/${encodeURIComponent(paymentId)}/corrections`,
+    body,
+  )
+  if (!res.ok) throw await failure(res, 'Could not correct this payment')
+  return res.json()
+}
+
+export async function fetchRefunds(
+  kind: 'service' | 'retail',
+  invoiceId: string,
+): Promise<{ refunds: RefundEntry[] }> {
+  const res = await fetch(`${invoiceBase(kind, invoiceId)}/refunds`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load refunds')
+  return res.json()
+}
+
+/** `billing.manage`, Admin Mode — capped server-side at money received. */
+export async function recordRefund(
+  kind: 'service' | 'retail',
+  invoiceId: string,
+  body: { amount_cents: number; reason: string },
+): Promise<RefundEntry> {
+  const res = await send('POST', `${invoiceBase(kind, invoiceId)}/refunds`, body)
+  if (!res.ok) throw await failure(res, 'Could not record this refund')
+  return res.json()
+}
+
+export async function fetchBalanceExceptions(
+  kind: 'service' | 'retail',
+  invoiceId: string,
+): Promise<{ exceptions: BalanceException[] }> {
+  const res = await fetch(`${invoiceBase(kind, invoiceId)}/balance-exceptions`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load balance exceptions')
+  return res.json()
+}
+
+/** `billing.manage`, Admin Mode. */
+export async function recordBalanceException(
+  kind: 'service' | 'retail',
+  invoiceId: string,
+  body: { reason: string },
+): Promise<BalanceException> {
+  const res = await send('POST', `${invoiceBase(kind, invoiceId)}/balance-exceptions`, body)
+  if (!res.ok) throw await failure(res, 'Could not record this balance exception')
+  return res.json()
+}
+
+// --- retail returns (#105, spec #95 story 50) -------------------------------------------------
+
+export type RetailReturnLineIn = {
+  retail_invoice_line_id: string
+  quantity: number
+  /** False for an opened/damaged item: it counts as returned, but never goes back on the shelf. */
+  restock: boolean
+}
+
+export type RetailReturnIn = {
+  reason: string
+  lines: RetailReturnLineIn[]
+  /** Omitted = no money back. Never derived from the lines — the refund is its own decision
+   *  (`billing/retail_sales.py::RetailReturnIn`'s own docstring). */
+  refund_cents?: number
+}
+
+export type RetailReturnOut = {
+  id: string
+  retail_invoice_id: string
+  reason: string
+  refund_id: string | null
+  refund_cents: number | null
+  returned_by: string
+  returned_at: string
+  lines: { id: string; retail_invoice_line_id: string; quantity: number; restocked: boolean }[]
+}
+
+/** `POST /api/retail-invoices/{id}/returns` (`billing.manage`, Admin Mode): restock and refund
+ *  are two independent choices, both recorded in the one return the server makes atomically. */
+export async function returnRetailItems(
+  invoiceId: string,
+  payload: RetailReturnIn,
+): Promise<RetailReturnOut> {
+  const res = await send('POST', `/api/retail-invoices/${encodeURIComponent(invoiceId)}/returns`, payload)
+  if (!res.ok) throw await failure(res, 'Could not record this return')
+  return res.json()
+}
+
+// --- print, email and treatment receipts (#104) ---------------------------------------------
+
+const enc = encodeURIComponent
+
+export const invoicePdfUrl = (customerId: string, invoiceId: string) =>
+  `/api/customers/${enc(customerId)}/invoices/${enc(invoiceId)}/pdf`
+export const receiptPdfUrl = (customerId: string, invoiceId: string, lineId: string) =>
+  `/api/customers/${enc(customerId)}/invoices/${enc(invoiceId)}/receipts/${enc(lineId)}/pdf`
+/** `customerId` null is the anonymous walk-in path (`billing/invoices.py::
+ *  anonymous_retail_invoice_pdf`), never the client-linked one — the server refuses a linked
+ *  document opened at the wrong path (M4 review T4). */
+export const retailInvoicePdfUrl = (invoiceId: string, customerId: string | null) =>
+  customerId
+    ? `/api/customers/${enc(customerId)}/retail-invoices/${enc(invoiceId)}/pdf`
+    : `/api/retail-invoices/${enc(invoiceId)}/pdf`
+
+/** One poll of a print route: 200 is the rendered PDF, as a `Blob` the caller turns into an
+ *  object URL; 202 ("rendering") is a value, not a failure, since the render is still queued
+ *  behind the worker — the caller decides whether to retry. Any other status is a real
+ *  failure (`billing/invoices.py::_pdf`'s only other paths are 200 and 202). */
+export type DocumentPoll = { ready: true; blob: Blob } | { ready: false }
+
+export async function pollDocument(url: string): Promise<DocumentPoll> {
+  const res = await fetch(url, { cache: 'no-store' })
+  if (res.status === 202) return { ready: false }
+  if (!res.ok) throw await failure(res, 'Could not open the document')
+  return { ready: true, blob: await res.blob() }
+}
+
+export type EmailedOut = { status: string; to: string }
+
+/** `to` omitted uses the client's address on file (422 `This client has no email address on
+ *  file.` when there is none — the frontend's cue to ask for one instead); anonymous retail
+ *  refuses that same way when nobody typed one in (`billing/invoices.py::
+ *  email_anonymous_retail_invoice`). */
+export async function emailInvoice(
+  customerId: string,
+  invoiceId: string,
+  to?: string,
+): Promise<EmailedOut> {
+  const res = await send(
+    'POST',
+    `/api/customers/${enc(customerId)}/invoices/${enc(invoiceId)}/email`,
+    to ? { to } : {},
+  )
+  if (!res.ok) throw await failure(res, 'Could not email the invoice')
+  return res.json()
+}
+
+export async function emailTreatmentReceipt(
+  customerId: string,
+  invoiceId: string,
+  lineId: string,
+  to?: string,
+): Promise<EmailedOut> {
+  const res = await send(
+    'POST',
+    `/api/customers/${enc(customerId)}/invoices/${enc(invoiceId)}/receipts/${enc(lineId)}/email`,
+    to ? { to } : {},
+  )
+  if (!res.ok) throw await failure(res, 'Could not email the receipt')
+  return res.json()
+}
+
+export async function emailRetailInvoice(
+  invoiceId: string,
+  customerId: string | null,
+  to?: string,
+): Promise<EmailedOut> {
+  const url = customerId
+    ? `/api/customers/${enc(customerId)}/retail-invoices/${enc(invoiceId)}/email`
+    : `/api/retail-invoices/${enc(invoiceId)}/email`
+  const res = await send('POST', url, to ? { to } : {})
+  if (!res.ok) throw await failure(res, 'Could not email the invoice')
+  return res.json()
+}
+
 // --- CTI: phone lookup, demo mode, the simulated call (Phase 14, #16) -----------------------
 
 /** A previous provider (`scheduling/cti.py`'s own shape): the most recent visit with each
@@ -2694,4 +3618,317 @@ export async function simulateCall(): Promise<CallEvent> {
   const res = await send('POST', '/api/cti/simulate-call', {})
   if (!res.ok) throw await failure(res, 'Could not simulate a call')
   return res.json()
+}
+
+// --- reports: commission and package liability (#95/#110) --------------------------------
+
+/** One posting behind a staff member's totals (`billing/commission_report.py::CommissionRowOut`
+ *  verbatim) — a report row, never edited here. */
+export type CommissionRow = {
+  id: string
+  posted_at: string
+  kind: string
+  source: 'service' | 'retail'
+  staff_id: string
+  staff_name: string
+  invoice_id: string
+  invoice_number: number
+  invoice_status: string
+  service_id: string | null
+  variant_id: string | null
+  commission_rate_bp: number
+  basis_cents: number
+  amount_cents: number
+  payment_status: 'received' | 'partial' | 'pending' | 'voided'
+  invoice_received_cents: number
+  invoice_pending_cents: number
+  commission_received_cents: number
+  commission_pending_cents: number
+}
+
+export type CommissionSourceTotals = {
+  revenue_cents: number
+  commission_cents: number
+  commission_received_cents: number
+  commission_pending_cents: number
+}
+
+export type CommissionReport = {
+  rows: CommissionRow[]
+  service: CommissionSourceTotals
+  retail: CommissionSourceTotals
+  total_earned_cents: number
+  total_received_cents: number
+  total_pending_cents: number
+  payments_received_cents: number
+  payments_pending_cents: number
+  from: string
+  to: string
+  timezone: string
+}
+
+/** `commission.view`, Admin Mode. `from`/`to` default to the server's own 90-day window when
+ *  omitted (`billing/commission_report.py::DEFAULT_DAYS`). */
+export async function fetchCommissionReport(query: {
+  from?: string
+  to?: string
+  staff_id?: string
+}): Promise<CommissionReport> {
+  const params = new URLSearchParams()
+  if (query.from) params.set('from', query.from)
+  if (query.to) params.set('to', query.to)
+  if (query.staff_id) params.set('staff_id', query.staff_id)
+  const res = await fetch(`/api/admin/reports/commission?${params}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the commission report')
+  return res.json()
+}
+
+export async function requestCommissionExport(query: {
+  from?: string
+  to?: string
+  staff_id?: string
+}): Promise<ExportJob> {
+  const res = await post('/api/admin/reports/commission/exports', {
+    from: query.from,
+    to: query.to,
+    staff_id: query.staff_id,
+  })
+  if (!res.ok) throw await failure(res, 'Could not request the export')
+  return res.json()
+}
+
+export async function fetchCommissionExportStatus(exportId: string): Promise<ExportJob> {
+  const res = await fetch(`/api/admin/reports/commission/exports/${encodeURIComponent(exportId)}`)
+  if (!res.ok) throw await failure(res, 'Could not check the export')
+  return res.json()
+}
+
+export function downloadCommissionExport(exportId: string): Promise<void> {
+  return downloadExportFile(`/api/admin/reports/commission/exports/${encodeURIComponent(exportId)}/csv`)
+}
+
+/** One credit line behind a client's unused package value
+ *  (`billing/package_liability.py::LiabilityRowOut` verbatim). */
+export type PackageLiabilityRow = {
+  customer_id: string
+  customer_name: string
+  package_purchase_id: string
+  package_name: string
+  purchased_at: string
+  expires_at: string | null
+  service_id: string
+  service_name: string
+  credits_total: number
+  credits_redeemed: number
+  credits_remaining: number
+  unused_value_cents: number
+}
+
+export type PackageLiabilityCustomerTotal = {
+  customer_id: string
+  customer_name: string
+  credits_remaining: number
+  unused_value_cents: number
+}
+
+export type PackageLiabilityReport = {
+  rows: PackageLiabilityRow[]
+  customers: PackageLiabilityCustomerTotal[]
+  total_unused_value_cents: number
+  as_of: string
+  from: string | null
+  to: string | null
+  timezone: string
+}
+
+/** `billing.manage`, Admin Mode. Unfiltered by default — every client with credits left. */
+export async function fetchPackageLiabilityReport(query: {
+  customer_id?: string
+}): Promise<PackageLiabilityReport> {
+  const params = new URLSearchParams()
+  if (query.customer_id) params.set('customer_id', query.customer_id)
+  const res = await fetch(`/api/admin/reports/package-liability?${params}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the package-liability report')
+  return res.json()
+}
+
+export async function requestPackageLiabilityExport(query: {
+  customer_id?: string
+}): Promise<ExportJob> {
+  const res = await post('/api/admin/reports/package-liability/exports', {
+    customer_id: query.customer_id,
+  })
+  if (!res.ok) throw await failure(res, 'Could not request the export')
+  return res.json()
+}
+
+export async function fetchPackageLiabilityExportStatus(exportId: string): Promise<ExportJob> {
+  const res = await fetch(
+    `/api/admin/reports/package-liability/exports/${encodeURIComponent(exportId)}`,
+  )
+  if (!res.ok) throw await failure(res, 'Could not check the export')
+  return res.json()
+}
+
+export function downloadPackageLiabilityExport(exportId: string): Promise<void> {
+  return downloadExportFile(
+    `/api/admin/reports/package-liability/exports/${encodeURIComponent(exportId)}/csv`,
+  )
+}
+
+// --- Sell (#106, spec #95 stories 42-49): a retail sale's draft cart, before it becomes a
+// `RetailInvoice` at issue (`billing/retail_sales.py`) ------------------------------------------
+
+/** The catalog as Sell's product search reads it (`GET /api/catalog/products`, `inventory/
+ *  routes.py`'s `public` router): active products, active variants only, any signed-in
+ *  account — the same "front-desk work, not administration" reasoning `fetchCatalog` already
+ *  gives the booking screen's own services read. */
+export type CatalogVariant = {
+  id: string
+  name: string
+  sku: string
+  barcode: string | null
+  price_cents: number
+  quantity_on_hand: number
+  low_stock_threshold: number
+  is_low_stock: boolean
+  tax_component_keys: string[]
+  tax_convention: TaxConvention
+}
+
+export type CatalogProduct = {
+  id: string
+  name: string
+  description: string | null
+  variants: CatalogVariant[]
+}
+
+export async function fetchProductCatalog(): Promise<CatalogProduct[]> {
+  const res = await fetch('/api/catalog/products', { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the product catalog')
+  return (await res.json()).products
+}
+
+export type RetailSaleLine = {
+  id: string
+  variant_id: string
+  quantity: number
+  unit_price_cents: number
+  tax_convention: TaxConvention
+  discount_amounts: Record<string, number>
+  discount_cents: number
+  tax: LineTax
+  line_total_cents: number
+}
+
+/** `GET /api/retail-sales/{id}` (draft) / every mutation on it — `billing/retail_sales.py::
+ *  RetailSaleOut`. Recomputed live on every read/write, the same "never cached stale across a
+ *  toggle" contract a draft bill already gives. */
+export type RetailSale = {
+  id: string
+  status: 'draft' | 'issued'
+  customer_id: string | null
+  sold_by_staff_id: string
+  payment_collector_staff_id: string | null
+  /** Set on the replacement draft a retail cancel (#107) opens. */
+  replaces_retail_invoice_id: string | null
+  lines: RetailSaleLine[]
+  /** The picker's full offer, `applied` following the current selection — same shape as a
+   *  service bill's own `eligible_discounts`. */
+  eligible_discounts: DiscountChoice[]
+  discount_ids: string[]
+  subtotal_cents: number
+  discount_total_cents: number
+  tax_totals_by_component: Record<string, number>
+  tax_total_cents: number
+  grand_total_cents: number
+  created_at: string
+  updated_at: string
+}
+
+/** Sell's resume list (`GET /api/retail-sales`, no id): open drafts, newest first, capped —
+ *  a sale interrupted by a phone call or a refresh is not lost. */
+export type RetailSaleSummary = {
+  id: string
+  customer_id: string | null
+  customer_name: string | null
+  sold_by_staff_id: string
+  line_count: number
+  created_at: string
+  updated_at: string
+}
+
+export async function fetchOpenRetailSales(): Promise<RetailSaleSummary[]> {
+  const res = await fetch('/api/retail-sales', { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the open sales')
+  return (await res.json()).retail_sales
+}
+
+export async function fetchRetailSale(id: string): Promise<RetailSale> {
+  const res = await fetch(`/api/retail-sales/${encodeURIComponent(id)}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load this sale')
+  return res.json()
+}
+
+export async function startRetailSale(customerId?: string | null): Promise<RetailSale> {
+  const res = await post('/api/retail-sales', { customer_id: customerId ?? null })
+  if (!res.ok) throw await failure(res, 'Could not start this sale')
+  return res.json()
+}
+
+export async function addRetailSaleLine(
+  saleId: string,
+  variantId: string,
+  quantity: number,
+): Promise<RetailSale> {
+  const res = await send('POST', `/api/retail-sales/${encodeURIComponent(saleId)}/lines`, {
+    variant_id: variantId,
+    quantity,
+  })
+  if (!res.ok) throw await failure(res, 'Could not add this product')
+  return res.json()
+}
+
+export async function removeRetailSaleLine(saleId: string, lineId: string): Promise<RetailSale> {
+  const res = await send(
+    'DELETE',
+    `/api/retail-sales/${encodeURIComponent(saleId)}/lines/${encodeURIComponent(lineId)}`,
+  )
+  if (!res.ok) throw await failure(res, 'Could not remove this line')
+  return res.json()
+}
+
+/** Replaces the draft's whole selection in one call, the same shape `applyBillDiscounts`
+ *  already gives the service side. A 422 carries the server's own specific reason verbatim. */
+export async function applyRetailSaleDiscounts(
+  saleId: string,
+  discountIds: string[],
+): Promise<RetailSale> {
+  const res = await send('PUT', `/api/retail-sales/${encodeURIComponent(saleId)}/discounts`, {
+    discount_ids: discountIds,
+  })
+  if (!res.ok) throw await failure(res, 'Could not apply these discounts')
+  return res.json()
+}
+
+/** Issuing lands on the retail invoice with the payment dialog open (`?pay=1`) — a 409 here
+ *  is the stock conflict, its message reading "Not enough stock for '<name>' ...: only N
+ *  left" (`inventory/stock.py::InsufficientStock`). */
+export async function issueRetailSale(saleId: string): Promise<RetailInvoice> {
+  const res = await send('POST', `/api/retail-sales/${encodeURIComponent(saleId)}/issue`, {})
+  if (!res.ok) throw await failure(res, 'Could not issue this sale')
+  return res.json()
+}
+
+/** A 409 issuing a sale is the stock conflict (spec #95 story 47): `error.message` carries
+ *  the variant's name and how many are actually on hand, written for a log line
+ *  (`retail_sales.py::issue_retail_sale`: `"Not enough stock for '<name>' to complete this
+ *  sale: variant <id> has <N> on hand, cannot apply a delta of <d>"`). Parsed here so the
+ *  cart can show "only N left" instead of that sentence verbatim. */
+export function stockConflict(error: unknown): { name: string; available: number } | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null
+  const match = /^Not enough stock for '(.+)' to complete this sale: .*?(\d+) on hand/.exec(
+    error.message,
+  )
+  return match ? { name: match[1], available: Number(match[2]) } : null
 }

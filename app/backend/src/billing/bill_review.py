@@ -22,14 +22,14 @@ with no reapply step.
 
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from datetime import date as Date
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import delete, select
-from sqlalchemy.orm import selectinload
+from sqlalchemy import delete, exists, select
+from sqlalchemy.orm import aliased, selectinload
 
 from auth.capabilities import Requires
 from auth.models import User
@@ -37,6 +37,7 @@ from billing.commission import CommissionDiscountInput
 from billing.discount_resolver import DiscountConflict, DiscountEligibility, is_eligible
 from billing.models import (
     Discount,
+    Invoice,
     ServiceBill,
     ServiceBillDiscount,
     ServiceBillLine,
@@ -47,14 +48,49 @@ from billing.tax import ComponentRate, LineTax, invoice_tax_totals, resolve_rate
 from core.access_log import LogAccessOf
 from core.audit import record_event
 from core.db import SessionDep
+from core.forms import refuse
 from core.models import Business
 from customers.models import Customer
-from scheduling.clock import today_in
+from scheduling.clock import localize, today_in
 from scheduling.models import Service, Staff
+from scheduling.time_off import business_zone
 
 router = APIRouter(prefix="/bills", tags=["billing"])
 
 BillViewer = Annotated[User, Depends(Requires("billing.view"))]
+
+# --- the invoice lists' shared date window (#99) ----------------------------------------------
+
+# Earlier than any invoice this product can hold; the floor for a whole-history window.
+WHOLE_HISTORY_FROM = Date(2000, 1, 1)
+INVOICE_LIST_DEFAULT_DAYS = 30
+INVOICE_LIST_PAGE_SIZE, INVOICE_LIST_MAX_PAGE_SIZE = 50, 100
+
+
+async def invoice_list_window(
+    db: SessionDep, from_: Date | None, to: Date | None, *, whole_history: bool = False
+) -> tuple[Date, Date, datetime, datetime, str]:
+    """Business-local `from`/`to` (default the last 30 days) resolved to `(from_date, to_date,
+    start, end, timezone)` — `start`/`end` the half-open UTC instant range `Invoice.issued_at`/
+    `RetailInvoice.issued_at` are queried against, `timezone` the zone key to echo back on the
+    response. Shared by `billing/invoices.py::list_invoices` and `billing/retail_sales.py::
+    list_retail_invoices` so the two lists never drift on what "the last 30 days" means. The
+    same local-day defaulting/validation/conversion `customers/access_report.py::_window` and
+    `billing/commission_report.py::_window` each already establish for their own reports
+    (different default windows, so not shared code)."""
+    zone = await business_zone(db)
+    to_date = to or today_in(zone)
+    if from_ is not None:
+        from_date = from_
+    elif whole_history:
+        from_date = WHOLE_HISTORY_FROM
+    else:
+        from_date = to_date - timedelta(days=INVOICE_LIST_DEFAULT_DAYS)
+    if to_date < from_date:
+        raise refuse("to", "The last day cannot come before the first.", where="query")
+    start = localize(datetime.combine(from_date, time.min), zone)
+    end = localize(datetime.combine(to_date + timedelta(days=1), time.min), zone)
+    return from_date, to_date, start, end, zone.key
 
 
 # --- what goes over the wire -----------------------------------------------------------------
@@ -142,6 +178,11 @@ class BillOut(BaseModel):
     # decide whether to offer either override path without a second request.
     bill_override_requests_enabled: bool
     inline_admin_bill_edit_enabled: bool
+    # #107: set while this draft is a cancel & replace reopening (`invoices.py::cancel_invoice`)
+    # of a still-unreissued cancelled invoice — the "Replaces #N" banner's own id to look the
+    # original up by (`GET /invoices/{id}` for its number and `cancel_reason`), the same
+    # not-yet-replaced lookup `issue_invoice` itself already does at issue time.
+    replaces_invoice_id: str | None
 
 
 class BillSummaryOut(BaseModel):
@@ -363,6 +404,21 @@ async def compute_bill(
     ]
     overridden = priced_bill.overridden
 
+    # #107: the same "not-yet-replaced cancelled invoice" lookup `invoices.py::issue_invoice`
+    # runs at issue time — here, live on every read, so a draft reopened by a cancel shows its
+    # "Replaces #N" banner before it is ever reissued. `None` for an ordinary draft that was
+    # never issued at all.
+    replaces_invoice_id: uuid.UUID | None = None
+    if bill.status == "draft":
+        successor = aliased(Invoice)
+        replaces_invoice_id = await db.scalar(
+            select(Invoice.id).where(
+                Invoice.service_bill_id == bill.id,
+                Invoice.status == "cancelled",
+                ~exists().where(successor.replaces_invoice_id == Invoice.id),
+            )
+        )
+
     return BillOut(
         id=str(bill.id),
         status=bill.status,
@@ -400,6 +456,7 @@ async def compute_bill(
         ),
         bill_override_requests_enabled=business.enable_bill_override_requests,
         inline_admin_bill_edit_enabled=business.enable_inline_admin_bill_edit,
+        replaces_invoice_id=str(replaces_invoice_id) if replaces_invoice_id else None,
     )
 
 

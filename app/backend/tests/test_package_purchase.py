@@ -58,6 +58,7 @@ async def claimed_instance(client):
             # RESTRICT`.
             await owner.execute(text("DELETE FROM package_credit_redemptions"))  # #72
             await owner.execute(text("DELETE FROM package_credit_voids"))  # #73
+            await owner.execute(text("DELETE FROM package_transfers"))  # #111
             await owner.execute(text("DELETE FROM package_purchase_credits"))
             await owner.execute(text("DELETE FROM invoice_payment_transfers"))  # #68
             await owner.execute(text("DELETE FROM commission_postings"))  # #69
@@ -628,6 +629,202 @@ async def test_the_app_role_may_perform_the_one_permitted_activation_transition(
             {"id": created["id"]},
         )
     assert activated is True
+
+
+# --- client Packages tab: the client-scoped purchases list (#108) --------------------------
+
+
+async def test_the_client_scoped_list_shows_remaining_and_used_credits_per_service(client):
+    await as_admin(client)
+    massage = await make_service(client, price_cents=12000)
+    facial = await make_service(client, name="Facial", price_cents=8000)
+    package = await make_package(
+        client,
+        [{"service_id": massage["id"], "credits": 2}, {"service_id": facial["id"], "credits": 3}],
+        price_cents=50000,
+    )
+    customer_id = await make_customer(client)
+    created = await purchase(client, package["id"], customer_id)
+
+    resp = await client.get(f"{CUSTOMERS}/{customer_id}/package-purchases")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["purchases"]) == 1
+    row = body["purchases"][0]
+    assert row["id"] == created["id"]
+    assert row["package_definition_id"] == package["id"]
+    assert row["customer_id"] == customer_id
+    assert row["name"] == "10-Session Massage Pack"
+    assert row["price_cents"] == 50000
+    assert row["invoice_id"] == created["invoice_id"]
+    assert row["invoice_number"] == created["invoice_number"]
+    assert row["credits_activated"] is False
+    assert row["credits_voided_at"] is None
+    by_service = {c["service_id"]: c for c in row["credits"]}
+    assert by_service[massage["id"]] == {
+        "service_id": massage["id"],
+        "service_name": "Massage",
+        "credits_total": 2,
+        "credits_used": 0,
+        "credits_remaining": 2,
+        "used_by_you": 0,
+    }
+    assert by_service[facial["id"]]["credits_total"] == 3
+    assert by_service[facial["id"]]["credits_remaining"] == 3
+
+
+async def test_the_client_scoped_list_is_newest_first_and_scoped_to_one_client(client):
+    await as_admin(client)
+    massage = await make_service(client)
+    package = await make_package(client, [{"service_id": massage["id"], "credits": 5}])
+    customer_id = await make_customer(client)
+    other_customer_id = await make_customer(client)
+    first = await purchase(client, package["id"], customer_id)
+    second = await purchase(client, package["id"], customer_id)
+    await purchase(client, package["id"], other_customer_id)
+
+    resp = await client.get(f"{CUSTOMERS}/{customer_id}/package-purchases")
+
+    assert resp.status_code == 200, resp.text
+    ids = [row["id"] for row in resp.json()["purchases"]]
+    assert ids == [second["id"], first["id"]]
+
+
+async def test_the_client_scoped_list_shows_a_refunded_purchases_void_timestamp(client):
+    await as_admin(client)
+    massage = await make_service(client)
+    package = await make_package(client, [{"service_id": massage["id"], "credits": 5}])
+    customer_id = await make_customer(client)
+    created = await purchase(client, package["id"], customer_id)
+    async with session_scope() as db:
+        from billing.models import PackageCreditVoid
+
+        db.add(
+            PackageCreditVoid(
+                package_purchase_id=created["id"],
+                reason="Refunded, testing only.",
+                voided_by=(await db.scalar(text("SELECT id FROM users LIMIT 1"))),
+            )
+        )
+        await db.commit()
+
+    resp = await client.get(f"{CUSTOMERS}/{customer_id}/package-purchases")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["purchases"][0]["credits_voided_at"] is not None
+
+
+async def test_the_client_scoped_list_needs_billing_view(client):
+    await as_admin(client)
+    massage = await make_service(client)
+    package = await make_package(client, [{"service_id": massage["id"], "credits": 5}])
+    customer_id = await make_customer(client)
+    await purchase(client, package["id"], customer_id)
+    role = await client.post("/api/admin/roles", json={"name": "No Billing", "capabilities": []})
+    assert role.status_code == 201, role.text
+    from core.security import hash_password
+
+    await add_account(
+        "nocap@cedar.example", await hash_password(STAFF_PASSWORD), role=role.json()["id"]
+    )
+    client.cookies.clear()
+    await as_staff(client, "nocap@cedar.example", STAFF_PASSWORD)
+
+    resp = await client.get(f"{CUSTOMERS}/{customer_id}/package-purchases")
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["code"] == "capability_required"
+
+
+async def test_the_client_scoped_list_works_for_front_desk_staff(client):
+    await as_admin(client)
+    massage = await make_service(client)
+    package = await make_package(client, [{"service_id": massage["id"], "credits": 5}])
+    customer_id = await make_customer(client)
+    await purchase(client, package["id"], customer_id)
+    await add_front_desk_account()
+    client.cookies.clear()
+    await as_staff(client)
+
+    resp = await client.get(f"{CUSTOMERS}/{customer_id}/package-purchases")
+
+    assert resp.status_code == 200, resp.text
+    assert len(resp.json()["purchases"]) == 1
+
+
+async def test_the_client_scoped_list_is_empty_for_a_customer_with_no_purchases(client):
+    await as_admin(client)
+    customer_id = await make_customer(client)
+
+    resp = await client.get(f"{CUSTOMERS}/{customer_id}/package-purchases")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["purchases"] == []
+
+
+# --- sellable packages: the staff-facing list (#108) ----------------------------------------
+
+
+async def test_the_sellable_list_returns_only_active_packages_with_credits_and_expiry(client):
+    await as_admin(client)
+    massage = await make_service(client, price_cents=12000)
+    active = await make_package(
+        client, [{"service_id": massage["id"], "credits": 10}], expires_after_days=90
+    )
+    inactive = await make_package(
+        client, [{"service_id": massage["id"], "credits": 5}], name="Retired Pack"
+    )
+    deactivated = await client.post(f"{PACKAGES}/{inactive['id']}/deactivate", json={})
+    assert deactivated.status_code == 200, deactivated.text
+
+    resp = await client.get("/api/packages")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()["packages"]
+    ids = [row["id"] for row in body]
+    assert active["id"] in ids
+    assert inactive["id"] not in ids
+    row = next(r for r in body if r["id"] == active["id"])
+    assert row["name"] == "10-Session Massage Pack"
+    assert row["price_cents"] == 96000
+    assert row["expires_after_days"] == 90
+    assert row["tax_convention"] == "exclusive"
+    assert row["services"] == [
+        {"service_id": massage["id"], "service_name": "Massage", "credits": 10}
+    ]
+
+
+async def test_the_sellable_list_works_in_staff_mode(client):
+    await as_admin(client)
+    massage = await make_service(client)
+    await make_package(client, [{"service_id": massage["id"], "credits": 5}])
+    await add_front_desk_account()
+    client.cookies.clear()
+    await as_staff(client)
+
+    resp = await client.get("/api/packages")
+
+    assert resp.status_code == 200, resp.text
+    assert len(resp.json()["packages"]) == 1
+
+
+async def test_the_sellable_list_needs_billing_view(client):
+    await as_admin(client)
+    role = await client.post("/api/admin/roles", json={"name": "No Billing", "capabilities": []})
+    assert role.status_code == 201, role.text
+    from core.security import hash_password
+
+    await add_account(
+        "nocap@cedar.example", await hash_password(STAFF_PASSWORD), role=role.json()["id"]
+    )
+    client.cookies.clear()
+    await as_staff(client, "nocap@cedar.example", STAFF_PASSWORD)
+
+    resp = await client.get("/api/packages")
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["code"] == "capability_required"
 
 
 async def test_the_app_role_may_neither_update_nor_delete_a_package_purchase_credit(client):

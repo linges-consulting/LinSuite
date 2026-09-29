@@ -27,9 +27,10 @@ Administrator-only, Admin Mode).
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
-from typing import Annotated
+from datetime import date as Date
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import exists, select
@@ -39,10 +40,13 @@ from sqlalchemy.orm import aliased
 from auth.capabilities import Requires
 from auth.models import User
 from billing.bill_review import (
+    INVOICE_LIST_MAX_PAGE_SIZE,
+    INVOICE_LIST_PAGE_SIZE,
     BillViewer,
     LineConflict,
     business_or_404,
     compute_bill,
+    invoice_list_window,
     load_bill,
     persisted_selection,
     price_bill,
@@ -67,7 +71,7 @@ from billing.models import (
     RetailInvoice,
     ServiceBill,
 )
-from billing.payments import balance, balances, carry_payments
+from billing.payments import ListStatus, balance, balances, carry_payments, invoice_list_status
 from billing.tax import invoice_tax_totals
 from core.access_log import LogAccess, LogAccessIfFiltered, LogAccessOf
 from core.audit import record_event
@@ -76,6 +80,7 @@ from core.documents import fetch_document
 from core.models import Document
 from customers.models import Customer
 from notifications.providers import email_ready
+from scheduling.models import Service, Staff
 
 router = APIRouter(tags=["billing"])
 
@@ -113,7 +118,11 @@ class InvoiceLineOut(BaseModel):
     id: str
     appointment_id: str
     service_id: str
+    # Joined in for the invoice view (#102), the same "id plus a name to render" shape
+    # `bill_review.py::Ref` already gives the draft screen — never PHI, so no extra audit row.
+    service_name: str
     staff_id: str
+    staff_name: str
     price_cents: int
     discounted_cents: int
     pretax_cents: int
@@ -138,6 +147,9 @@ class InvoiceOut(BaseModel):
     service_bill_id: str | None
     package_purchase_id: str | None
     customer_id: str
+    # Joined in for the invoice view (#102) — never PHI (`core/access_log.py::PHI_FIELDS`),
+    # the same field `InvoiceSummaryOut` already carries for the Invoices list.
+    customer_name: str
     status: str
     computed_subtotal_cents: int
     computed_discount_total_cents: int
@@ -176,7 +188,12 @@ class InvoiceSummaryOut(BaseModel):
     id: str
     invoice_number: int
     customer_id: str
+    # Never PHI (`core/access_log.py::PHI_FIELDS`) — joined in for the row, no second request.
+    customer_name: str
     status: str
+    # #99: the Invoices list's status badge — outstanding | paid | cancelled, derived from the
+    # same `Balance` below (`billing/payments.py::invoice_list_status`), never a second "paid".
+    list_status: ListStatus
     grand_total_cents: int
     issued_at: datetime
     outstanding_cents: int
@@ -189,12 +206,29 @@ class InvoiceSummaryOut(BaseModel):
     held_credit_cents: int
 
 
-def _line_out(line: InvoiceLine) -> InvoiceLineOut:
+class InvoiceListOut(BaseModel):
+    invoices: list[InvoiceSummaryOut]
+    total: int
+    # The range actually applied (#99: default the last 30 days), so the screen can show the
+    # defaults it did not send — the same shape `customers/access_report.py::AccessReportOut`
+    # and `billing/commission_report.py::CommissionReportOut` already carry theirs in.
+    from_: Date = Field(serialization_alias="from")
+    to: Date
+    timezone: str
+
+
+def _line_out(
+    line: InvoiceLine, services: dict[uuid.UUID, Service], staff: dict[uuid.UUID, Staff]
+) -> InvoiceLineOut:
+    service = services.get(line.service_id)
+    member = staff.get(line.staff_id)
     return InvoiceLineOut(
         id=str(line.id),
         appointment_id=str(line.appointment_id),
         service_id=str(line.service_id),
+        service_name=service.name if service is not None else "—",
         staff_id=str(line.staff_id),
+        staff_name=member.display_name if member is not None else "—",
         price_cents=line.price_cents,
         discounted_cents=line.discounted_cents,
         pretax_cents=line.pretax_cents,
@@ -228,6 +262,19 @@ def _str_or_none(value: uuid.UUID | None) -> str | None:
 
 
 async def invoice_out(db: SessionDep, invoice: Invoice) -> InvoiceOut:
+    customer = await db.get(Customer, invoice.customer_id)
+    service_ids = {line.service_id for line in invoice.lines}
+    staff_ids = {line.staff_id for line in invoice.lines}
+    services = (
+        {s.id: s for s in await db.scalars(select(Service).where(Service.id.in_(service_ids)))}
+        if service_ids
+        else {}
+    )
+    staff = (
+        {s.id: s for s in await db.scalars(select(Staff).where(Staff.id.in_(staff_ids)))}
+        if staff_ids
+        else {}
+    )
     return InvoiceOut(
         id=str(invoice.id),
         business_id=invoice.business_id,
@@ -237,6 +284,9 @@ async def invoice_out(db: SessionDep, invoice: Invoice) -> InvoiceOut:
             str(invoice.package_purchase_id) if invoice.package_purchase_id else None
         ),
         customer_id=str(invoice.customer_id),
+        customer_name=(
+            f"{customer.first_name} {customer.last_name}" if customer is not None else "—"
+        ),
         status=invoice.status,
         computed_subtotal_cents=invoice.computed_subtotal_cents,
         computed_discount_total_cents=invoice.computed_discount_total_cents,
@@ -257,7 +307,7 @@ async def invoice_out(db: SessionDep, invoice: Invoice) -> InvoiceOut:
         ),
         cancelled_at=invoice.cancelled_at,
         cancel_reason=invoice.cancel_reason,
-        lines=[_line_out(line) for line in invoice.lines],
+        lines=[_line_out(line, services, staff) for line in invoice.lines],
         **asdict(await balance(db, invoice)),
     )
 
@@ -563,30 +613,67 @@ async def cancel_invoice(
     "/invoices", dependencies=[_ViewInvoiceDocs, Depends(LogAccessIfFiltered("invoice_history"))]
 )
 async def list_invoices(
-    _: BillViewer, db: SessionDep, customer_id: uuid.UUID | None = None
-) -> dict[str, list[InvoiceSummaryOut]]:
-    """The billing list for manual outstanding-balance follow-up (#66's own acceptance
-    criterion); `customer_id` narrows it to one client's own invoice history — the same
-    endpoint, not a second one, since the shape a client's history needs is identical."""
-    stmt = select(Invoice).order_by(Invoice.invoice_number)
+    _: BillViewer,
+    db: SessionDep,
+    customer_id: uuid.UUID | None = None,
+    from_: Annotated[Date | None, Query(alias="from")] = None,
+    to: Date | None = None,
+    status: Literal["outstanding", "paid", "cancelled"] | None = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=INVOICE_LIST_MAX_PAGE_SIZE)] = INVOICE_LIST_PAGE_SIZE,
+) -> InvoiceListOut:
+    """The billing Invoices tab (#99, spec #95 stories 6-14) and the billing list for manual
+    outstanding-balance follow-up (#66's own acceptance criterion) — `customer_id` narrows it
+    to one client's own invoice history, the same endpoint a client's Invoices tab reuses since
+    the shape it needs is identical. `from`/`to` default the last 30 days (business-local
+    dates); `status` filters on exactly what the invoice view itself shows
+    (`invoice_list_status`), never a second definition of "paid". Newest-issued first,
+    paginated with a `total` — the Clients list's own shape (`customers/routes.py::
+    find_customers`). `status` can only be applied after each invoice's `Balance` is computed
+    (it is not a stored column), so this list, unlike the Clients one, pages in Python over the
+    date-windowed rows rather than in SQL — the date range keeps that bounded."""
+    from_date, to_date, start, end, timezone = await invoice_list_window(
+        db, from_, to, whole_history=customer_id is not None
+    )
+    # The client's name, joined in (never PHI — `core/access_log.py::PHI_FIELDS`, and the same
+    # unaudited fields `find_customers`'s own list already renders) — so the row shows a name,
+    # not a bare id, with no second request and no access-log row for an unfiltered render.
+    stmt = (
+        select(Invoice, Customer.first_name, Customer.last_name)
+        .join(Customer, Customer.id == Invoice.customer_id)
+        .where(Invoice.issued_at >= start, Invoice.issued_at < end)
+    )
     if customer_id is not None:
         stmt = stmt.where(Invoice.customer_id == customer_id)
-    invoices = list(await db.scalars(stmt))
+    rows = list(await db.execute(stmt.order_by(Invoice.invoice_number.desc())))
+    invoices = [r[0] for r in rows]
+    names = {r[0].id: f"{r[1]} {r[2]}" for r in rows}
     by_id = await balances(db, invoices)
-    return {
-        "invoices": [
+    if status is not None:
+        invoices = [i for i in invoices if invoice_list_status(i, by_id[i.id]) == status]
+    total = len(invoices)
+    start_row = (page - 1) * page_size
+    page_rows = invoices[start_row : start_row + page_size]
+    return InvoiceListOut(
+        invoices=[
             InvoiceSummaryOut(
                 id=str(i.id),
                 invoice_number=i.invoice_number,
                 customer_id=str(i.customer_id),
+                customer_name=names[i.id],
                 status=i.status,
+                list_status=invoice_list_status(i, by_id[i.id]),
                 grand_total_cents=i.grand_total_cents,
                 issued_at=i.issued_at,
                 **asdict(by_id[i.id]),
             )
-            for i in invoices
-        ]
-    }
+            for i in page_rows
+        ],
+        total=total,
+        from_=from_date,
+        to=to_date,
+        timezone=timezone,
+    )
 
 
 @router.get(
@@ -783,7 +870,11 @@ async def treatment_receipt_pdf(
     ],
 )
 async def email_invoice(
-    customer_id: uuid.UUID, invoice_id: uuid.UUID, actor: BillViewer, db: SessionDep
+    customer_id: uuid.UUID,
+    invoice_id: uuid.UUID,
+    payload: EmailDocumentIn,
+    actor: BillViewer,
+    db: SessionDep,
 ) -> EmailedOut:
     business = await _ready_business(db)
     invoice = await _load_invoice_for_customer(db, customer_id, invoice_id)
@@ -792,7 +883,10 @@ async def email_invoice(
         actor,
         kind="invoice",
         source_id=invoice_id,
-        to=await _customer_email(db, customer_id),
+        # #104: a typed override for a client with no email on file — the same optional-`to`
+        # shape `email_linked_retail_invoice` already carries, extended here so a service
+        # invoice is never a dead end when `_customer_email` would otherwise 422 for good.
+        to=payload.to or await _customer_email(db, customer_id),
         subject=f"Invoice #{invoice.invoice_number} — {business.name}",
         body=f"Your invoice #{invoice.invoice_number} from {business.name} is attached.",
         filename=f"invoice-{invoice.invoice_number}.pdf",
@@ -814,6 +908,7 @@ async def email_treatment_receipt(
     customer_id: uuid.UUID,
     invoice_id: uuid.UUID,
     line_id: uuid.UUID,
+    payload: EmailDocumentIn,
     actor: BillViewer,
     db: SessionDep,
 ) -> EmailedOut:
@@ -824,7 +919,8 @@ async def email_treatment_receipt(
         actor,
         kind=kind,
         source_id=line_id,
-        to=await _customer_email(db, customer_id),
+        # #104: same typed-override fallback as `email_invoice` above.
+        to=payload.to or await _customer_email(db, customer_id),
         subject=f"Your receipt — {business.name}",
         body=f"Your treatment receipt from {business.name} is attached.",
         filename=f"receipt-{invoice.invoice_number}.pdf",

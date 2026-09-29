@@ -1,5 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { MoreHorizontal, Package, Pencil, Plus, Power, PowerOff } from 'lucide-react'
+import {
+  ClipboardCheck,
+  MoreHorizontal,
+  Package,
+  PackagePlus,
+  Pencil,
+  Plus,
+  Power,
+  PowerOff,
+} from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { EmptyState } from '@/components/empty-state'
@@ -29,6 +38,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Textarea } from '@/components/ui/textarea'
 import {
   ApiError,
+  adjustStock,
   createProduct,
   createVariant,
   deactivateProduct,
@@ -43,6 +53,7 @@ import {
   type ProductVariantDraft,
   type ProductVariantRow,
 } from '@/lib/api'
+import { useCan } from '@/lib/capability-gate'
 import { centsToDollars, dollarsToCents } from '@/lib/money'
 import { PRODUCTS } from '@/lib/query-keys'
 
@@ -63,6 +74,9 @@ import { PRODUCTS } from '@/lib/query-keys'
  * historical reference is never orphaned; only new sales stop offering it.
  */
 export function ProductsPanel() {
+  // #95: every catalog write (add/edit/deactivate a product or variant) needs `catalog.manage`
+  // — a receive- or adjust-only lead reads this table to pick a variant, but never these.
+  const canManageCatalog = useCan('catalog.manage')
   const [includeInactive, setIncludeInactive] = useState(false)
   const products = useQuery({
     queryKey: [...PRODUCTS, includeInactive],
@@ -73,6 +87,12 @@ export function ProductsPanel() {
   const [creating, setCreating] = useState(false)
   const [addingVariantTo, setAddingVariantTo] = useState<ProductRow | null>(null)
   const [editingVariant, setEditingVariant] = useState<
+    { product: ProductRow; variant: ProductVariantRow } | null
+  >(null)
+  const [receivingInto, setReceivingInto] = useState<
+    { product: ProductRow; variant: ProductVariantRow } | null
+  >(null)
+  const [adjusting, setAdjusting] = useState<
     { product: ProductRow; variant: ProductVariantRow } | null
   >(null)
 
@@ -103,7 +123,7 @@ export function ProductsPanel() {
               Show inactive
             </Label>
           </div>
-          {products.data?.length !== 0 && (
+          {products.data?.length !== 0 && canManageCatalog && (
             <Button onClick={() => setCreating(true)}>
               <Plus aria-hidden />
               Add product
@@ -118,10 +138,12 @@ export function ProductsPanel() {
           title="No products yet"
           description="Add what the business sells at the counter."
           action={
-            <Button onClick={() => setCreating(true)}>
-              <Plus aria-hidden />
-              Add product
-            </Button>
+            canManageCatalog ? (
+              <Button onClick={() => setCreating(true)}>
+                <Plus aria-hidden />
+                Add product
+              </Button>
+            ) : undefined
           }
         />
       ) : (
@@ -145,6 +167,8 @@ export function ProductsPanel() {
                 onEditProduct={() => setEditing(product)}
                 onAddVariant={() => setAddingVariantTo(product)}
                 onEditVariant={(variant) => setEditingVariant({ product, variant })}
+                onReceive={(variant) => setReceivingInto({ product, variant })}
+                onAdjust={(variant) => setAdjusting({ product, variant })}
               />
             ))}
           </TableBody>
@@ -163,6 +187,20 @@ export function ProductsPanel() {
           onClose={() => setEditingVariant(null)}
         />
       )}
+      {receivingInto && (
+        <ReceiveStockDialog
+          product={receivingInto.product}
+          variant={receivingInto.variant}
+          onClose={() => setReceivingInto(null)}
+        />
+      )}
+      {adjusting && (
+        <AdjustStockDialog
+          product={adjusting.product}
+          variant={adjusting.variant}
+          onClose={() => setAdjusting(null)}
+        />
+      )}
     </div>
   )
 }
@@ -172,10 +210,15 @@ function ProductLines(props: {
   onEditProduct: () => void
   onAddVariant: () => void
   onEditVariant: (variant: ProductVariantRow) => void
+  onReceive: (variant: ProductVariantRow) => void
+  onAdjust: (variant: ProductVariantRow) => void
 }) {
   const { product } = props
   const queryClient = useQueryClient()
   const refresh = () => queryClient.invalidateQueries({ queryKey: PRODUCTS })
+  const canManageCatalog = useCan('catalog.manage')
+  const canReceive = useCan('inventory.receive')
+  const canAdjust = useCan('inventory.adjust')
 
   const setProductActive = useMutation({
     mutationFn: (active: boolean) =>
@@ -224,48 +267,50 @@ function ProductLines(props: {
           )}
         </TableCell>
         <TableCell className="text-right">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="sm" aria-label={`Actions for ${product.name}`}>
-                <MoreHorizontal aria-hidden />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="min-w-40">
-              <DropdownMenuItem onSelect={props.onEditProduct}>
-                <Pencil aria-hidden />
-                Edit
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={props.onAddVariant}>
-                <Plus aria-hidden />
-                Add variant
-              </DropdownMenuItem>
-              {product.active ? (
-                <DropdownMenuItem
-                  variant="destructive"
-                  disabled={setProductActive.isPending}
-                  onSelect={() => {
-                    if (
-                      confirm(
-                        `Deactivate ${product.name}?\n\nIt drops off checkout until you restore it. Its variants keep whatever status they already have.`,
+          {canManageCatalog && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" aria-label={`Actions for ${product.name}`}>
+                  <MoreHorizontal aria-hidden />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-40">
+                <DropdownMenuItem onSelect={props.onEditProduct}>
+                  <Pencil aria-hidden />
+                  Edit
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={props.onAddVariant}>
+                  <Plus aria-hidden />
+                  Add variant
+                </DropdownMenuItem>
+                {product.active ? (
+                  <DropdownMenuItem
+                    variant="destructive"
+                    disabled={setProductActive.isPending}
+                    onSelect={() => {
+                      if (
+                        confirm(
+                          `Deactivate ${product.name}?\n\nIt drops off checkout until you restore it. Its variants keep whatever status they already have.`,
+                        )
                       )
-                    )
-                      setProductActive.mutate(false)
-                  }}
-                >
-                  <PowerOff aria-hidden />
-                  Deactivate
-                </DropdownMenuItem>
-              ) : (
-                <DropdownMenuItem
-                  disabled={setProductActive.isPending}
-                  onSelect={() => setProductActive.mutate(true)}
-                >
-                  <Power aria-hidden />
-                  Reactivate
-                </DropdownMenuItem>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
+                        setProductActive.mutate(false)
+                    }}
+                  >
+                    <PowerOff aria-hidden />
+                    Deactivate
+                  </DropdownMenuItem>
+                ) : (
+                  <DropdownMenuItem
+                    disabled={setProductActive.isPending}
+                    onSelect={() => setProductActive.mutate(true)}
+                  >
+                    <Power aria-hidden />
+                    Reactivate
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </TableCell>
       </TableRow>
       {product.variants.length === 0 ? (
@@ -308,32 +353,47 @@ function ProductLines(props: {
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="min-w-40">
-                  <DropdownMenuItem onSelect={() => props.onEditVariant(variant)}>
-                    <Pencil aria-hidden />
-                    Edit
-                  </DropdownMenuItem>
-                  {variant.active ? (
-                    <DropdownMenuItem
-                      variant="destructive"
-                      disabled={setVariantActive.isPending}
-                      onSelect={() =>
-                        setVariantActive.mutate({ variantId: variant.id, active: false })
-                      }
-                    >
-                      <PowerOff aria-hidden />
-                      Deactivate
-                    </DropdownMenuItem>
-                  ) : (
-                    <DropdownMenuItem
-                      disabled={setVariantActive.isPending}
-                      onSelect={() =>
-                        setVariantActive.mutate({ variantId: variant.id, active: true })
-                      }
-                    >
-                      <Power aria-hidden />
-                      Reactivate
+                  {canManageCatalog && (
+                    <DropdownMenuItem onSelect={() => props.onEditVariant(variant)}>
+                      <Pencil aria-hidden />
+                      Edit
                     </DropdownMenuItem>
                   )}
+                  {canReceive && (
+                    <DropdownMenuItem onSelect={() => props.onReceive(variant)}>
+                      <PackagePlus aria-hidden />
+                      Receive stock
+                    </DropdownMenuItem>
+                  )}
+                  {canAdjust && (
+                    <DropdownMenuItem onSelect={() => props.onAdjust(variant)}>
+                      <ClipboardCheck aria-hidden />
+                      Adjust stock
+                    </DropdownMenuItem>
+                  )}
+                  {canManageCatalog &&
+                    (variant.active ? (
+                      <DropdownMenuItem
+                        variant="destructive"
+                        disabled={setVariantActive.isPending}
+                        onSelect={() =>
+                          setVariantActive.mutate({ variantId: variant.id, active: false })
+                        }
+                      >
+                        <PowerOff aria-hidden />
+                        Deactivate
+                      </DropdownMenuItem>
+                    ) : (
+                      <DropdownMenuItem
+                        disabled={setVariantActive.isPending}
+                        onSelect={() =>
+                          setVariantActive.mutate({ variantId: variant.id, active: true })
+                        }
+                      >
+                        <Power aria-hidden />
+                        Reactivate
+                      </DropdownMenuItem>
+                    ))}
                 </DropdownMenuContent>
               </DropdownMenu>
             </TableCell>
@@ -578,6 +638,210 @@ function VariantDialog(props: {
             </Button>
             <Button type="submit" disabled={save.isPending || incomplete}>
               {save.isPending ? 'Saving…' : existing ? 'Save variant' : 'Add variant'}
+            </Button>
+          </DialogFooter>
+        </Form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** Record a delivery arriving (`inventory.receive`, #100/#61): always adds stock, a note is a
+ *  courtesy — matches `ReceiveBody` on the server (`inventory/stock_routes.py`). */
+function ReceiveStockDialog(props: {
+  product: ProductRow
+  variant: ProductVariantRow
+  onClose: () => void
+}) {
+  const queryClient = useQueryClient()
+  const [quantity, setQuantity] = useState('')
+  const [note, setNote] = useState('')
+
+  const quantityValue = (() => {
+    const parsed = Number(quantity)
+    return Number.isInteger(parsed) && parsed >= 1 ? parsed : null
+  })()
+  const incomplete = quantityValue === null
+
+  const save = useMutation({
+    mutationFn: () =>
+      receiveStock(props.product.id, props.variant.id, quantityValue as number, note.trim() || null),
+    onSuccess: () => {
+      toast.success(`Received ${quantityValue} into ${props.variant.name}`)
+      queryClient.invalidateQueries({ queryKey: PRODUCTS })
+      props.onClose()
+    },
+  })
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && props.onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Receive stock — {props.variant.name}</DialogTitle>
+          <DialogDescription>Currently {props.variant.quantity_on_hand} on hand.</DialogDescription>
+        </DialogHeader>
+        <Form onSubmit={() => !incomplete && save.mutate()}>
+          <Field
+            label="Quantity"
+            htmlFor="receive-quantity"
+            error={quantity && quantityValue === null ? 'A whole number, at least 1.' : undefined}
+          >
+            <Input
+              id="receive-quantity"
+              type="number"
+              min={1}
+              step={1}
+              className="tabular-nums"
+              value={quantity}
+              onChange={(e) => setQuantity(e.target.value)}
+            />
+          </Field>
+          <Field label="Note" htmlFor="receive-note" hint="Optional">
+            <Input
+              id="receive-note"
+              maxLength={500}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+            />
+          </Field>
+          {save.error && <FormError>{save.error.message}</FormError>}
+          <DialogFooter>
+            <Button type="button" variant="ghost" onClick={props.onClose}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={save.isPending || incomplete}>
+              {save.isPending ? 'Receiving…' : 'Receive stock'}
+            </Button>
+          </DialogFooter>
+        </Form>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+/** Correct a stock count (`inventory.adjust`, #100/#61): a person counts the shelf and types
+ *  what they counted, not a delta — the difference is computed here and shown the way
+ *  counting actually reads ("On hand 12 → counted 9: -3"), and only the signed delta goes to
+ *  the server (`AdjustBody`).
+ *
+ * **Stock is never adjusted blind (spec #95 user story 63).** Before sending, the current
+ * on-hand is re-read by refetching the product; if it moved since the dialog opened — a sale,
+ * another correction — the difference is recomputed and shown again, and the first submit
+ * after that only arms a second confirmation rather than sending anything. */
+function AdjustStockDialog(props: {
+  product: ProductRow
+  variant: ProductVariantRow
+  onClose: () => void
+}) {
+  const queryClient = useQueryClient()
+  const [onHand, setOnHand] = useState(props.variant.quantity_on_hand)
+  const [counted, setCounted] = useState(String(props.variant.quantity_on_hand))
+  const [reason, setReason] = useState('')
+  const [stale, setStale] = useState(false)
+
+  const countedValue = (() => {
+    const parsed = Number(counted)
+    return Number.isInteger(parsed) && parsed >= 0 ? parsed : null
+  })()
+  const delta = countedValue === null ? null : countedValue - onHand
+  const incomplete = countedValue === null || delta === 0 || !reason.trim()
+
+  // A fresh recheck invalidates whatever the last recheck found stale — editing either field
+  // means the confirmation that was about to be sent no longer matches what would be sent.
+  const clearStale = () => setStale(false)
+
+  const recheck = useMutation({
+    mutationFn: async () => {
+      const fresh = await fetchProducts(true)
+      const variant = fresh.flatMap((p) => p.variants).find((v) => v.id === props.variant.id)
+      return variant?.quantity_on_hand ?? onHand
+    },
+  })
+
+  const save = useMutation({
+    mutationFn: (quantityDelta: number) =>
+      adjustStock(props.product.id, props.variant.id, quantityDelta, reason.trim()),
+    onSuccess: () => {
+      toast.success(`Adjusted ${props.variant.name}`)
+      queryClient.invalidateQueries({ queryKey: PRODUCTS })
+      props.onClose()
+    },
+  })
+
+  const handleSubmit = async () => {
+    if (incomplete || countedValue === null) return
+    if (!stale) {
+      const fresh = await recheck.mutateAsync()
+      if (fresh !== onHand) {
+        setOnHand(fresh)
+        setStale(true)
+        return
+      }
+    }
+    save.mutate(countedValue - onHand)
+  }
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && props.onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Adjust stock — {props.variant.name}</DialogTitle>
+          <DialogDescription>Enter the quantity actually counted.</DialogDescription>
+        </DialogHeader>
+        <Form onSubmit={handleSubmit}>
+          <Field
+            label="Counted quantity"
+            htmlFor="adjust-counted"
+            error={countedValue === null ? 'A whole number, and never less than nothing.' : undefined}
+          >
+            <Input
+              id="adjust-counted"
+              type="number"
+              min={0}
+              step={1}
+              className="tabular-nums"
+              value={counted}
+              onChange={(e) => {
+                setCounted(e.target.value)
+                clearStale()
+              }}
+            />
+          </Field>
+          {countedValue !== null && (
+            <p className="text-sm text-muted-foreground">
+              On hand {onHand} → counted {countedValue}: {delta! > 0 ? `+${delta}` : delta}
+            </p>
+          )}
+          {stale && (
+            <p role="alert" className="text-sm text-warning">
+              Stock on hand changed since you opened this dialog — recomputed above. Save
+              again to confirm.
+            </p>
+          )}
+          <Field label="Reason" htmlFor="adjust-reason">
+            <Textarea
+              id="adjust-reason"
+              maxLength={500}
+              rows={2}
+              value={reason}
+              onChange={(e) => {
+                setReason(e.target.value)
+                clearStale()
+              }}
+            />
+          </Field>
+          {save.error && <FormError>{save.error.message}</FormError>}
+          {recheck.error && <FormError>{recheck.error.message}</FormError>}
+          <DialogFooter>
+            <Button type="button" variant="ghost" onClick={props.onClose}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={save.isPending || recheck.isPending || incomplete}>
+              {save.isPending || recheck.isPending
+                ? 'Saving…'
+                : stale
+                  ? 'Confirm and save'
+                  : 'Save adjustment'}
             </Button>
           </DialogFooter>
         </Form>

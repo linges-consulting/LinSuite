@@ -239,6 +239,56 @@ async def test_emailing_requires_the_client_have_an_email_on_file(client):
     assert resp.status_code == 422, resp.text
 
 
+async def test_emailing_the_invoice_accepts_a_typed_address_when_the_client_has_none(
+    client, sent_emails
+):
+    """#104: the frontend's fallback when `_customer_email` would 422 — a typed `to` in the
+    body (the same optional-override shape `email_linked_retail_invoice` already carries)
+    goes through instead, exactly like it does for a retail invoice."""
+    await as_admin(client)
+    bill_id, _service_id = await complete_a_visit(client)
+    await add_front_desk_account()
+    client.cookies.clear()
+    await as_staff(client)
+    issued = await client.post(issue_url(bill_id), json={})
+    assert issued.status_code == 201, issued.text
+    invoice_id, customer_id = issued.json()["id"], issued.json()["customer_id"]
+    await _make_email_ready()
+
+    resp = await client.post(
+        f"{CUSTOMERS}/{customer_id}/invoices/{invoice_id}/email",
+        json={"to": "typed-in@example.com"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"status": "queued", "to": "typed-in@example.com"}
+    assert len(sent_emails) == 1
+    assert sent_emails[0].to == "typed-in@example.com"
+
+
+async def test_emailing_the_receipt_accepts_a_typed_address_when_the_client_has_none(
+    client, sent_emails
+):
+    await as_admin(client)
+    bill_id, _service_id = await complete_a_visit(client)
+    await add_front_desk_account()
+    client.cookies.clear()
+    await as_staff(client)
+    issued = await client.post(issue_url(bill_id), json={})
+    assert issued.status_code == 201, issued.text
+    invoice_id, customer_id = issued.json()["id"], issued.json()["customer_id"]
+    await _pay(client, invoice_id, issued.json()["grand_total_cents"])
+    line_id = await _first_line_id(invoice_id)
+    await _make_email_ready()
+
+    resp = await client.post(
+        f"{CUSTOMERS}/{customer_id}/invoices/{invoice_id}/receipts/{line_id}/email",
+        json={"to": "typed-in@example.com"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert len(sent_emails) == 1
+    assert sent_emails[0].to == "typed-in@example.com"
+
+
 async def test_emailing_the_invoice_attaches_the_exact_stored_pdf_bytes(client, sent_emails):
     await as_admin(client)
     invoice_id, customer_id, number = await _issued_invoice_with_emailed_customer(client)

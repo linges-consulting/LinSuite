@@ -1,10 +1,11 @@
 import {
+  BarChart3,
   CalendarDays,
   ListOrdered,
-  Package,
   Phone,
   Receipt,
   Settings,
+  ShoppingCart,
   Users,
   type LucideIcon,
 } from 'lucide-react'
@@ -39,7 +40,19 @@ export type NavItem = {
  * Hiding is a courtesy, not the enforcement: `Requires` on each route is what actually
  * refuses, and typing the URL still gets the honest refusal rather than the screen.
  */
-const ADMINISTRATIVE = ['admin', 'roles.manage', 'users.manage', 'catalog.manage', 'forms.manage']
+// #95: `billing.manage` (Settings → Packages), `inventory.receive` and `inventory.adjust`
+// (Settings → Products) each independently open a Settings sub-screen without `catalog.manage`
+// — the nav entry has to show for any of them, or the screen underneath is unreachable.
+const ADMINISTRATIVE = [
+  'admin',
+  'roles.manage',
+  'users.manage',
+  'catalog.manage',
+  'forms.manage',
+  'billing.manage',
+  'inventory.receive',
+  'inventory.adjust',
+]
 
 export const NAV: NavItem[] = [
   { to: '/schedule', label: 'Schedule', icon: CalendarDays },
@@ -54,10 +67,19 @@ export const NAV: NavItem[] = [
     anyOf: ['queue.manage'],
     requiresFlag: 'queueEnabled',
   },
-  { to: '/catalog', label: 'Catalog', icon: Package },
-  // #63: front-desk bill review — no `requiresFlag`, unlike Queue, since a draft bill exists
-  // the moment an appointment completes regardless of any business toggle.
-  { to: '/bills', label: 'Bills', icon: Receipt, anyOf: ['billing.view'] },
+  // #97/#95: replaces the empty Catalog placeholder. Same capability as Billing below — both
+  // are the front-desk's everyday money work.
+  { to: '/sell', label: 'Sell', icon: ShoppingCart, anyOf: ['billing.view'] },
+  // #63/#97: front-desk bill review, renamed Bills → Billing now that it holds a second tab
+  // (Invoices, #95). No `requiresFlag`, unlike Queue, since a draft bill exists the moment an
+  // appointment completes regardless of any business toggle. The route stays `/bills` — only
+  // the label and what renders under it change — so nothing that already links here breaks.
+  { to: '/bills', label: 'Billing', icon: Receipt, anyOf: ['billing.view'] },
+  // #97/#95: commission and package-liability reports. Shown to whichever of the two
+  // capabilities reaches either report — same `anyOf` mechanics as Settings below, and same
+  // "capability alone decides visibility, Admin Mode is enforced once you're on the screen"
+  // split, since both `commission.view` and `billing.manage` are held in any mode.
+  { to: '/reports', label: 'Reports', icon: BarChart3, anyOf: ['commission.view', 'billing.manage'] },
   { to: '/settings', label: 'Settings', icon: Settings, anyOf: ADMINISTRATIVE },
 ]
 

@@ -557,6 +557,62 @@ test('in Staff Mode the card asks for Admin Mode instead of requesting a refusal
   expect(await screen.findByRole('heading', { name: 'Access history' })).toBeInTheDocument()
   expect(screen.getByText(/Switch to Admin Mode/)).toBeInTheDocument()
   expect(reportCalls(calls)).toHaveLength(0)
+  // The export control needs Admin Mode too — absent, not disabled (M6 spec #95).
+  expect(screen.queryByRole('button', { name: 'Export CSV' })).not.toBeInTheDocument()
+})
+
+/**
+ * The access-log CSV export (#87), through the shared export control (#86/#95, #98,
+ * delivering #92): the panel's own resolved range, polled until ready, downloaded once it
+ * is. `ExportControl` itself is covered state-by-state in `tests/export-control.test.tsx`;
+ * this is only the wiring — the right endpoint, the right params, shown only in Admin Mode.
+ */
+test('an auditor exports the access log for the range on screen', async () => {
+  const { calls } = auditor()
+  const passthrough = vi.mocked(fetch).getMockImplementation()!
+  vi.mocked(fetch).mockImplementation(async (url, init) => {
+    const parsed = new URL(String(url), 'http://test')
+    if (parsed.pathname.startsWith('/api/admin/customers/c1/access-log/exports')) {
+      calls.push({
+        url: parsed.pathname,
+        method: init?.method ?? 'GET',
+        body: typeof init?.body === 'string' ? JSON.parse(init.body) : undefined,
+      })
+    }
+    if (parsed.pathname === '/api/admin/customers/c1/access-log/exports' && init?.method === 'POST') {
+      return Response.json(
+        {
+          id: 'e1',
+          status: 'ready',
+          created_at: '2026-09-19T12:00:00Z',
+          completed_at: '2026-09-19T12:00:01Z',
+          download_url: `${parsed.pathname}/e1/csv`,
+        },
+        { status: 202 },
+      )
+    }
+    if (parsed.pathname === '/api/admin/customers/c1/access-log/exports/e1/csv') {
+      return new Response(new Blob(['id\n1'], { type: 'text/csv' }), {
+        headers: { 'Content-Disposition': 'attachment; filename="access_log.csv"' },
+      })
+    }
+    return passthrough(url, init)
+  })
+  const create = vi.fn(() => 'blob:access-log')
+  vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: create, revokeObjectURL: vi.fn() }))
+  const user = userEvent.setup()
+  renderApp('/clients/c1')
+
+  await screen.findByRole('table', { name: 'Access history' })
+  await user.click(screen.getByRole('button', { name: 'Export CSV' }))
+  await waitFor(() => {
+    const posted = calls.find((c) => c.method === 'POST' && c.url.endsWith('/access-log/exports'))
+    expect(posted?.body).toEqual({ from: '2026-06-21', to: '2026-09-19' })
+  })
+
+  const download = await screen.findByRole('button', { name: 'Download CSV' })
+  await user.click(download)
+  await waitFor(() => expect(create).toHaveBeenCalled())
 })
 
 test('form access history identifies opened PDFs and answers in clinic language', async () => {

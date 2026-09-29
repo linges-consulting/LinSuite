@@ -35,6 +35,8 @@ export const BRANDING = ['business-branding'] as const
 export const SERVICES = ['services'] as const
 /** The retail catalog: products and their variants (M4 #56). */
 export const PRODUCTS = ['products'] as const
+/** Package definitions behind Settings → Packages (#101). */
+export const PACKAGE_DEFINITIONS = ['package-definitions'] as const
 /** The schedule's column roster (`/api/staff`), and the appointments on a day. The list key
  *  takes the date as a second element, so booking invalidates every day the tab has seen. */
 export const ROSTER = ['roster'] as const
@@ -94,3 +96,42 @@ export const INLINE_ADMIN = ['inline-admin'] as const
  *  the simulate control at all. */
 export const PHONE_LOOKUP = ['phone-lookup'] as const
 export const DEMO_MODE = ['cti-demo-mode'] as const
+/** Reports (#95/#110): the commission report, filtered by date range and staff, and the
+ *  package-liability report, filtered by client — each recomputed live on every read, never
+ *  cached across a filter change beyond what the query params already key on. */
+export const COMMISSION_REPORT = ['commission-report'] as const
+export const PACKAGE_LIABILITY_REPORT = ['package-liability-report'] as const
+/** The Invoices tab (#99): service and retail issued invoices, each its own key since they
+ *  are never merged into one list — filters (date/status/client) and the page follow after. */
+export const INVOICES = ['invoices'] as const
+export const RETAIL_INVOICES = ['retail-invoices'] as const
+/** One invoice (#102): the invoice view's own read, id after — a different key from the list
+ *  above (`INVOICES`/`RETAIL_INVOICES`) since issuing a bill or cancelling an invoice
+ *  invalidates one row's detail without refetching every page of the list. */
+export const INVOICE = ['invoice'] as const
+export const RETAIL_INVOICE = ['retail-invoice'] as const
+/** The payments panel (#103): one invoice's payment ledger, refunds and balance exceptions —
+ *  each takes `kind` then the invoice id after it, so a service and a retail invoice sharing
+ *  no id space never collide in the cache. */
+export const INVOICE_PAYMENTS = ['invoice-payments'] as const
+export const INVOICE_REFUNDS = ['invoice-refunds'] as const
+export const INVOICE_BALANCE_EXCEPTIONS = ['invoice-balance-exceptions'] as const
+/** Sell (#106): the product catalog Sell's search reads (`/api/catalog/products`) — a
+ *  different key from `CATALOG`, which is the booking screen's own services read. Open
+ *  drafts (newest first, capped), and one draft sale's own read/write, id after. */
+export const PRODUCT_CATALOG = ['product-catalog'] as const
+export const OPEN_RETAIL_SALES = ['open-retail-sales'] as const
+export const RETAIL_SALE = ['retail-sale'] as const
+/** The client Packages tab (#108): one client's package purchases, id after — a different key
+ *  from `PACKAGE_DEFINITIONS` (Settings → Packages, admin) and from the staff-facing sellable
+ *  list below, since purchasing invalidates only this client's own history. */
+export const CLIENT_PACKAGE_PURCHASES = ['client-package-purchases'] as const
+/** The *Sell package* dialog's own read (#108): active packages, `billing.view`, Staff Mode. */
+export const SELLABLE_PACKAGES = ['sellable-packages'] as const
+/** One package purchase's frozen shape (#109/#102 gap fix): `GET /api/packages/purchases/{id}`,
+ *  id after — the refund dialog's own pre-selection read and the package invoice view's own
+ *  read, kept separate from `CLIENT_PACKAGE_PURCHASES` (a client's whole list). */
+export const PACKAGE_PURCHASE = ['package-purchase'] as const
+/** The Transfer dialog's own warning (#111): the current holder's upcoming appointments for
+ *  a purchase's covered services, id after. */
+export const PACKAGE_TRANSFER_UPCOMING = ['package-transfer-upcoming'] as const

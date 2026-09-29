@@ -55,12 +55,40 @@ function fakeServer() {
     return { product, variant: product.variants.find((v: Row) => v.id === url.split('/')[6])! }
   }
 
+  // #95: Add/Edit/Deactivate and Add variant are now gated on `catalog.manage`, held in Admin
+  // Mode — this suite is about the catalog CRUD itself, not the gate, so the fake account
+  // holds it outright rather than leaving `/api/auth/me` unanswered (which `useCan` reads as
+  // "no capability" and would hide every action this file clicks).
+  const account = () => ({
+    id: 'u1',
+    email: 'owner@cedar.example',
+    role: 'Administrator',
+    capabilities: ['catalog.manage'],
+    mode: 'admin',
+    can_switch_modes: true,
+    admin_grant_expires_at: new Date(Date.now() + 900_000).toISOString(),
+    admin_hard_limit_at: new Date(Date.now() + 900_000).toISOString(),
+    must_change_password: false,
+    mfa: {
+      enrolled: false,
+      method: null,
+      pending: false,
+      enrolment_required: false,
+      verified_at: null,
+      email_otp_allowed: false,
+    },
+  })
+
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url: string, init?: RequestInit) => {
       const method = init?.method ?? 'GET'
       const body = init?.body ? JSON.parse(init.body as string) : undefined
       calls.push({ url, method, body })
+
+      if (url === '/api/auth/me') return Response.json(account())
+      if (url === '/api/branding') return Response.json({}, { status: 404 })
+      if (url === '/api/setup/status') return Response.json({ required: false })
 
       if (url.startsWith('/api/admin/products') && !url.includes('/variants')) {
         if (method === 'GET') {
