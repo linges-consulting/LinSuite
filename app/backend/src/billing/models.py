@@ -149,6 +149,10 @@ from core.models import PROVINCE_CODES
 class PackageDefinition(Base):
     __tablename__ = "package_definitions"
     __table_args__ = (
+        CheckConstraint(
+            "tax_convention IS NULL OR tax_convention IN ('inclusive', 'exclusive')",
+            name="ck_package_definitions_tax_convention",
+        ),
         CheckConstraint("price_cents >= 0", name="ck_package_definitions_price"),
         CheckConstraint(
             "expires_after_days IS NULL OR expires_after_days >= 1",
@@ -178,6 +182,11 @@ class PackageDefinition(Base):
     # Off by default (CLAUDE.md): a credit belongs to the customer who bought it unless an
     # administrator explicitly allows moving it to another.
     transferable: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    # Review R1/R2: which business tax components (by `TaxComponent.code`) tax this item, and
+    # whether `price_cents` is entered tax-inclusive or tax-exclusive (the default). Read live
+    # while drafting; frozen onto the issued line.
+    tax_component_keys: Mapped[list[str]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    tax_convention: Mapped[str] = mapped_column(String(16), server_default=text("'exclusive'"))
     # No hard delete (tech-stack §15, §20), same as `Service`: a customer already holding
     # credits against a retired definition must still be able to redeem them; only new sales
     # stop.
@@ -419,6 +428,16 @@ class ServiceBill(Base):
 
     __tablename__ = "service_bills"
     __table_args__ = (
+        CheckConstraint(
+            "override_tax_convention IS NULL OR "
+            "override_tax_convention IN ('inclusive', 'exclusive')",
+            name="ck_service_bills_override_tax_convention",
+        ),
+        CheckConstraint(
+            "override_commission_basis IS NULL OR "
+            "override_commission_basis IN ('reduces', 'absorbed')",
+            name="ck_service_bills_override_commission_basis",
+        ),
         CheckConstraint("status IN ('draft', 'issued')", name="ck_service_bills_status"),
         # The lookup #59's completion hook runs on every grouped completion: "the open draft
         # for this visit, if one exists yet."
@@ -460,6 +479,15 @@ class ServiceBill(Base):
     # `manual_override_cents` is `None` (`bill_review.py::apply_discounts` clears both
     # together); the two are otherwise always written together, never one without the other.
     override_applied_revision: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Review R2/R5: how `manual_override_cents` was entered (tax-inclusive total, the #64
+    # default, or pre-tax) and whether commission follows the revised price ("reduces", the
+    # spec §142 default) or ignores the override ("absorbed"). Meaningful only with an override.
+    override_tax_convention: Mapped[str] = mapped_column(
+        String(16), server_default=text("'inclusive'")
+    )
+    override_commission_basis: Mapped[str] = mapped_column(
+        String(16), server_default=text("'reduces'")
+    )
 
 
 class ServiceBillLine(Base):
@@ -590,6 +618,14 @@ class BillOverrideRequest(Base):
     __tablename__ = "bill_override_requests"
     __table_args__ = (
         CheckConstraint(
+            "tax_convention IS NULL OR tax_convention IN ('inclusive', 'exclusive')",
+            name="ck_bill_override_requests_tax_convention",
+        ),
+        CheckConstraint(
+            "commission_basis IS NULL OR commission_basis IN ('reduces', 'absorbed')",
+            name="ck_bill_override_requests_commission_basis",
+        ),
+        CheckConstraint(
             "kind IN (" + ", ".join(f"'{k}'" for k in BILL_OVERRIDE_REQUEST_KINDS) + ")",
             name="ck_bill_override_requests_kind",
         ),
@@ -632,6 +668,10 @@ class BillOverrideRequest(Base):
     # Null until decided. Set on approval — equal to `requested_total_cents` when approved
     # "as-is", a different value when the admin/owner revised it. Never set on rejection.
     decided_total_cents: Mapped[int | None] = mapped_column(Integer)
+    # Review R2/R5: the convention the total is stated in and the override's commission
+    # treatment — copied onto `ServiceBill` on approval.
+    tax_convention: Mapped[str] = mapped_column(String(16), server_default=text("'inclusive'"))
+    commission_basis: Mapped[str] = mapped_column(String(16), server_default=text("'reduces'"))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -765,6 +805,20 @@ class Invoice(Base):
 
     __tablename__ = "invoices"
     __table_args__ = (
+        CheckConstraint(
+            "tax_convention IS NULL OR tax_convention IN ('inclusive', 'exclusive')",
+            name="ck_invoices_tax_convention",
+        ),
+        CheckConstraint(
+            "override_tax_convention IS NULL OR "
+            "override_tax_convention IN ('inclusive', 'exclusive')",
+            name="ck_invoices_override_tax_convention",
+        ),
+        CheckConstraint(
+            "override_commission_basis IS NULL OR "
+            "override_commission_basis IN ('reduces', 'absorbed')",
+            name="ck_invoices_override_commission_basis",
+        ),
         UniqueConstraint("business_id", "invoice_number", name="uq_invoices_business_number"),
         # #68: one *live* invoice per bill — a cancelled predecessor stays beside its
         # replacement (migration 0059); and an original is replaced at most once.
@@ -827,6 +881,15 @@ class Invoice(Base):
     override_reason: Mapped[str | None] = mapped_column(Text)
     # The one number actually billed — see the module section above.
     grand_total_cents: Mapped[int] = mapped_column(Integer)
+    # Review R1/R5 (migration 0064; pre-0064 rows keep the defaults). `tax_totals_by_component`
+    # is the tax actually billed — under an override, the distributed per-line rows summed —
+    # while `computed_*` stay the pre-override numbers. `tax_rates_by_component` is every
+    # component's resolved `rate_bp` at issue. `tax_convention` is set only for a package-
+    # purchase invoice (service lines carry their own). Guarded by `invoices_tax_snapshot_frozen`.
+    tax_rates_by_component: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    tax_convention: Mapped[str | None] = mapped_column(String(16))
+    override_tax_convention: Mapped[str | None] = mapped_column(String(16))
+    override_commission_basis: Mapped[str | None] = mapped_column(String(16))
     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     issued_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -851,6 +914,10 @@ class InvoiceLine(Base):
 
     __tablename__ = "invoice_lines"
     __table_args__ = (
+        CheckConstraint(
+            "tax_convention IS NULL OR tax_convention IN ('inclusive', 'exclusive')",
+            name="ck_invoice_lines_tax_convention",
+        ),
         CheckConstraint("price_cents >= 0", name="ck_invoice_lines_price"),
         CheckConstraint(
             "prepaid_cents >= 0 AND prepaid_cents <= line_total_cents",
@@ -887,6 +954,11 @@ class InvoiceLine(Base):
     # #72: frozen off `ServiceBillLine.prepaid_cents` — the part of `line_total_cents` a
     # redeemed package credit already settled. `billing/payments.py::balances` subtracts it.
     prepaid_cents: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    # Review R2/R5 (0064): the convention `price_cents`/`discounted_cents` are stated in, and
+    # the signed cents an admin override moved this line by (so price - discounts + this ==
+    # discounted_cents). `pretax_cents + tax_cents == line_total_cents` always.
+    tax_convention: Mapped[str] = mapped_column(String(16), server_default=text("'exclusive'"))
+    override_adjustment_cents: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     discounts: Mapped[list["InvoiceLineDiscount"]] = relationship(lazy="selectin")
@@ -919,6 +991,12 @@ class InvoiceLineDiscount(Base):
     discount_name: Mapped[str] = mapped_column(Text)
     discount_kind: Mapped[str] = mapped_column(Text)
     commission_basis: Mapped[str] = mapped_column(Text)
+    # Review R4 (0064): the rule as it stood at issue and the cents it took off this line
+    # (`discount_resolver.resolve_discount_amounts`). NULL only on pre-0064 rows.
+    percentage_bp: Mapped[int | None] = mapped_column(Integer)
+    amount_cents: Mapped[int | None] = mapped_column(Integer)
+    stackable: Mapped[bool | None] = mapped_column(Boolean)
+    resolved_amount_cents: Mapped[int | None] = mapped_column(Integer)
 
 
 class InvoiceLineTax(Base):
@@ -1361,6 +1439,12 @@ class RetailInvoice(Base):
     # later ticket that adds either never has to rename what every reader already calls "the
     # total".
     grand_total_cents: Mapped[int] = mapped_column(Integer)
+    # Review R3 (0064): retail is taxed and discounted like a service line. `subtotal_cents -
+    # discount_total_cents + tax_total_cents == grand_total_cents`. Pre-0064 rows: 0 / {}.
+    # Guarded by `retail_invoices_tax_snapshot_frozen`.
+    discount_total_cents: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    tax_total_cents: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    tax_totals_by_component: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     sold_by_staff_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("staff.id", ondelete="RESTRICT"))
     payment_collector_staff_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("staff.id", ondelete="RESTRICT")
@@ -1385,6 +1469,10 @@ class RetailInvoiceLine(Base):
 
     __tablename__ = "retail_invoice_lines"
     __table_args__ = (
+        CheckConstraint(
+            "tax_convention IS NULL OR tax_convention IN ('inclusive', 'exclusive')",
+            name="ck_retail_invoice_lines_tax_convention",
+        ),
         CheckConstraint("quantity >= 1", name="ck_retail_invoice_lines_quantity"),
         CheckConstraint("unit_price_cents >= 0", name="ck_retail_invoice_lines_price"),
         CheckConstraint("line_total_cents >= 0", name="ck_retail_invoice_lines_line_total"),
@@ -1414,7 +1502,18 @@ class RetailInvoiceLine(Base):
     staff_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("staff.id", ondelete="RESTRICT"))
     # `Staff.commission_rate_retail_bp`, read fresh and frozen at issue — module section above.
     commission_rate_bp: Mapped[int] = mapped_column(Integer)
+    # Review R3 (0064). `line_total_cents` is the tax-included total; pre-tax is
+    # `line_total_cents - tax_cents`; `unit_price_cents * quantity - discount_cents` is the
+    # discounted amount in `tax_convention`. `commission_basis_cents` is pre-tax with
+    # "absorbed" discounts left out; NULL on pre-0064 rows (then it equals `line_total_cents`).
+    discount_cents: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    tax_cents: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    tax_convention: Mapped[str] = mapped_column(String(16), server_default=text("'exclusive'"))
+    commission_basis_cents: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    discounts: Mapped[list["RetailInvoiceLineDiscount"]] = relationship(lazy="selectin")
+    taxes: Mapped[list["RetailInvoiceLineTax"]] = relationship(lazy="selectin")
 
 
 # ## retail returns (#76, M4 spec #54 stories 81-82)
@@ -1846,3 +1945,64 @@ class PackageCreditVoid(Base):
     reason: Mapped[str] = mapped_column(Text)
     voided_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
     voided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# ## retail tax & discounts (review R3/R4, migration 0064)
+#
+# A retail draft carries a bill-level discount selection (`ServiceBillDiscount`'s shape; item
+# eligibility is `("product", variant.product_id)`), and issue freezes each line's discounts
+# and tax components exactly as a service invoice line does. Both frozen tables are
+# append-only.
+
+
+class RetailSaleDiscount(Base):
+    __tablename__ = "retail_sale_discounts"
+
+    sale_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("retail_sales.id", ondelete="CASCADE"), primary_key=True
+    )
+    discount_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("discounts.id", ondelete="RESTRICT"), primary_key=True
+    )
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RetailInvoiceLineDiscount(Base):
+    __tablename__ = "retail_invoice_line_discounts"
+    __table_args__ = (
+        CheckConstraint(
+            "discount_kind IN ('percentage', 'fixed')", name="ck_retail_invoice_line_discounts_kind"
+        ),
+        CheckConstraint(
+            "commission_basis IN ('reduces', 'absorbed')",
+            name="ck_retail_invoice_line_discounts_commission_basis",
+        ),
+    )
+
+    retail_invoice_line_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("retail_invoice_lines.id", ondelete="CASCADE"), primary_key=True
+    )
+    discount_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("discounts.id", ondelete="RESTRICT"), primary_key=True
+    )
+    discount_name: Mapped[str] = mapped_column(Text)
+    discount_kind: Mapped[str] = mapped_column(Text)
+    percentage_bp: Mapped[int | None] = mapped_column(Integer)
+    amount_cents: Mapped[int | None] = mapped_column(Integer)
+    stackable: Mapped[bool] = mapped_column(Boolean)
+    commission_basis: Mapped[str] = mapped_column(Text)
+    resolved_amount_cents: Mapped[int] = mapped_column(Integer)
+
+
+class RetailInvoiceLineTax(Base):
+    __tablename__ = "retail_invoice_line_taxes"
+    __table_args__ = (
+        CheckConstraint("rate_bp BETWEEN 0 AND 10000", name="ck_retail_invoice_line_taxes_rate"),
+    )
+
+    retail_invoice_line_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("retail_invoice_lines.id", ondelete="CASCADE"), primary_key=True
+    )
+    component_code: Mapped[str] = mapped_column(String(16), primary_key=True)
+    rate_bp: Mapped[int] = mapped_column(Integer)
+    amount_cents: Mapped[int] = mapped_column(Integer)

@@ -24,6 +24,7 @@ from auth.capabilities import Requires
 from auth.models import User
 from billing._admin_forms import blank_to_none, refuse, refuse_emptied_field
 from billing.models import PackageDefinition, PackageDefinitionService
+from billing.tax_routes import TaxConvention, normalize_tax_component_keys
 from core.audit import record_event
 from core.db import SessionDep
 from scheduling.models import Service
@@ -50,6 +51,9 @@ class PackageDefinitionOut(BaseModel):
     price_cents: int
     expires_after_days: int | None
     transferable: bool
+    # Review R1/R2: the tax components this package toggles on, and its price convention.
+    tax_component_keys: list[str]
+    tax_convention: str
     active: bool
     services: list[DefinitionServiceOut]
 
@@ -79,6 +83,8 @@ class PackageDefinitionFields(BaseModel):
     price_cents: Price
     expires_after_days: ExpiresAfterDays | None = None
     transferable: bool = False
+    tax_component_keys: list[str] = []
+    tax_convention: TaxConvention = "exclusive"
 
     @field_validator("name", mode="after")
     @classmethod
@@ -113,7 +119,7 @@ class PackageDefinitionCreate(PackageDefinitionFields):
 # (an explicit `null` is "no expiry" / "clear the note"), so a PATCH sending `null` for either
 # must reach the row, not be refused here. `active` is not patchable at all — deactivate and
 # reactivate are its only two doors.
-_NOT_NULLABLE = ("name", "price_cents", "transferable")
+_NOT_NULLABLE = ("name", "price_cents", "transferable", "tax_component_keys", "tax_convention")
 
 
 class PackageDefinitionPatch(BaseModel):
@@ -124,6 +130,8 @@ class PackageDefinitionPatch(BaseModel):
     price_cents: Price | None = None
     expires_after_days: ExpiresAfterDays | None = None
     transferable: bool | None = None
+    tax_component_keys: list[str] | None = None
+    tax_convention: TaxConvention | None = None
 
     @field_validator("name", "description", mode="after")
     @classmethod
@@ -193,6 +201,8 @@ async def _out(db: SessionDep, definition: PackageDefinition) -> PackageDefiniti
         price_cents=definition.price_cents,
         expires_after_days=definition.expires_after_days,
         transferable=definition.transferable,
+        tax_component_keys=list(definition.tax_component_keys),
+        tax_convention=definition.tax_convention,
         active=definition.active,
         services=services,
     )
@@ -232,7 +242,11 @@ async def create_package_definition(
 ) -> PackageDefinitionOut:
     await _validate_services(db, payload.services)
 
-    definition = PackageDefinition(**payload.model_dump(exclude={"services"}), active=True)
+    fields = payload.model_dump(exclude={"services"})
+    fields["tax_component_keys"] = await normalize_tax_component_keys(
+        db, payload.tax_component_keys
+    )
+    definition = PackageDefinition(**fields, active=True)
     definition.services = [
         PackageDefinitionService(service_id=row.service_id, credits=row.credits)
         for row in payload.services
@@ -269,6 +283,10 @@ async def update_package_definition(
     sent = payload.model_dump(exclude_unset=True)
 
     refuse_emptied_field(sent, _NOT_NULLABLE)
+    if "tax_component_keys" in sent:
+        sent["tax_component_keys"] = await normalize_tax_component_keys(
+            db, sent["tax_component_keys"]
+        )
 
     changed = []
     for field, value in sent.items():

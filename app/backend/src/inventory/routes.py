@@ -30,6 +30,7 @@ from sqlalchemy.exc import IntegrityError
 from auth.capabilities import Requires
 from auth.models import User
 from auth.session import CurrentUser
+from billing.tax_routes import TaxConvention, normalize_tax_component_keys
 from core.audit import record_event
 from core.db import SessionDep
 from inventory.models import Product, ProductVariant
@@ -64,6 +65,7 @@ class VariantOut(BaseModel):
     # `inventory/stock.py::record_movement`) can never leave a stale badge on screen.
     is_low_stock: bool
     tax_component_keys: list[str]
+    tax_convention: str
     active: bool
     sort_order: int
 
@@ -92,6 +94,7 @@ class CatalogVariantOut(BaseModel):
     low_stock_threshold: int
     is_low_stock: bool
     tax_component_keys: list[str]
+    tax_convention: str
 
 
 class CatalogProductOut(BaseModel):
@@ -113,6 +116,7 @@ def _variant_out(variant: ProductVariant) -> VariantOut:
         low_stock_threshold=variant.low_stock_threshold,
         is_low_stock=is_below_threshold(variant.quantity_on_hand, variant.low_stock_threshold),
         tax_component_keys=list(variant.tax_component_keys),
+        tax_convention=variant.tax_convention,
         active=variant.active,
         sort_order=variant.sort_order,
     )
@@ -145,6 +149,7 @@ def _catalog_out(product: Product) -> CatalogProductOut:
                 low_stock_threshold=v.low_stock_threshold,
                 is_low_stock=is_below_threshold(v.quantity_on_hand, v.low_stock_threshold),
                 tax_component_keys=list(v.tax_component_keys),
+                tax_convention=v.tax_convention,
             )
             for v in product.variants
             if v.active
@@ -212,6 +217,7 @@ class VariantFields(BaseModel):
     quantity_on_hand: Count = 0
     low_stock_threshold: Count = 0
     tax_component_keys: list[str] = []
+    tax_convention: TaxConvention = "exclusive"
     sort_order: int = 0
 
     @field_validator("name", "sku", mode="after")
@@ -234,6 +240,7 @@ _VARIANT_NOT_NULLABLE = (
     "quantity_on_hand",
     "low_stock_threshold",
     "tax_component_keys",
+    "tax_convention",
     "sort_order",
 )
 
@@ -246,6 +253,7 @@ class VariantPatch(BaseModel):
     quantity_on_hand: Count | None = None
     low_stock_threshold: Count | None = None
     tax_component_keys: list[str] | None = None
+    tax_convention: TaxConvention | None = None
     sort_order: int | None = None
 
     @field_validator("name", "sku", mode="after")
@@ -456,7 +464,11 @@ async def create_variant(
     product_id: uuid.UUID, payload: VariantFields, admin: CatalogManager, db: SessionDep
 ) -> ProductOut:
     await _load_product(db, product_id)  # 404 before anything is written
-    variant = ProductVariant(**payload.model_dump(), product_id=product_id, active=True)
+    fields = payload.model_dump()
+    fields["tax_component_keys"] = await normalize_tax_component_keys(
+        db, payload.tax_component_keys
+    )
+    variant = ProductVariant(**fields, product_id=product_id, active=True)
     db.add(variant)
     try:
         await db.flush()
@@ -487,6 +499,10 @@ async def update_variant(
     variant = await _load_variant(db, product_id, variant_id)
     sent = payload.model_dump(exclude_unset=True)
     refuse_emptied_field(sent, _VARIANT_NOT_NULLABLE)
+    if "tax_component_keys" in sent:
+        sent["tax_component_keys"] = await normalize_tax_component_keys(
+            db, sent["tax_component_keys"]
+        )
 
     changed = []
     for field, value in sent.items():

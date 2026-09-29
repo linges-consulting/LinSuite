@@ -72,6 +72,7 @@ async def claimed_instance(client):
             for table in (
                 "bill_override_requests",
                 "service_bill_discounts",
+                "retail_sale_discounts",  # review T1, 0064
                 "discount_eligible_items",
                 "discounts",
                 "tax_component_rates",
@@ -310,9 +311,11 @@ async def test_issuing_with_a_current_approved_override_uses_the_override_total(
 
 async def test_an_issued_invoice_never_changes_when_live_definitions_change_afterward(client):
     await as_admin(client)
-    bill_id, service_id = await complete_a_visit(client, price_cents=10000)
-    discount = await make_discount(client, percentage_bp=1000)
     tax = await make_tax_component(client, rate_bp=500)
+    bill_id, service_id = await complete_a_visit(
+        client, price_cents=10000, tax_component_keys=["GST"]
+    )
+    discount = await make_discount(client, percentage_bp=1000)
     applied = await client.put(
         f"{BILLS}/{bill_id}/discounts", json={"discount_ids": [discount["id"]]}
     )

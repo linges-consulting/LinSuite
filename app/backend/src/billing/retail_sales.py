@@ -13,28 +13,51 @@ inserts the `RetailInvoice`/`RetailInvoiceLine` rows, and does not commit until 
 succeeded — see the module section in `billing/models.py` for exactly how that composes #61's
 own atomic `UPDATE` across more than one variant with a full rollback on any single line's
 failure.
+
+**Tax and discounts (review R3/R4)** — the service side's rules, applied per line: each
+variant's own `tax_component_keys`/`tax_convention`, and a sale-level discount selection
+(`PUT /retail-sales/{id}/discounts`, eligibility `("product", product_id)`) priced by
+`billing/pricing.py::price_line`. Draft reads recompute live; issue freezes every line's
+resolved discounts (rule + cents) and tax components (rate + cents).
 """
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from auth.capabilities import Requires
 from auth.models import User
+from billing.bill_review import (
+    LineTaxOut,
+    _applicable_components,
+    _today_in,
+    components_for,
+    discount_input,
+    eligible_discounts,
+    tax_out,
+)
+from billing.discount_resolver import DiscountConflict
 from billing.invoice_numbering import allocate_invoice_number
 from billing.models import (
+    Discount,
     RetailInvoice,
     RetailInvoiceLine,
+    RetailInvoiceLineDiscount,
+    RetailInvoiceLineTax,
     RetailReturn,
     RetailReturnLine,
     RetailSale,
+    RetailSaleDiscount,
     RetailSaleLine,
 )
 from billing.payments import AdminReviewer, balance, lock_lineage, record_refund
+from billing.pricing import PricedLine, price_line
+from billing.tax import ComponentRate, invoice_tax_totals
 from core.audit import record_event
 from core.db import SessionDep
 from core.models import Business
@@ -78,6 +101,12 @@ class RetailSaleLineOut(BaseModel):
     variant_id: str
     quantity: int
     unit_price_cents: int
+    # Review R3: the variant's convention, the discounts that apply (id -> cents off) and the
+    # line's tax. `line_total_cents` is tax-included.
+    tax_convention: str
+    discount_amounts: dict[str, int]
+    discount_cents: int
+    tax: LineTaxOut
     line_total_cents: int
 
 
@@ -88,9 +117,34 @@ class RetailSaleOut(BaseModel):
     sold_by_staff_id: str
     payment_collector_staff_id: str | None
     lines: list[RetailSaleLineOut]
+    # The applied selection; `subtotal - discount_total + tax_total == grand_total`.
+    discount_ids: list[str]
     subtotal_cents: int
+    discount_total_cents: int
+    tax_totals_by_component: dict[str, int]
+    tax_total_cents: int
+    grand_total_cents: int
     created_at: datetime
     updated_at: datetime
+
+
+class ApplyRetailDiscountsIn(BaseModel):
+    discount_ids: list[uuid.UUID] = []
+
+
+class RetailInvoiceLineDiscountOut(BaseModel):
+    discount_id: str
+    discount_name: str
+    discount_kind: str
+    percentage_bp: int | None
+    amount_cents: int | None
+    resolved_amount_cents: int
+
+
+class RetailInvoiceLineTaxOut(BaseModel):
+    component_code: str
+    rate_bp: int
+    amount_cents: int
 
 
 class RetailInvoiceLineOut(BaseModel):
@@ -98,7 +152,12 @@ class RetailInvoiceLineOut(BaseModel):
     variant_id: str
     quantity: int
     unit_price_cents: int
+    discount_cents: int
+    tax_cents: int
+    tax_convention: str
     line_total_cents: int
+    discounts: list[RetailInvoiceLineDiscountOut]
+    taxes: list[RetailInvoiceLineTaxOut]
     staff_id: str
     commission_rate_bp: int
 
@@ -111,6 +170,9 @@ class RetailInvoiceOut(BaseModel):
     customer_id: str | None
     status: str
     subtotal_cents: int
+    discount_total_cents: int
+    tax_total_cents: int
+    tax_totals_by_component: dict[str, int]
     grand_total_cents: int
     sold_by_staff_id: str
     payment_collector_staff_id: str | None
@@ -131,7 +193,66 @@ class RetailInvoiceSummaryOut(BaseModel):
     issued_at: datetime
 
 
-def _sale_out(sale: RetailSale) -> RetailSaleOut:
+@dataclass
+class _PricedRetailLine:
+    line: RetailSaleLine
+    discounts: list[Discount]
+    components: list[ComponentRate]
+    priced: PricedLine
+
+
+async def _selection(db: SessionDep, sale_id: uuid.UUID) -> set[uuid.UUID]:
+    return set(
+        await db.scalars(
+            select(RetailSaleDiscount.discount_id).where(RetailSaleDiscount.sale_id == sale_id)
+        )
+    )
+
+
+async def _price_sale(
+    db: SessionDep, sale: RetailSale, selected_ids: set[uuid.UUID]
+) -> tuple[list[_PricedRetailLine], list[ComponentRate]]:
+    """Every line priced against its variant's live tax settings and the selection — the
+    one computation the draft view, the discount PUT and issue share. 422 on a conflict."""
+    business = await _business(db)
+    pool = await _applicable_components(db, business, _today_in(business))
+    variant_ids = {line.variant_id for line in sale.lines}
+    variants = (
+        {
+            v.id: v
+            for v in await db.scalars(
+                select(ProductVariant).where(ProductVariant.id.in_(variant_ids))
+            )
+        }
+        if variant_ids
+        else {}
+    )
+    enabled = list(await db.scalars(select(Discount).where(Discount.enabled)))
+    priced_lines = []
+    for line in sale.lines:
+        variant = variants[line.variant_id]
+        applied = eligible_discounts(enabled, selected_ids, "product", variant.product_id)
+        components = components_for(pool, variant.tax_component_keys)
+        try:
+            priced = price_line(
+                line.unit_price_cents * line.quantity,
+                variant.tax_convention,
+                components,
+                [discount_input(d) for d in applied],
+            )
+        except DiscountConflict as error:
+            raise HTTPException(status_code=422, detail=f"{variant.name}: {error}") from error
+        priced_lines.append(_PricedRetailLine(line, applied, components, priced))
+    return priced_lines, pool
+
+
+async def _sale_out(db: SessionDep, sale: RetailSale) -> RetailSaleOut:
+    selected = await _selection(db, sale.id)
+    priced_lines, _ = await _price_sale(db, sale, selected)
+    tax_totals = invoice_tax_totals([p.priced.tax for p in priced_lines])
+    tax_total = sum(tax_totals.values())
+    grand_total = sum(p.priced.tax.total_cents for p in priced_lines)
+    discount_total = sum(sum(p.priced.discount_amounts.values()) for p in priced_lines)
     return RetailSaleOut(
         id=str(sale.id),
         status=sale.status,
@@ -144,15 +265,24 @@ def _sale_out(sale: RetailSale) -> RetailSaleOut:
         ),
         lines=[
             RetailSaleLineOut(
-                id=str(line.id),
-                variant_id=str(line.variant_id),
-                quantity=line.quantity,
-                unit_price_cents=line.unit_price_cents,
-                line_total_cents=line.unit_price_cents * line.quantity,
+                id=str(p.line.id),
+                variant_id=str(p.line.variant_id),
+                quantity=p.line.quantity,
+                unit_price_cents=p.line.unit_price_cents,
+                tax_convention=p.priced.convention,
+                discount_amounts={str(k): v for k, v in p.priced.discount_amounts.items()},
+                discount_cents=sum(p.priced.discount_amounts.values()),
+                tax=tax_out(p.priced.tax),
+                line_total_cents=p.priced.tax.total_cents,
             )
-            for line in sale.lines
+            for p in priced_lines
         ],
-        subtotal_cents=sum(line.unit_price_cents * line.quantity for line in sale.lines),
+        discount_ids=sorted(str(i) for i in selected),
+        subtotal_cents=grand_total - tax_total + discount_total,
+        discount_total_cents=discount_total,
+        tax_totals_by_component=tax_totals,
+        tax_total_cents=tax_total,
+        grand_total_cents=grand_total,
         created_at=sale.created_at,
         updated_at=sale.updated_at,
     )
@@ -170,6 +300,9 @@ async def _invoice_out(db: SessionDep, invoice: RetailInvoice) -> RetailInvoiceO
         customer_id=str(invoice.customer_id) if invoice.customer_id is not None else None,
         status=invoice.status,
         subtotal_cents=invoice.subtotal_cents,
+        discount_total_cents=invoice.discount_total_cents,
+        tax_total_cents=invoice.tax_total_cents,
+        tax_totals_by_component=invoice.tax_totals_by_component,
         grand_total_cents=invoice.grand_total_cents,
         sold_by_staff_id=str(invoice.sold_by_staff_id),
         payment_collector_staff_id=(
@@ -185,7 +318,29 @@ async def _invoice_out(db: SessionDep, invoice: RetailInvoice) -> RetailInvoiceO
                 variant_id=str(line.variant_id),
                 quantity=line.quantity,
                 unit_price_cents=line.unit_price_cents,
+                discount_cents=line.discount_cents,
+                tax_cents=line.tax_cents,
+                tax_convention=line.tax_convention,
                 line_total_cents=line.line_total_cents,
+                discounts=[
+                    RetailInvoiceLineDiscountOut(
+                        discount_id=str(d.discount_id),
+                        discount_name=d.discount_name,
+                        discount_kind=d.discount_kind,
+                        percentage_bp=d.percentage_bp,
+                        amount_cents=d.amount_cents,
+                        resolved_amount_cents=d.resolved_amount_cents,
+                    )
+                    for d in line.discounts
+                ],
+                taxes=[
+                    RetailInvoiceLineTaxOut(
+                        component_code=t.component_code,
+                        rate_bp=t.rate_bp,
+                        amount_cents=t.amount_cents,
+                    )
+                    for t in line.taxes
+                ],
                 staff_id=str(line.staff_id),
                 commission_rate_bp=line.commission_rate_bp,
             )
@@ -269,12 +424,12 @@ async def start_retail_sale(
         metadata={"customer_id": str(payload.customer_id) if payload.customer_id else None},
     )
     await db.commit()
-    return _sale_out(await _load_sale(db, sale.id))
+    return await _sale_out(db, await _load_sale(db, sale.id))
 
 
 @router.get("/retail-sales/{sale_id}")
 async def get_retail_sale(sale_id: uuid.UUID, _: RetailSeller, db: SessionDep) -> RetailSaleOut:
-    return _sale_out(await _load_sale(db, sale_id))
+    return await _sale_out(db, await _load_sale(db, sale_id))
 
 
 @router.patch("/retail-sales/{sale_id}")
@@ -307,7 +462,7 @@ async def patch_retail_sale(
             metadata={"changed": sorted(sent)},
         )
     await db.commit()
-    return _sale_out(await _load_sale(db, sale.id))
+    return await _sale_out(db, await _load_sale(db, sale.id))
 
 
 @router.post("/retail-sales/{sale_id}/lines", status_code=201)
@@ -347,7 +502,7 @@ async def add_retail_sale_line(
         metadata={"variant_id": str(variant.id), "quantity": payload.quantity},
     )
     await db.commit()
-    return _sale_out(await _load_sale(db, sale.id))
+    return await _sale_out(db, await _load_sale(db, sale.id))
 
 
 @router.delete("/retail-sales/{sale_id}/lines/{line_id}")
@@ -374,7 +529,45 @@ async def remove_retail_sale_line(
         metadata={"line_id": str(line_id)},
     )
     await db.commit()
-    return _sale_out(await _load_sale(db, sale.id))
+    return await _sale_out(db, await _load_sale(db, sale.id))
+
+
+@router.put("/retail-sales/{sale_id}/discounts")
+async def apply_retail_discounts(
+    sale_id: uuid.UUID, payload: ApplyRetailDiscountsIn, actor: RetailSeller, db: SessionDep
+) -> RetailSaleOut:
+    """Replaces the draft's whole discount selection (review R3; `bill_review.
+    apply_discounts`' shape). A combination that fails on any line is refused whole (422) and
+    nothing is persisted."""
+    sale = await _load_sale(db, sale_id)
+    if sale.status != "draft":
+        raise HTTPException(status_code=422, detail="This retail sale has already been issued.")
+    selected = set(payload.discount_ids)
+    if selected:
+        known = set(
+            await db.scalars(select(Discount.id).where(Discount.id.in_(selected), Discount.enabled))
+        )
+        if selected - known:
+            raise HTTPException(
+                status_code=422,
+                detail="No such enabled discount: "
+                + ", ".join(sorted(str(i) for i in selected - known)),
+            )
+    await _price_sale(db, sale, selected)  # 422 before anything is written
+
+    await db.execute(delete(RetailSaleDiscount).where(RetailSaleDiscount.sale_id == sale_id))
+    db.add_all([RetailSaleDiscount(sale_id=sale_id, discount_id=i) for i in selected])
+    await db.flush()
+    record_event(
+        db,
+        "retail_sale.discounts_applied",
+        target_type="retail_sale",
+        target_id=str(sale_id),
+        actor_user_id=actor.id,
+        metadata={"discount_ids": sorted(str(i) for i in selected)},
+    )
+    await db.commit()
+    return await _sale_out(db, await _load_sale(db, sale_id))
 
 
 # --- issue: the one atomic, stock-deducting moment ---------------------------------------------
@@ -394,16 +587,26 @@ async def issue_retail_sale(
 
     staff = await _load_staff(db, sale.sold_by_staff_id)
 
+    priced_lines, pool = await _price_sale(db, sale, await _selection(db, sale.id))
+    priced_by_line = {p.line.id: p for p in priced_lines}
+    rates = {c.code: c.rate_bp for c in pool}
+    tax_totals = invoice_tax_totals([p.priced.tax for p in priced_lines])
+    tax_total_cents = sum(tax_totals.values())
+    grand_total_cents = sum(p.priced.tax.total_cents for p in priced_lines)
+    discount_total_cents = sum(sum(p.priced.discount_amounts.values()) for p in priced_lines)
+
     invoice_number = await allocate_invoice_number(db, business_id=business.id)
-    subtotal_cents = sum(line.unit_price_cents * line.quantity for line in sale.lines)
 
     invoice = RetailInvoice(
         business_id=business.id,
         invoice_number=invoice_number,
         retail_sale_id=sale.id,
         customer_id=sale.customer_id,
-        subtotal_cents=subtotal_cents,
-        grand_total_cents=subtotal_cents,
+        subtotal_cents=grand_total_cents - tax_total_cents + discount_total_cents,
+        discount_total_cents=discount_total_cents,
+        tax_total_cents=tax_total_cents,
+        tax_totals_by_component=tax_totals,
+        grand_total_cents=grand_total_cents,
         sold_by_staff_id=sale.sold_by_staff_id,
         payment_collector_staff_id=sale.payment_collector_staff_id,
         issued_by=actor.id,
@@ -439,20 +642,48 @@ async def issue_retail_sale(
         if movement.low_stock_alert_armed:
             armed_variant_ids.append(line.variant_id)
 
-        db.add(
-            RetailInvoiceLine(
-                invoice_id=invoice.id,
-                retail_sale_line_id=line.id,
-                variant_id=line.variant_id,
-                quantity=line.quantity,
-                unit_price_cents=line.unit_price_cents,
-                line_total_cents=line.unit_price_cents * line.quantity,
-                staff_id=sale.sold_by_staff_id,
-                # `Staff.commission_rate_retail_bp`, read fresh and frozen here — retail's own
-                # "delivery" moment (`billing/models.py`'s own module section).
-                commission_rate_bp=staff.commission_rate_retail_bp,
-            )
+        p = priced_by_line[line.id]
+        invoice_line = RetailInvoiceLine(
+            invoice_id=invoice.id,
+            retail_sale_line_id=line.id,
+            variant_id=line.variant_id,
+            quantity=line.quantity,
+            unit_price_cents=line.unit_price_cents,
+            discount_cents=sum(p.priced.discount_amounts.values()),
+            tax_cents=p.priced.tax.tax_cents,
+            tax_convention=p.priced.convention,
+            line_total_cents=p.priced.tax.total_cents,
+            commission_basis_cents=p.priced.commission_basis_cents,
+            staff_id=sale.sold_by_staff_id,
+            # `Staff.commission_rate_retail_bp`, read fresh and frozen here — retail's own
+            # "delivery" moment (`billing/models.py`'s own module section).
+            commission_rate_bp=staff.commission_rate_retail_bp,
         )
+        db.add(invoice_line)
+        await db.flush()
+        for discount in p.discounts:
+            db.add(
+                RetailInvoiceLineDiscount(
+                    retail_invoice_line_id=invoice_line.id,
+                    discount_id=discount.id,
+                    discount_name=discount.name,
+                    discount_kind=discount.kind,
+                    percentage_bp=discount.percentage_bp,
+                    amount_cents=discount.amount_cents,
+                    stackable=discount.stackable,
+                    commission_basis=discount.commission_basis,
+                    resolved_amount_cents=p.priced.discount_amounts[discount.id],
+                )
+            )
+        for code, amount_cents in p.priced.tax.component_cents.items():
+            db.add(
+                RetailInvoiceLineTax(
+                    retail_invoice_line_id=invoice_line.id,
+                    component_code=code,
+                    rate_bp=rates.get(code, 0),
+                    amount_cents=amount_cents,
+                )
+            )
 
     sale.status = "issued"
     await db.flush()
@@ -466,7 +697,7 @@ async def issue_retail_sale(
         metadata={
             "retail_sale_id": str(sale_id),
             "invoice_number": invoice_number,
-            "grand_total_cents": subtotal_cents,
+            "grand_total_cents": grand_total_cents,
         },
     )
     await db.commit()

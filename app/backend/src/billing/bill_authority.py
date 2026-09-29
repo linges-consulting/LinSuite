@@ -54,6 +54,7 @@ from billing.bill_review import (
     _LineConflict,
     _load_bill,
     _persisted_selection,
+    price_bill,
 )
 from billing.models import BillOverrideRequest
 from core.audit import record_event
@@ -92,10 +93,18 @@ _INLINE_AUTH_REFUSED = Forbidden(INVALID_PASSWORD, "Incorrect email or password"
 # --- what goes over the wire -----------------------------------------------------------------
 
 
+TaxConventionIn = Literal["inclusive", "exclusive"]
+CommissionBasisIn = Literal["reduces", "absorbed"]
+
+
 class OverrideRequestIn(BaseModel):
     kind: Literal["discount", "price_override"]
     requested_total_cents: Annotated[int, Field(ge=0)]
     reason: Annotated[str, Field(min_length=1, max_length=2000)]
+    # Review R2/R5: the total is a tax-inclusive bill total (default, #64's meaning) or a
+    # pre-tax amount; commission follows the revised price unless "absorbed" (spec §142).
+    tax_convention: TaxConventionIn = "inclusive"
+    commission_basis: CommissionBasisIn = "reduces"
 
 
 class DecisionIn(BaseModel):
@@ -104,6 +113,9 @@ class DecisionIn(BaseModel):
     # as-is"; any other value is the revision the acceptance criteria call for.
     decided_total_cents: Annotated[int, Field(ge=0)] | None = None
     note: Annotated[str, Field(max_length=2000)] | None = None
+    # Omitted = the request's own.
+    tax_convention: TaxConventionIn | None = None
+    commission_basis: CommissionBasisIn | None = None
 
 
 class OverrideRequestOut(BaseModel):
@@ -112,6 +124,7 @@ class OverrideRequestOut(BaseModel):
     kind: str
     reason: str
     requested_total_cents: int
+    tax_convention: str
     requested_by_email: str
     requested_at: datetime
     bill_revision_as_of: datetime
@@ -137,6 +150,8 @@ class InlineAdminStatusOut(BaseModel):
 class InlineAdminEditIn(BaseModel):
     total_cents: Annotated[int, Field(ge=0)]
     reason: Annotated[str, Field(min_length=1, max_length=2000)]
+    tax_convention: TaxConventionIn = "inclusive"
+    commission_basis: CommissionBasisIn = "reduces"
 
 
 # --- helpers -----------------------------------------------------------------------------------
@@ -157,6 +172,17 @@ async def _email_of(db: SessionDep, user_id: uuid.UUID | None) -> str | None:
     return await db.scalar(select(User.email).where(User.id == user_id))
 
 
+async def _refuse_unbillable(db: SessionDep, bill) -> None:
+    """An override the bill's lines cannot carry (below what package credits already
+    prepaid, review R6) is refused before anything commits — nothing is persisted."""
+    try:
+        await price_bill(
+            db, await _business(db), bill, selected_ids=await _persisted_selection(db, bill.id)
+        )
+    except _LineConflict as error:
+        raise HTTPException(status_code=422, detail=error.detail) from error
+
+
 def _request_out(
     request: BillOverrideRequest, requested_by: str, decided_by: str | None
 ) -> OverrideRequestOut:
@@ -166,6 +192,7 @@ def _request_out(
         kind=request.kind,
         reason=request.reason,
         requested_total_cents=request.requested_total_cents,
+        tax_convention=request.tax_convention,
         requested_by_email=requested_by,
         requested_at=request.requested_at,
         bill_revision_as_of=request.bill_revision_as_of,
@@ -199,6 +226,8 @@ async def request_override(
         kind=payload.kind,
         reason=payload.reason,
         requested_total_cents=payload.requested_total_cents,
+        tax_convention=payload.tax_convention,
+        commission_basis=payload.commission_basis,
         # The stale-approval guard's "as of" — the bill's own state at the moment of the ask.
         bill_revision_as_of=bill.updated_at,
     )
@@ -277,12 +306,16 @@ async def decide_override_request(
             else request.requested_total_cents
         )
         request.decided_total_cents = decided
+        request.tax_convention = payload.tax_convention or request.tax_convention
+        request.commission_basis = payload.commission_basis or request.commission_basis
         # Applied here, not in a second step: this *is* "staff can resume ordinary billing on
         # the same draft" (acceptance criterion) — there is no approved-but-unapplied state
         # left for a second stale window to open on.
         now = datetime.now(UTC)
         bill.manual_override_cents = decided
         bill.manual_override_reason = payload.note or request.reason
+        bill.override_tax_convention = request.tax_convention
+        bill.override_commission_basis = request.commission_basis
         bill.updated_at = now
         # #65's stale-approval checkpoint: the exact same instant as `updated_at` above, so
         # issue can tell "the bill hasn't moved since this override was authorized"
@@ -290,6 +323,7 @@ async def decide_override_request(
         # (a sibling appointment completing into this bill afterward bumps `updated_at` again
         # without touching this column).
         bill.override_applied_revision = now
+        await _refuse_unbillable(db, bill)
 
     await db.flush()
     record_event(
@@ -469,9 +503,12 @@ async def apply_inline_admin_edit(
     now = datetime.now(UTC)
     bill.manual_override_cents = payload.total_cents
     bill.manual_override_reason = payload.reason
+    bill.override_tax_convention = payload.tax_convention
+    bill.override_commission_basis = payload.commission_basis
     bill.updated_at = now
     # #65's stale-approval checkpoint — see `decide_override_request`'s own comment above.
     bill.override_applied_revision = now
+    await _refuse_unbillable(db, bill)
     await db.flush()
 
     record_event(

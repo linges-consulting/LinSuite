@@ -105,6 +105,10 @@ class ProductVariant(Base):
 
     __tablename__ = "product_variants"
     __table_args__ = (
+        CheckConstraint(
+            "tax_convention IS NULL OR tax_convention IN ('inclusive', 'exclusive')",
+            name="ck_product_variants_tax_convention",
+        ),
         CheckConstraint("price_cents >= 0", name="ck_product_variants_price"),
         CheckConstraint("quantity_on_hand >= 0", name="ck_product_variants_quantity"),
         CheckConstraint("low_stock_threshold >= 0", name="ck_product_variants_low_stock_threshold"),
@@ -133,8 +137,10 @@ class ProductVariant(Base):
     price_cents: Mapped[int] = mapped_column(Integer, server_default="0")
     quantity_on_hand: Mapped[int] = mapped_column(Integer, server_default="0")
     low_stock_threshold: Mapped[int] = mapped_column(Integer, server_default="0")
-    # See the module docstring: free-form keys until #57's tax_components table lands.
+    # `TaxComponent.code`s taxing this variant, validated on write (review R1), plus whether
+    # `price_cents` is entered tax-inclusive or tax-exclusive (R2).
     tax_component_keys: Mapped[list[str]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    tax_convention: Mapped[str] = mapped_column(String(16), server_default=text("'exclusive'"))
     # Armed (false) vs already-alerted (true) for the *current* crossing below
     # `low_stock_threshold` (#62; `inventory/stock.py::record_movement` is the only writer,
     # flipped atomically in the same transaction as the stock-changing write — never a

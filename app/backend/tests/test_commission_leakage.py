@@ -52,6 +52,7 @@ async def claimed_instance(client):
             for table in (
                 "bill_override_requests",
                 "service_bill_discounts",
+                "retail_sale_discounts",  # review T1, 0064
                 "discount_eligible_items",
                 "discounts",
                 "tax_component_rates",

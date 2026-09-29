@@ -80,6 +80,9 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "retail_invoices": ("SELECT", "INSERT", "UPDATE"),
     # Frozen retail invoice snapshot rows: append-only, same shape as `invoice_lines` (#75, 0056).
     "retail_invoice_lines": ("SELECT", "INSERT"),
+    # Review R3/R4, 0064: frozen retail line discounts/taxes, same shape as `invoice_lines`.
+    "retail_invoice_line_discounts": ("SELECT", "INSERT"),
+    "retail_invoice_line_taxes": ("SELECT", "INSERT"),
     # The commission ledger (#69, 0057): append-only, a correction is a second row
     # (`kind="reversal"`), never an UPDATE of an existing one.
     "commission_postings": ("SELECT", "INSERT"),
@@ -129,6 +132,10 @@ TRIGGERS = (
     ("package_purchase_credits", "package_purchase_credits_no_rewrite"),
     ("retail_invoices", "retail_invoices_voidable_guard"),
     ("retail_invoice_lines", "retail_invoice_lines_no_rewrite"),
+    ("retail_invoice_line_discounts", "retail_invoice_line_discounts_no_rewrite"),
+    ("retail_invoice_line_taxes", "retail_invoice_line_taxes_no_rewrite"),
+    ("invoices", "invoices_tax_snapshot_frozen"),
+    ("retail_invoices", "retail_invoices_tax_snapshot_frozen"),
     ("commission_postings", "commission_postings_no_rewrite"),
     ("invoice_payments", "invoice_payments_no_rewrite"),
     ("invoice_balance_authorizations", "invoice_balance_authorizations_no_rewrite"),

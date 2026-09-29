@@ -136,6 +136,25 @@ function fakeServer() {
         }
       }
 
+      if (url === '/api/admin/billing/tax-components') {
+        const component = (id: string, code: string, name: string, province: string | null) => ({
+          id,
+          code,
+          name,
+          province,
+          active: true,
+          rates: [],
+          current_rate_bp: 500,
+          applicable_to_business: true,
+        })
+        return Response.json({
+          tax_components: [
+            component('t1', 'GST', 'GST', null),
+            component('t2', 'PST', 'PST', 'BC'),
+          ],
+        })
+      }
+
       return Response.json({}, { status: 404 })
     }),
   )
@@ -262,6 +281,25 @@ describe('creating a variant', () => {
       })
     })
     expect(await screen.findByText('1L')).toBeInTheDocument()
+  })
+
+  it('toggles each tax component individually and states the price convention', async () => {
+    const server = fakeServer()
+    const user = userEvent.setup()
+    renderSettings()
+    await openProducts(user)
+
+    await openActions(user, 'Shampoo')
+    await user.click(await screen.findByRole('menuitem', { name: 'Add variant' }))
+    await user.type(screen.getByLabelText('Name'), '1L')
+    await user.type(screen.getByLabelText('SKU'), 'SHMP-1000')
+    await user.click(await screen.findByRole('checkbox', { name: 'GST (GST)' }))
+    await user.click(submit('Add variant'))
+
+    await waitFor(() => {
+      const post = server.calls.find((c) => c.url === '/api/admin/products/p1/variants')
+      expect(post?.body).toMatchObject({ tax_component_keys: ['GST'], tax_convention: 'exclusive' })
+    })
   })
 
   it('cannot be submitted with a negative stock count', async () => {

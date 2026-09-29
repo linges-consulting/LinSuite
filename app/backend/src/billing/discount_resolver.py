@@ -77,6 +77,36 @@ def resolve_stacked_discounts(charge_cents: int, discounts: list[DiscountInput])
     return final_cents
 
 
+def resolve_discount_amounts(
+    charge_cents: int, discounts: list[DiscountInput]
+) -> dict[uuid.UUID, int]:
+    """The cents each discount took off, frozen on an issued line (spec §140 "persist the
+    selected rule and resolved amounts"). Sums exactly to `charge_cents -
+    resolve_stacked_discounts(...)`, so it raises the same `DiscountConflict`.
+
+    Percentages are taken sequentially in id order (deterministic, independent of selection
+    order), each half-up on the running amount; the last percentage absorbs the difference to
+    the resolver's own once-rounded result. Fixed amounts are their face value."""
+    final_cents = resolve_stacked_discounts(charge_cents, discounts)
+    percentages = sorted((d for d in discounts if d.kind == "percentage"), key=lambda d: d.id)
+    fixed = {d.id: d.amount_cents or 0 for d in discounts if d.kind == "fixed"}
+    percentage_total = charge_cents - final_cents - sum(fixed.values())
+
+    amounts: dict[uuid.UUID, int] = {}
+    running = Decimal(charge_cents)
+    for d in percentages[:-1]:
+        cents = int(
+            (running * (d.percentage_bp or 0) / Decimal(10_000)).quantize(
+                Decimal(1), rounding=ROUND_HALF_UP
+            )
+        )
+        amounts[d.id] = cents
+        running -= cents
+    if percentages:
+        amounts[percentages[-1].id] = percentage_total - sum(amounts.values())
+    return amounts | fixed
+
+
 @dataclass(frozen=True)
 class DiscountEligibility:
     """The two facts an eligibility check needs off a `Discount` row: whether it applies to
