@@ -2005,6 +2005,52 @@ class PackageCreditVoid(Base):
     voided_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class PackageTransfer(Base):
+    """One hop of a package purchase's remaining credits to another client (#111, spec #96):
+    append-only, migration 0072, the exact `commission_postings` shape — the app role may
+    INSERT and SELECT and nothing else, and (unlike the tables 0057 through 0066 shipped) no
+    purge-role bypass is even written into the trigger, since 0067's own default-deny already
+    leaves a table created from here on with `SELECT` alone for `linsuite_purge`.
+
+    **The current holder is derived, never stored** (`billing/package_holder.py`): the `to` of
+    a purchase's *latest* row here, or `package_purchases.customer_id` — the purchaser,
+    permanently — if there is none. A chain (A -> B -> C) is one row per hop, ordered by
+    `transferred_at`; nothing here is ever rewritten to point somewhere else.
+
+    `override` records whether this hop bent a non-transferable definition's default refusal
+    (`package_definitions.transferable = false`); the audit event `package.transferred` carries
+    it, `{purchase_id, from_customer_id, to_customer_id, override}` — deliberately without
+    `reason`, which lives only here (spec #96 story 8: the audit log never carries free-text
+    client detail)."""
+
+    __tablename__ = "package_transfers"
+    __table_args__ = (
+        CheckConstraint(
+            "from_customer_id != to_customer_id", name="ck_package_transfers_distinct_parties"
+        ),
+        Index("ix_package_transfers_purchase_transferred", "package_purchase_id", "transferred_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    package_purchase_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("package_purchases.id", ondelete="RESTRICT")
+    )
+    from_customer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("customers.id", ondelete="RESTRICT")
+    )
+    to_customer_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("customers.id", ondelete="RESTRICT")
+    )
+    reason: Mapped[str] = mapped_column(Text)
+    override: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    transferred_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    transferred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
 # ## retail tax & discounts (review R3/R4, migration 0065)
 #
 # A retail draft carries a bill-level discount selection (`ServiceBillDiscount`'s shape; item

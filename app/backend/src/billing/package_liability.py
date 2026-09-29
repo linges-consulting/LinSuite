@@ -46,6 +46,7 @@ from auth.capabilities import Requires
 from auth.models import User
 from auth.session import CurrentUser
 from billing.models import PackageCreditRedemption, PackagePurchase, PackagePurchaseCredit
+from billing.package_holder import current_holder_id
 from billing.redemption import spendable
 from core.access_log import LogAccessIfFiltered, log_each_named, log_each_named_as
 from core.db import SessionDep
@@ -136,10 +137,15 @@ async def _report(
         .subquery()
     )
     redeemed = func.coalesce(used.c.n, 0)
+    # #111: liability attributes to the *current holder* (`billing/package_holder.py`), not
+    # `PackagePurchase.customer_id` — a transferred purchase's unused value moves with its
+    # credits, since that is whose sessions are still owed.
+    holder = current_holder_id()
     query = (
         select(
             PackagePurchase,
             PackagePurchaseCredit,
+            Customer.id,
             Customer.first_name,
             Customer.last_name,
             Service.name,
@@ -148,7 +154,7 @@ async def _report(
         )
         .select_from(PackagePurchase)
         .join(PackagePurchaseCredit)
-        .join(Customer, Customer.id == PackagePurchase.customer_id)
+        .join(Customer, Customer.id == holder)
         .join(Service, Service.id == PackagePurchaseCredit.service_id)
         .outerjoin(
             used,
@@ -168,11 +174,11 @@ async def _report(
         end = localize(datetime.combine(to + timedelta(days=1), time.min), zone)
         query = query.where(PackagePurchase.purchased_at < end)
     if customer_id:
-        query = query.where(PackagePurchase.customer_id == customer_id)
+        query = query.where(holder == customer_id)
 
     rows = [
         LiabilityRowOut(
-            customer_id=str(purchase.customer_id),
+            customer_id=str(holder_id),
             customer_name=f"{first} {last}",
             package_purchase_id=str(purchase.id),
             package_name=purchase.name,
@@ -185,7 +191,9 @@ async def _report(
             credits_remaining=credit.credits_total - n,
             unused_value_cents=value,
         )
-        for purchase, credit, first, last, service_name, n, value in await db.execute(query)
+        for purchase, credit, holder_id, first, last, service_name, n, value in await db.execute(
+            query
+        )
     ]
     customers: dict[str, LiabilityCustomerOut] = {}
     for r in rows:

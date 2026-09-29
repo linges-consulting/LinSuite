@@ -25,6 +25,7 @@ from billing.package_liability import router as package_liability_router
 from billing.package_purchase import customer_router as package_purchases_by_customer_router
 from billing.package_purchase import router as package_purchase_router
 from billing.package_refund import router as package_refund_router
+from billing.package_transfer import router as package_transfer_router
 from billing.packages import router as package_definitions_router
 from billing.payments import retail_router as retail_payments_router
 from billing.payments import router as invoice_payments_router
@@ -337,6 +338,8 @@ api.include_router(package_purchase_router)
 api.include_router(package_purchases_by_customer_router)
 # #73: package/bundle refunds (`billing.manage`, Admin Mode) — see `billing/package_refund.py`.
 api.include_router(package_refund_router)
+# #111: package transfer (`billing.manage`, Admin Mode) — see `billing/package_transfer.py`.
+api.include_router(package_transfer_router)
 # #74: unused-package liability report (`billing.manage`, Admin Mode).
 api.include_router(package_liability_router)
 # Retail sale (#75): draft cart -> atomic, stock-deducting issue (`billing.view`, Staff Mode).

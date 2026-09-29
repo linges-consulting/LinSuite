@@ -132,3 +132,6 @@ export const SELLABLE_PACKAGES = ['sellable-packages'] as const
  *  id after — the refund dialog's own pre-selection read and the package invoice view's own
  *  read, kept separate from `CLIENT_PACKAGE_PURCHASES` (a client's whole list). */
 export const PACKAGE_PURCHASE = ['package-purchase'] as const
+/** The Transfer dialog's own warning (#111): the current holder's upcoming appointments for
+ *  a purchase's covered services, id after. */
+export const PACKAGE_TRANSFER_UPCOMING = ['package-transfer-upcoming'] as const
