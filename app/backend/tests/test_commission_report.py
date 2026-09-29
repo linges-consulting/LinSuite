@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from core.db import get_purge_engine, session_scope
 from core.security import hash_password
+from scheduling.clock import today_in
 from tests.conftest import add_account, wipe_document_keys
 from tests.test_bill_review import EMAIL, SETUP, STAFF, STAFF_EMAIL, as_admin, complete_a_visit
 from tests.test_invoice_issue import issue_url
@@ -235,7 +236,10 @@ async def test_the_report_filters_by_date_range(client):
     assert empty.status_code == 200, empty.text
     assert empty.json()["rows"] == []
 
-    today = date.today().isoformat()
+    # The report's calendar is the business's, not this machine's (UTC on CI): today there.
+    async with session_scope() as db:
+        zone = await db.scalar(text("SELECT timezone FROM businesses"))
+    today = today_in(zone).isoformat()
     present = await client.get(REPORT, params={"from": today, "to": today})
     assert present.status_code == 200, present.text
     assert len(present.json()["rows"]) == 1

@@ -1,8 +1,9 @@
 """S1: opening a client's financial record is an audited read (ADR-0002, review R30).
 
 Every record-open of client-linked billing data writes exactly one `audit_access_log` row
-naming that client and the record; the list renders (the unfiltered invoice list, the whole
-package-liability report) write none (ADR-0002 §4). The routes are registered in
+naming that client and the record; the unfiltered invoice list is a list render and writes
+none (ADR-0002 §4), while the whole package-liability report logs one read per client it
+names (owner decision). The routes are registered in
 `test_access_log.py::LOGGED`; this file proves what each one writes. Retail equivalents live
 in `test_retail_access_log.py`, beside the fixture that can wipe retail tables.
 """
@@ -79,23 +80,34 @@ async def test_opening_a_service_bill_logs_one_row(client):
     assert await access_rows("service_bill", bill_id) == [customer_id]
 
 
-@pytest.mark.parametrize(
-    ("url", "resource_type"),
-    [
-        ("/api/invoices", "invoice_history"),
-        ("/api/admin/reports/package-liability", "package_liability"),
-    ],
-)
-async def test_one_clients_history_logs_but_the_list_render_does_not(client, url, resource_type):
+async def test_one_clients_invoice_history_logs_but_the_list_render_does_not(client):
     w = await world(client)
 
-    everyone = await client.get(url)
+    everyone = await client.get("/api/invoices")
     assert everyone.status_code == 200, everyone.text
-    assert await access_rows(resource_type, w.customer_id) == []
+    assert await access_rows("invoice_history", w.customer_id) == []
 
-    theirs = await client.get(url, params={"customer_id": w.customer_id})
+    theirs = await client.get("/api/invoices", params={"customer_id": w.customer_id})
     assert theirs.status_code == 200, theirs.text
-    assert await access_rows(resource_type, w.customer_id) == [w.customer_id]
+    assert await access_rows("invoice_history", w.customer_id) == [w.customer_id]
+
+
+async def test_the_liability_report_logs_one_read_per_client_it_names(client):
+    # Owner decision: unlike a list render, the whole report names every client holding
+    # credits, so each one shown gets one audited read; filtered, exactly the one client.
+    w = await world(client)
+
+    everyone = await client.get("/api/admin/reports/package-liability")
+    assert everyone.status_code == 200, everyone.text
+    named = {c["customer_id"] for c in everyone.json()["customers"]}
+    assert named == {w.customer_id}
+    assert await access_rows("package_liability", w.customer_id) == [w.customer_id]
+
+    theirs = await client.get(
+        "/api/admin/reports/package-liability", params={"customer_id": w.customer_id}
+    )
+    assert theirs.status_code == 200, theirs.text
+    assert await access_rows("package_liability", w.customer_id) == [w.customer_id] * 2
 
 
 async def test_an_unknown_invoice_404s_and_logs_nothing_there_is_no_client_to_name(client):

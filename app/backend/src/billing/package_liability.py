@@ -20,14 +20,15 @@ import uuid
 from datetime import date, datetime, time, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 
 from auth.capabilities import Requires
+from auth.session import CurrentUser
 from billing.models import PackageCreditRedemption, PackagePurchase, PackagePurchaseCredit
 from billing.redemption import spendable
-from core.access_log import LogAccessIfFiltered
+from core.access_log import LogAccessIfFiltered, log_each_named
 from core.db import SessionDep
 from core.forms import refuse
 from customers.models import Customer
@@ -79,6 +80,8 @@ class LiabilityReportOut(BaseModel):
 )
 async def package_liability_report(
     db: SessionDep,
+    user: CurrentUser,
+    request: Request,
     from_: Annotated[date | None, Query(alias="from")] = None,
     to: date | None = None,
     customer_id: uuid.UUID | None = None,
@@ -163,6 +166,12 @@ async def package_liability_report(
         )
         c.credits_remaining += r.credits_remaining
         c.unused_value_cents += r.unused_value_cents
+    if customer_id is None:
+        # Unfiltered, the report still names every client with credits left: one audited read
+        # per client shown (owner decision). Filtered, `LogAccessIfFiltered` already logged it.
+        await log_each_named(
+            db, user, request, [uuid.UUID(c) for c in customers], "package_liability"
+        )
     return LiabilityReportOut(
         rows=rows,
         customers=list(customers.values()),

@@ -40,8 +40,10 @@ RETAIL_SALES = "/api/retail-sales"
 RETAIL_INVOICES = "/api/retail-invoices"
 
 
-@pytest.fixture(autouse=True)
-async def claimed_instance(client):
+async def wipe() -> None:
+    """Everything this file creates, children first. Run on teardown too: a retail sale left
+    behind still references its customer and seller, so a later file that deletes
+    `customers`/`staff` without knowing about `retail_sales` would hit the FK."""
     async with get_purge_engine().begin() as purge:
         await purge.execute(text("DELETE FROM audit_events"))
         await purge.execute(text("DELETE FROM erasure_requests"))
@@ -104,6 +106,11 @@ async def claimed_instance(client):
         await db.execute(text("DELETE FROM roles WHERE NOT is_system"))
         await db.commit()
 
+
+@pytest.fixture(autouse=True)
+async def claimed_instance(client):
+    await wipe()
+
     from auth import setup, throttle
     from core.redis import get_redis
 
@@ -118,6 +125,7 @@ async def claimed_instance(client):
         await db.commit()
     client.cookies.clear()
     yield
+    await wipe()
 
 
 # --- helpers ------------------------------------------------------------------------------

@@ -173,6 +173,32 @@ def LogAccessOf(resource_type: str, resource_param: str, owner: Any) -> Callable
     return dependency
 
 
+async def log_each_named(
+    db: SessionDep,
+    user: CurrentUser,
+    request: Request,
+    customer_ids: list[uuid.UUID],
+    resource_type: str,
+) -> None:
+    """A report that names several clients at once: one row per client it shows (owner
+    decision for the package-liability report), all committed before the response is built —
+    if the insert fails the report is never returned, the same fail-closed order `_record`
+    keeps."""
+    for customer_id in dict.fromkeys(customer_ids):
+        db.add(
+            AccessLogEntry(
+                actor_user_id=user.id,
+                actor_role=user.role.name,
+                customer_id=customer_id,
+                resource_type=resource_type,
+                resource_id=str(customer_id),
+                action=VIEW,
+                ip=request.client.host if request.client else None,
+            )
+        )
+    await db.commit()
+
+
 def LogAccessIfFiltered(resource_type: str) -> Callable:  # noqa: N802
     """For a list that narrows to one client's history with `?customer_id=`. Unfiltered it is
     a list render (ADR-0002 §4) and writes nothing; filtered, it is that client's financial

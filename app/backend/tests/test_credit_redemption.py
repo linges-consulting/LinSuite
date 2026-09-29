@@ -16,6 +16,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from core.db import get_purge_engine, session_scope
+from scheduling.clock import today_in
 from tests.conftest import wipe_document_keys
 from tests.test_bill_review import (
     APPOINTMENTS,
@@ -460,13 +461,15 @@ async def test_an_expired_package_is_refused(client):
     owner = create_async_engine(os.environ["DATABASE_URL_MIGRATE"])
     try:
         async with owner.begin() as conn:
-            # `- 2`: Postgres's UTC `current_date` can already be tomorrow in the business tz.
+            # Yesterday on the business's own calendar — never Postgres's UTC `current_date`,
+            # which is a day ahead every evening and made this test flake by the hour.
+            zone = await conn.scalar(text("SELECT timezone FROM businesses"))
             await conn.execute(
                 text(
                     "UPDATE package_purchases SET expires_after_days = 1, "
-                    "expires_at = current_date - 2 WHERE id = :p"
+                    "expires_at = :expired WHERE id = :p"
                 ),
-                {"p": w.purchase["id"]},
+                {"p": w.purchase["id"], "expired": today_in(zone) - timedelta(days=1)},
             )
     finally:
         await owner.dispose()
