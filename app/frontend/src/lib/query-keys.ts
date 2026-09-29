@@ -110,3 +110,9 @@ export const RETAIL_INVOICES = ['retail-invoices'] as const
  *  invalidates one row's detail without refetching every page of the list. */
 export const INVOICE = ['invoice'] as const
 export const RETAIL_INVOICE = ['retail-invoice'] as const
+/** The payments panel (#103): one invoice's payment ledger, refunds and balance exceptions —
+ *  each takes `kind` then the invoice id after it, so a service and a retail invoice sharing
+ *  no id space never collide in the cache. */
+export const INVOICE_PAYMENTS = ['invoice-payments'] as const
+export const INVOICE_REFUNDS = ['invoice-refunds'] as const
+export const INVOICE_BALANCE_EXCEPTIONS = ['invoice-balance-exceptions'] as const
