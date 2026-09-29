@@ -33,6 +33,7 @@ from tests.test_bill_review import (
     as_admin,
     as_staff,
     make_customer,
+    make_discount,
 )
 from tests.test_inventory import make_product, make_variant
 
@@ -318,6 +319,130 @@ async def test_adding_an_unknown_variant_404s(client):
     )
 
     assert resp.status_code == 404, resp.text
+
+
+# --- discounts on the draft (#106): the Sell screen's picker ----------------------------------
+
+
+async def test_eligible_discounts_are_offered_with_a_live_applied_flag(client):
+    await as_admin(client)
+    discount = await make_discount(client)  # default scope "all"
+    variant = await new_variant(client, quantity_on_hand=10)
+    sale = await start_sale(client)
+    sale = await add_line(client, sale["id"], variant["id"])
+
+    offered = next(d for d in sale["eligible_discounts"] if d["id"] == discount["id"])
+    assert offered["applied"] is False
+
+    resp = await client.put(
+        f"{RETAIL_SALES}/{sale['id']}/discounts", json={"discount_ids": [discount["id"]]}
+    )
+
+    assert resp.status_code == 200, resp.text
+    applied = next(d for d in resp.json()["eligible_discounts"] if d["id"] == discount["id"])
+    assert applied["applied"] is True
+
+
+# --- listing open drafts (#106): the Sell screen's resume list --------------------------------
+
+
+async def _backdate_sale(sale_id: str, minutes: int) -> None:
+    """`retail_sales.created_at` has no trigger guarding it, but a normal session write would
+    race the ordering it is meant to prove — move the clock back through the owner engine,
+    the same way `test_invoice_list.py::_backdate` does for the voidable invoice tables."""
+    async with get_owner_engine().begin() as owner:
+        await owner.execute(
+            text(
+                "UPDATE retail_sales SET created_at = now() - make_interval(mins => :m) "
+                "WHERE id = :id"
+            ),
+            {"m": minutes, "id": sale_id},
+        )
+
+
+async def test_open_drafts_are_listed_newest_first(client):
+    await as_admin(client)
+    older = await start_sale(client)
+    await _backdate_sale(older["id"], minutes=10)
+    newer = await start_sale(client)
+
+    resp = await client.get(RETAIL_SALES)
+
+    assert resp.status_code == 200, resp.text
+    ids = [s["id"] for s in resp.json()["retail_sales"]]
+    assert ids.index(newer["id"]) < ids.index(older["id"])
+
+
+async def test_open_drafts_excludes_issued_sales(client):
+    await as_admin(client)
+    variant = await new_variant(client, quantity_on_hand=10)
+    issued = await start_sale(client)
+    issued = await add_line(client, issued["id"], variant["id"])
+    resp = await issue(client, issued["id"])
+    assert resp.status_code == 201, resp.text
+    draft = await start_sale(client)
+
+    listing = await client.get(RETAIL_SALES)
+
+    ids = [s["id"] for s in listing.json()["retail_sales"]]
+    assert draft["id"] in ids
+    assert issued["id"] not in ids
+
+
+async def test_open_drafts_shows_the_linked_customer_or_none(client):
+    await as_admin(client)
+    customer_id = await make_customer(client)
+    linked = await start_sale(client, customer_id=customer_id)
+    anonymous = await start_sale(client)
+
+    listing = await client.get(RETAIL_SALES)
+
+    by_id = {s["id"]: s for s in listing.json()["retail_sales"]}
+    assert by_id[linked["id"]]["customer_id"] == customer_id
+    assert by_id[linked["id"]]["customer_name"] is not None
+    assert by_id[anonymous["id"]]["customer_id"] is None
+    assert by_id[anonymous["id"]]["customer_name"] is None
+
+
+async def test_open_drafts_are_capped(client):
+    await as_admin(client)
+    from billing.retail_sales import OPEN_DRAFT_SALES_LIMIT
+
+    for _ in range(OPEN_DRAFT_SALES_LIMIT + 3):
+        await start_sale(client)
+
+    listing = await client.get(RETAIL_SALES)
+
+    assert len(listing.json()["retail_sales"]) == OPEN_DRAFT_SALES_LIMIT
+
+
+async def test_open_drafts_needs_billing_view(client):
+    await as_admin(client)
+    role = await client.post(
+        "/api/admin/roles",
+        json={"name": "No Billing Again", "description": "x", "capabilities": []},
+    )
+    assert role.status_code == 201, role.text
+
+    from core.security import hash_password
+    from tests.conftest import add_account
+
+    await add_account(
+        "stranger2@cedar.example",
+        await hash_password("correct horse battery 3"),
+        role=role.json()["id"],
+    )
+    client.cookies.clear()
+    login = await client.post(
+        "/api/auth/login",
+        json={"email": "stranger2@cedar.example", "password": "correct horse battery 3"},
+    )
+    assert login.status_code == 200, login.text
+
+    resp = await client.get(RETAIL_SALES)
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["code"] == "capability_required"
 
 
 # --- "sold by" vs. the payment collector: two distinct attributions ---------------------------

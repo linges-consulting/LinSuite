@@ -3397,3 +3397,160 @@ export function downloadPackageLiabilityExport(exportId: string): Promise<void> 
     `/api/admin/reports/package-liability/exports/${encodeURIComponent(exportId)}/csv`,
   )
 }
+
+// --- Sell (#106, spec #95 stories 42-49): a retail sale's draft cart, before it becomes a
+// `RetailInvoice` at issue (`billing/retail_sales.py`) ------------------------------------------
+
+/** The catalog as Sell's product search reads it (`GET /api/catalog/products`, `inventory/
+ *  routes.py`'s `public` router): active products, active variants only, any signed-in
+ *  account — the same "front-desk work, not administration" reasoning `fetchCatalog` already
+ *  gives the booking screen's own services read. */
+export type CatalogVariant = {
+  id: string
+  name: string
+  sku: string
+  barcode: string | null
+  price_cents: number
+  quantity_on_hand: number
+  low_stock_threshold: number
+  is_low_stock: boolean
+  tax_component_keys: string[]
+  tax_convention: TaxConvention
+}
+
+export type CatalogProduct = {
+  id: string
+  name: string
+  description: string | null
+  variants: CatalogVariant[]
+}
+
+export async function fetchProductCatalog(): Promise<CatalogProduct[]> {
+  const res = await fetch('/api/catalog/products', { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the product catalog')
+  return (await res.json()).products
+}
+
+export type RetailSaleLine = {
+  id: string
+  variant_id: string
+  quantity: number
+  unit_price_cents: number
+  tax_convention: TaxConvention
+  discount_amounts: Record<string, number>
+  discount_cents: number
+  tax: LineTax
+  line_total_cents: number
+}
+
+/** `GET /api/retail-sales/{id}` (draft) / every mutation on it — `billing/retail_sales.py::
+ *  RetailSaleOut`. Recomputed live on every read/write, the same "never cached stale across a
+ *  toggle" contract a draft bill already gives. */
+export type RetailSale = {
+  id: string
+  status: 'draft' | 'issued'
+  customer_id: string | null
+  sold_by_staff_id: string
+  payment_collector_staff_id: string | null
+  /** Set on the replacement draft a retail cancel (#107) opens. */
+  replaces_retail_invoice_id: string | null
+  lines: RetailSaleLine[]
+  /** The picker's full offer, `applied` following the current selection — same shape as a
+   *  service bill's own `eligible_discounts`. */
+  eligible_discounts: DiscountChoice[]
+  discount_ids: string[]
+  subtotal_cents: number
+  discount_total_cents: number
+  tax_totals_by_component: Record<string, number>
+  tax_total_cents: number
+  grand_total_cents: number
+  created_at: string
+  updated_at: string
+}
+
+/** Sell's resume list (`GET /api/retail-sales`, no id): open drafts, newest first, capped —
+ *  a sale interrupted by a phone call or a refresh is not lost. */
+export type RetailSaleSummary = {
+  id: string
+  customer_id: string | null
+  customer_name: string | null
+  sold_by_staff_id: string
+  line_count: number
+  created_at: string
+  updated_at: string
+}
+
+export async function fetchOpenRetailSales(): Promise<RetailSaleSummary[]> {
+  const res = await fetch('/api/retail-sales', { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the open sales')
+  return (await res.json()).retail_sales
+}
+
+export async function fetchRetailSale(id: string): Promise<RetailSale> {
+  const res = await fetch(`/api/retail-sales/${encodeURIComponent(id)}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load this sale')
+  return res.json()
+}
+
+export async function startRetailSale(customerId?: string | null): Promise<RetailSale> {
+  const res = await post('/api/retail-sales', { customer_id: customerId ?? null })
+  if (!res.ok) throw await failure(res, 'Could not start this sale')
+  return res.json()
+}
+
+export async function addRetailSaleLine(
+  saleId: string,
+  variantId: string,
+  quantity: number,
+): Promise<RetailSale> {
+  const res = await send('POST', `/api/retail-sales/${encodeURIComponent(saleId)}/lines`, {
+    variant_id: variantId,
+    quantity,
+  })
+  if (!res.ok) throw await failure(res, 'Could not add this product')
+  return res.json()
+}
+
+export async function removeRetailSaleLine(saleId: string, lineId: string): Promise<RetailSale> {
+  const res = await send(
+    'DELETE',
+    `/api/retail-sales/${encodeURIComponent(saleId)}/lines/${encodeURIComponent(lineId)}`,
+  )
+  if (!res.ok) throw await failure(res, 'Could not remove this line')
+  return res.json()
+}
+
+/** Replaces the draft's whole selection in one call, the same shape `applyBillDiscounts`
+ *  already gives the service side. A 422 carries the server's own specific reason verbatim. */
+export async function applyRetailSaleDiscounts(
+  saleId: string,
+  discountIds: string[],
+): Promise<RetailSale> {
+  const res = await send('PUT', `/api/retail-sales/${encodeURIComponent(saleId)}/discounts`, {
+    discount_ids: discountIds,
+  })
+  if (!res.ok) throw await failure(res, 'Could not apply these discounts')
+  return res.json()
+}
+
+/** Issuing lands on the retail invoice with the payment dialog open (`?pay=1`) — a 409 here
+ *  is the stock conflict, its message reading "Not enough stock for '<name>' ...: only N
+ *  left" (`inventory/stock.py::InsufficientStock`). */
+export async function issueRetailSale(saleId: string): Promise<RetailInvoice> {
+  const res = await send('POST', `/api/retail-sales/${encodeURIComponent(saleId)}/issue`, {})
+  if (!res.ok) throw await failure(res, 'Could not issue this sale')
+  return res.json()
+}
+
+/** A 409 issuing a sale is the stock conflict (spec #95 story 47): `error.message` carries
+ *  the variant's name and how many are actually on hand, written for a log line
+ *  (`retail_sales.py::issue_retail_sale`: `"Not enough stock for '<name>' to complete this
+ *  sale: variant <id> has <N> on hand, cannot apply a delta of <d>"`). Parsed here so the
+ *  cart can show "only N left" instead of that sentence verbatim. */
+export function stockConflict(error: unknown): { name: string; available: number } | null {
+  if (!(error instanceof ApiError) || error.status !== 409) return null
+  const match = /^Not enough stock for '(.+)' to complete this sale: .*?(\d+) on hand/.exec(
+    error.message,
+  )
+  return match ? { name: match[1], available: Number(match[2]) } : null
+}

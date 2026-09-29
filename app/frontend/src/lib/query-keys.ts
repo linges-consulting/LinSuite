@@ -116,3 +116,9 @@ export const RETAIL_INVOICE = ['retail-invoice'] as const
 export const INVOICE_PAYMENTS = ['invoice-payments'] as const
 export const INVOICE_REFUNDS = ['invoice-refunds'] as const
 export const INVOICE_BALANCE_EXCEPTIONS = ['invoice-balance-exceptions'] as const
+/** Sell (#106): the product catalog Sell's search reads (`/api/catalog/products`) — a
+ *  different key from `CATALOG`, which is the booking screen's own services read. Open
+ *  drafts (newest first, capped), and one draft sale's own read/write, id after. */
+export const PRODUCT_CATALOG = ['product-catalog'] as const
+export const OPEN_RETAIL_SALES = ['open-retail-sales'] as const
+export const RETAIL_SALE = ['retail-sale'] as const
