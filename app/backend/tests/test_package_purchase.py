@@ -58,6 +58,7 @@ async def claimed_instance(client):
             # RESTRICT`.
             await owner.execute(text("DELETE FROM package_credit_redemptions"))  # #72
             await owner.execute(text("DELETE FROM package_credit_voids"))  # #73
+            await owner.execute(text("DELETE FROM package_transfers"))  # #111
             await owner.execute(text("DELETE FROM package_purchase_credits"))
             await owner.execute(text("DELETE FROM invoice_payment_transfers"))  # #68
             await owner.execute(text("DELETE FROM commission_postings"))  # #69
@@ -667,6 +668,7 @@ async def test_the_client_scoped_list_shows_remaining_and_used_credits_per_servi
         "credits_total": 2,
         "credits_used": 0,
         "credits_remaining": 2,
+        "used_by_you": 0,
     }
     assert by_service[facial["id"]]["credits_total"] == 3
     assert by_service[facial["id"]]["credits_remaining"] == 3

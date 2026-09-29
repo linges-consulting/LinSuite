@@ -217,3 +217,28 @@ Issued invoices are corrected through cancellation and replacement. Payments, cr
 - Existing document storage accepts an explicit encryption key but its records are currently tied to customer document keys. Billing-owned financial retention and anonymous retail require extending that ownership/storage contract while preserving accepted clinical-retention and read-audit ADRs. This is an explicit technical requirement, not permission to weaken the existing protections.
 - Invoice/payment renders and separate treatment receipts must reconcile without counting prepaid redemption, allocation transfers or replacement invoices as new cash receipts. Preserve historical financial snapshots while showing the current ledger-derived balance.
 - Insurance receipt requirements differ across plans. The app supplies accurate service/payment documents; it does not promise reimbursement or characterize an approved-but-unpaid amount as received.
+
+## Amendment — 2026-09-29 (#111, spec #96): the derived holder
+
+§155's "audited transfer" is implemented by #111 as `package_transfers` — an append-only
+table (purchase, from client, to client, reason, override flag, transferring user, instant),
+the same DB-enforced shape this spec's own "Database enforcement" testing boundary already
+holds every ledger table to.
+
+**The package holder is derived from the transfer log, never stored.** `package_purchases.
+customer_id` keeps its existing meaning exactly — the purchaser, the payer of record,
+permanently; invoice, payments, refunds and commission continue to reference it and nothing
+about their behaviour changes. The *current holder* — who a purchase's remaining credits
+belong to right now — is the `to` client of that purchase's latest transfer, or the purchaser
+if it has none, computed by one shared SQL helper (`billing/package_holder.py`) rather than
+three separately-maintained reads. Checkout eligibility, the client package-purchases list and
+the package-liability report all resolve the holder through that one helper, so they can never
+drift out of step with each other on who currently holds a purchase's credits.
+
+A transfer moves the *whole* remaining balance of one purchase to one new holder — no partial
+transfers, no per-service split — so a package always has exactly one holder at a time.
+Credits already redeemed stay attributed to whoever held the purchase at the moment of
+redemption (the appointment's own customer, unchanged by a later transfer). Refunds are
+untouched: `billing/package_refund.py` refunds `package_purchases.customer_id` — the
+purchaser — regardless of who currently holds the credits, exactly as this spec's "Standard
+package refunds" and "Manual refund exceptions" sections already specify.

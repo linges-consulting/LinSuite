@@ -65,6 +65,21 @@ const PURCHASE = {
   name: '10-Session Massage Pack',
   price_cents: 96000,
   customer_id: 'c1',
+  purchaser_name: 'Priya Nair',
+  current_holder_id: 'c1',
+  current_holder_name: 'Priya Nair',
+  held_by_viewer: true,
+  transferable: false,
+  transfers: [] as {
+    id: string
+    from_customer_id: string
+    from_customer_name: string
+    to_customer_id: string
+    to_customer_name: string
+    reason: string
+    override: boolean
+    transferred_at: string
+  }[],
   purchased_at: '2026-09-01T15:00:00Z',
   expires_at: null as string | null,
   credits_activated: true,
@@ -78,6 +93,7 @@ const PURCHASE = {
       credits_total: 10,
       credits_used: 3,
       credits_remaining: 7,
+      used_by_you: 3,
     },
   ],
 }
@@ -135,14 +151,18 @@ function fake({
   capabilities = ['customers.view', 'billing.view'],
   mode = 'staff' as 'staff' | 'admin',
   invoice = packageInvoice(),
+  upcoming = [] as { id: string; starts_at: string; service_name: string; staff_name: string }[],
   onRefund,
+  onTransfer,
 }: {
   purchases?: (typeof PURCHASE)[]
   sellable?: (typeof SELLABLE)[]
   capabilities?: string[]
   mode?: 'staff' | 'admin'
   invoice?: ReturnType<typeof packageInvoice>
+  upcoming?: { id: string; starts_at: string; service_name: string; staff_name: string }[]
   onRefund?: (body: Record<string, unknown>) => Response | undefined
+  onTransfer?: (body: Record<string, unknown>) => Response | undefined
 } = {}) {
   return stubApi({
     signedIn: true,
@@ -151,6 +171,41 @@ function fake({
       if (url === '/api/customers/c1') return Response.json(PROFILE)
       if (url === '/api/customers/c1/package-purchases') return Response.json({ purchases })
       if (url === '/api/packages') return Response.json({ packages: sellable })
+      if (url.startsWith('/api/customers?')) {
+        const q = new URL(url, 'http://test').searchParams.get('q') ?? ''
+        const customers = q.toLowerCase().includes('sam')
+          ? [{ id: 'c2', first_name: 'Sam', last_name: 'Lee', email: null, phone: null, classification: 'new' }]
+          : []
+        return Response.json({ customers })
+      }
+      if (url === '/api/packages/purchases/pp1/upcoming-appointments') {
+        return Response.json({ appointments: upcoming })
+      }
+      if (url === '/api/packages/purchases/pp1/transfer' && body !== undefined) {
+        return (
+          onTransfer?.(body) ??
+          Response.json(
+            {
+              package_purchase_id: 'pp1',
+              current_holder_id: (body as { to_customer_id: string }).to_customer_id,
+              current_holder_name: 'Sam Lee',
+              transfers: [
+                {
+                  id: 'pt1',
+                  from_customer_id: 'c1',
+                  from_customer_name: 'Priya Nair',
+                  to_customer_id: (body as { to_customer_id: string }).to_customer_id,
+                  to_customer_name: 'Sam Lee',
+                  reason: (body as { reason: string }).reason,
+                  override: (body as { override: boolean }).override,
+                  transferred_at: new Date().toISOString(),
+                },
+              ],
+            },
+            { status: 201 },
+          )
+        )
+      }
       if (url === '/api/packages/pd1/purchase' && body !== undefined) {
         return Response.json(
           {
@@ -408,4 +463,236 @@ test('a redeemed credit forces the manual exception, and sends the chosen remain
       reverse_commission: true,
     },
   })
+})
+
+// --- Transfer (#111, spec #96) -----------------------------------------------------------------
+
+test('Transfer is absent in Staff Mode', async () => {
+  fake({ capabilities: ['customers.view', 'billing.view', 'billing.manage'], mode: 'staff' })
+  renderApp('/clients/c1')
+
+  await screen.findByRole('table', { name: 'Packages' })
+  expect(screen.queryByRole('button', { name: 'Transfer' })).not.toBeInTheDocument()
+})
+
+test('Transfer is absent without billing.manage, even in Admin Mode', async () => {
+  fake({ capabilities: ['customers.view', 'billing.view'], mode: 'admin' })
+  renderApp('/clients/c1')
+
+  await screen.findByRole('table', { name: 'Packages' })
+  expect(screen.queryByRole('button', { name: 'Transfer' })).not.toBeInTheDocument()
+})
+
+test('Transfer is absent on a purchase this client no longer holds', async () => {
+  fake({
+    purchases: [
+      {
+        ...PURCHASE,
+        held_by_viewer: false,
+        current_holder_id: 'c2',
+        current_holder_name: 'Sam Lee',
+        transfers: [
+          {
+            id: 'pt1',
+            from_customer_id: 'c1',
+            from_customer_name: 'Priya Nair',
+            to_customer_id: 'c2',
+            to_customer_name: 'Sam Lee',
+            reason: 'Client moved',
+            override: false,
+            transferred_at: '2026-09-20T10:00:00Z',
+          },
+        ],
+      },
+    ],
+    capabilities: ['customers.view', 'billing.view', 'billing.manage'],
+    mode: 'admin',
+  })
+  renderApp('/clients/c1')
+
+  await screen.findByRole('table', { name: 'Packages' })
+  expect(screen.queryByRole('button', { name: 'Transfer' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Refund' })).not.toBeInTheDocument()
+})
+
+test('the override checkbox appears only for a non-transferable package', async () => {
+  const user = userEvent.setup()
+  fake({
+    purchases: [{ ...PURCHASE, transferable: false }],
+    capabilities: ['customers.view', 'billing.view', 'billing.manage'],
+    mode: 'admin',
+  })
+  renderApp('/clients/c1')
+
+  await screen.findByRole('table', { name: 'Packages' })
+  await user.click(screen.getByRole('button', { name: 'Transfer' }))
+  const dialog = await screen.findByRole('dialog')
+
+  expect(
+    within(dialog).getByRole('checkbox', { name: /non-transferable by default/ }),
+  ).toBeInTheDocument()
+})
+
+test('no override checkbox for a transferable package', async () => {
+  const user = userEvent.setup()
+  fake({
+    purchases: [{ ...PURCHASE, transferable: true }],
+    capabilities: ['customers.view', 'billing.view', 'billing.manage'],
+    mode: 'admin',
+  })
+  renderApp('/clients/c1')
+
+  await screen.findByRole('table', { name: 'Packages' })
+  await user.click(screen.getByRole('button', { name: 'Transfer' }))
+  const dialog = await screen.findByRole('dialog')
+
+  expect(
+    within(dialog).queryByRole('checkbox', { name: /non-transferable by default/ }),
+  ).not.toBeInTheDocument()
+})
+
+test('the reason is required before Transfer can submit', async () => {
+  const user = userEvent.setup()
+  let sentBody: Record<string, unknown> | undefined
+  fake({
+    purchases: [{ ...PURCHASE, transferable: true }],
+    capabilities: ['customers.view', 'billing.view', 'billing.manage'],
+    mode: 'admin',
+    onTransfer: (body) => {
+      sentBody = body
+      return undefined
+    },
+  })
+  renderApp('/clients/c1')
+
+  await screen.findByRole('table', { name: 'Packages' })
+  await user.click(screen.getByRole('button', { name: 'Transfer' }))
+  const dialog = await screen.findByRole('dialog')
+
+  await user.type(within(dialog).getByLabelText('Client'), 'Sam')
+  await user.click(await screen.findByRole('button', { name: 'Sam Lee' }))
+
+  expect(within(dialog).getByRole('button', { name: 'Transfer' })).toBeDisabled()
+
+  await user.type(within(dialog).getByLabelText('Reason'), 'Client moved away')
+  expect(within(dialog).getByRole('button', { name: 'Transfer' })).toBeEnabled()
+  await user.click(within(dialog).getByRole('button', { name: 'Transfer' }))
+
+  await waitFor(() => expect(sentBody).toBeDefined())
+  expect(sentBody).toEqual({
+    to_customer_id: 'c2',
+    from_customer_id: 'c1',
+    reason: 'Client moved away',
+    override: false,
+  })
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+})
+
+test('the upcoming-appointments warning renders', async () => {
+  const user = userEvent.setup()
+  fake({
+    purchases: [{ ...PURCHASE, transferable: true }],
+    capabilities: ['customers.view', 'billing.view', 'billing.manage'],
+    mode: 'admin',
+    upcoming: [
+      { id: 'a1', starts_at: '2026-10-05T15:00:00Z', service_name: 'Massage', staff_name: 'Jo' },
+    ],
+  })
+  renderApp('/clients/c1')
+
+  await screen.findByRole('table', { name: 'Packages' })
+  await user.click(screen.getByRole('button', { name: 'Transfer' }))
+  const dialog = await screen.findByRole('dialog')
+
+  expect(await within(dialog).findByText(/1 upcoming appointment/)).toBeInTheDocument()
+})
+
+test('history labels render for both the old and the new holder', async () => {
+  const oldHolder = {
+    ...PURCHASE,
+    held_by_viewer: false,
+    current_holder_id: 'c2',
+    current_holder_name: 'Sam Lee',
+    transfers: [
+      {
+        id: 'pt1',
+        from_customer_id: 'c1',
+        from_customer_name: 'Priya Nair',
+        to_customer_id: 'c2',
+        to_customer_name: 'Sam Lee',
+        reason: 'Client moved',
+        override: false,
+        transferred_at: '2026-09-20T10:00:00Z',
+      },
+    ],
+    credits: [{ ...PURCHASE.credits[0], used_by_you: 3 }],
+  }
+  fake({
+    purchases: [oldHolder],
+    capabilities: ['customers.view', 'billing.view', 'billing.manage'],
+    mode: 'admin',
+  })
+  renderApp('/clients/c1')
+
+  const table = await screen.findByRole('table', { name: 'Packages' })
+  expect(within(table).getByText('Transferred to Sam Lee')).toBeInTheDocument()
+  expect(
+    within(table).getByText(/Purchased by Priya Nair.*transferred to Sam Lee/),
+  ).toBeInTheDocument()
+  expect(within(table).getByText('Massage: 3 used')).toBeInTheDocument()
+})
+
+test('the new holder sees Received from', async () => {
+  const newHolder = {
+    ...PURCHASE,
+    id: 'pp3',
+    held_by_viewer: true,
+    purchaser_name: 'Priya Nair',
+    current_holder_id: 'c1',
+    current_holder_name: 'Priya Nair',
+    transfers: [
+      {
+        id: 'pt1',
+        from_customer_id: 'c9',
+        from_customer_name: 'Ana Woo',
+        to_customer_id: 'c1',
+        to_customer_name: 'Priya Nair',
+        reason: 'Client moved',
+        override: false,
+        transferred_at: '2026-09-20T10:00:00Z',
+      },
+    ],
+  }
+  fake({
+    purchases: [newHolder],
+    capabilities: ['customers.view', 'billing.view', 'billing.manage'],
+    mode: 'admin',
+  })
+  renderApp('/clients/c1')
+
+  const table = await screen.findByRole('table', { name: 'Packages' })
+  expect(within(table).getByText('Received from Ana Woo')).toBeInTheDocument()
+})
+
+// --- Refund dialog: holder-loses-credits warning (spec #96 story 26) ----------------------------
+
+test('the Refund dialog warns the holder will lose remaining credits, when the holder is not the purchaser', async () => {
+  const user = userEvent.setup()
+  const transferred = {
+    ...PURCHASE,
+    current_holder_id: 'c2',
+    current_holder_name: 'Sam Lee',
+  }
+  fake({
+    purchases: [transferred],
+    capabilities: ['customers.view', 'billing.view', 'billing.manage'],
+    mode: 'admin',
+  })
+  renderApp('/clients/c1')
+
+  await screen.findByRole('table', { name: 'Packages' })
+  await user.click(screen.getByRole('button', { name: 'Refund' }))
+
+  const dialog = await screen.findByRole('dialog')
+  expect(within(dialog).getByText(/Sam Lee will lose the 7 remaining credits/)).toBeInTheDocument()
 })

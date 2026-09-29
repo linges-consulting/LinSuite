@@ -30,18 +30,27 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
+import { ClientFilter } from '@/routes/invoices'
 import {
   fetchClientPackagePurchases,
   fetchInvoice,
   fetchSellablePackages,
+  fetchUpcomingAppointmentsForTransfer,
   purchasePackage,
   refundPackagePurchase,
+  transferPackagePurchase,
   type ClientPackagePurchase,
+  type Customer,
   type SellablePackageRow,
 } from '@/lib/api'
 import { useCan } from '@/lib/capability-gate'
 import { centsToDollars, dollarsToCents } from '@/lib/money'
-import { CLIENT_PACKAGE_PURCHASES, INVOICE, SELLABLE_PACKAGES } from '@/lib/query-keys'
+import {
+  CLIENT_PACKAGE_PURCHASES,
+  INVOICE,
+  PACKAGE_TRANSFER_UPCOMING,
+  SELLABLE_PACKAGES,
+} from '@/lib/query-keys'
 
 const money = (cents: number) => `$${centsToDollars(cents)}`
 
@@ -85,7 +94,7 @@ export function ClientPackagesCard({
   purchaserName: string
 }) {
   const [sellOpen, setSellOpen] = useState(false)
-  const canRefund = useCan('billing.manage')
+  const canManage = useCan('billing.manage')
   const queryClient = useQueryClient()
   const query = useQuery({
     queryKey: [...CLIENT_PACKAGE_PURCHASES, customerId],
@@ -124,8 +133,8 @@ export function ClientPackagesCard({
                   <TableHead className="pl-4">Package</TableHead>
                   <TableHead>Credits remaining</TableHead>
                   <TableHead>Expiry</TableHead>
-                  <TableHead className={canRefund ? '' : 'pr-4'}>Status</TableHead>
-                  {canRefund && <TableHead className="pr-4">Actions</TableHead>}
+                  <TableHead className={canManage ? '' : 'pr-4'}>Status</TableHead>
+                  {canManage && <TableHead className="pr-4">Actions</TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -133,9 +142,9 @@ export function ClientPackagesCard({
                   <PackagePurchaseRow
                     key={row.id}
                     row={row}
-                    canRefund={canRefund}
+                    canManage={canManage}
                     purchaserName={purchaserName}
-                    onRefunded={refresh}
+                    onChanged={refresh}
                   />
                 ))}
               </TableBody>
@@ -149,32 +158,53 @@ export function ClientPackagesCard({
   )
 }
 
+/** "Purchased by A · transferred to B on date · transferred to C on date" (spec #96 story 23):
+ *  the whole chain, so any row can be explained to anyone involved. */
+function transferHistory(row: ClientPackagePurchase): string {
+  const hops = row.transfers.map(
+    (t) => `transferred to ${t.to_customer_name} on ${formatDate(t.transferred_at.slice(0, 10))}`,
+  )
+  return [`Purchased by ${row.purchaser_name}`, ...hops].join(' · ')
+}
+
 function PackagePurchaseRow({
   row,
-  canRefund,
+  canManage,
   purchaserName,
-  onRefunded,
+  onChanged,
 }: {
   row: ClientPackagePurchase
-  canRefund: boolean
+  canManage: boolean
   purchaserName: string
-  onRefunded: () => void
+  onChanged: () => void
 }) {
   const status = deriveStatus(row)
-  const { label, variant } = STATUS[status]
+  const { label, variant } = row.held_by_viewer
+    ? STATUS[status]
+    : { label: `Transferred to ${row.current_holder_name}`, variant: 'outline' as const }
   const [refunding, setRefunding] = useState(false)
+  const [transferring, setTransferring] = useState(false)
+  const lastHop = row.transfers.at(-1)
   return (
-    <TableRow className="h-12">
+    <TableRow className={row.held_by_viewer ? 'h-12' : 'h-12 opacity-60'}>
       <TableCell className="pl-4">
         <Link to={`/bills/invoices/${row.invoice_id}`} className="font-medium hover:underline">
           {row.name}
         </Link>
+        {row.transfers.length > 0 && (
+          <p className="text-xs text-muted-foreground">{transferHistory(row)}</p>
+        )}
+        {row.held_by_viewer && lastHop && (
+          <p className="text-xs text-muted-foreground">Received from {lastHop.from_customer_name}</p>
+        )}
       </TableCell>
       <TableCell>
         <ul className="text-sm">
           {row.credits.map((c) => (
             <li key={c.service_id}>
-              {c.service_name}: {c.credits_remaining} of {c.credits_total} left
+              {row.held_by_viewer
+                ? `${c.service_name}: ${c.credits_remaining} of ${c.credits_total} left`
+                : `${c.service_name}: ${c.used_by_you} used`}
             </li>
           ))}
         </ul>
@@ -186,14 +216,21 @@ function PackagePurchaseRow({
           'Never'
         )}
       </TableCell>
-      <TableCell className={canRefund ? '' : 'pr-4'}>
+      <TableCell className={canManage ? '' : 'pr-4'}>
         <Badge variant={variant}>{label}</Badge>
       </TableCell>
-      {canRefund && (
-        <TableCell className="pr-4">
-          <Button size="sm" variant="outline" onClick={() => setRefunding(true)}>
-            Refund
-          </Button>
+      {canManage && (
+        <TableCell className="flex gap-2 pr-4">
+          {row.held_by_viewer && (
+            <>
+              <Button size="sm" variant="outline" onClick={() => setRefunding(true)}>
+                Refund
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => setTransferring(true)}>
+                Transfer
+              </Button>
+            </>
+          )}
         </TableCell>
       )}
       {refunding && (
@@ -201,7 +238,14 @@ function PackagePurchaseRow({
           purchase={row}
           purchaserName={purchaserName}
           onClose={() => setRefunding(false)}
-          onRefunded={onRefunded}
+          onRefunded={onChanged}
+        />
+      )}
+      {transferring && (
+        <TransferPurchaseDialog
+          purchase={row}
+          onClose={() => setTransferring(false)}
+          onTransferred={onChanged}
         />
       )}
     </TableRow>
@@ -234,6 +278,8 @@ function RefundPurchaseDialog({
   onRefunded: () => void
 }) {
   const redeemed = purchase.credits.some((c) => c.credits_used > 0)
+  const remainingCredits = purchase.credits.reduce((sum, c) => sum + c.credits_remaining, 0)
+  const holderIsNotPurchaser = purchase.current_holder_id !== purchase.customer_id
   const invoiceQuery = useQuery({
     queryKey: [...INVOICE, purchase.invoice_id],
     queryFn: () => fetchInvoice(purchase.invoice_id),
@@ -284,6 +330,13 @@ function RefundPurchaseDialog({
           <DialogTitle>Refund {purchase.name}</DialogTitle>
           <DialogDescription>Refunds {purchaserName}, who paid.</DialogDescription>
         </DialogHeader>
+
+        {holderIsNotPurchaser && remainingCredits > 0 && (
+          <p className="text-sm text-muted-foreground">
+            {purchase.current_holder_name} will lose the {remainingCredits} remaining credit
+            {remainingCredits === 1 ? '' : 's'}.
+          </p>
+        )}
 
         <Form onSubmit={() => !incomplete && save.mutate()}>
           {redeemed ? (
@@ -372,6 +425,123 @@ function RefundPurchaseDialog({
 
 function formatDate(isoDate: string): string {
   return new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(isoDate))
+}
+
+/**
+ * *Transfer* (#111, spec #96): an admin, Admin Mode, `billing.manage`, moves a purchase's
+ * whole remaining balance to another client. The target picker reuses `ClientFilter`
+ * (`routes/invoices.tsx`), which already excludes suppressed clients server-side
+ * (`searchCustomers` -> `GET /api/customers`). The override checkbox shows only for a
+ * non-transferable package (`purchase.transferable === false`, the default); the warning
+ * lists the holder's upcoming appointments for the covered services, read fresh while the
+ * dialog is open — informational only, never a reason the button disables.
+ */
+function TransferPurchaseDialog({
+  purchase,
+  onClose,
+  onTransferred,
+}: {
+  purchase: ClientPackagePurchase
+  onClose: () => void
+  onTransferred: () => void
+}) {
+  const [target, setTarget] = useState<Customer | null>(null)
+  const [reason, setReason] = useState('')
+  const [override, setOverride] = useState(false)
+
+  const upcoming = useQuery({
+    queryKey: [...PACKAGE_TRANSFER_UPCOMING, purchase.id],
+    queryFn: () => fetchUpcomingAppointmentsForTransfer(purchase.id),
+  })
+
+  const incomplete = !target || !reason.trim() || (!purchase.transferable && !override)
+
+  const save = useMutation({
+    mutationFn: () =>
+      transferPackagePurchase(purchase.id, {
+        to_customer_id: (target as Customer).id,
+        from_customer_id: purchase.current_holder_id,
+        reason: reason.trim(),
+        override,
+      }),
+    onSuccess: () => {
+      toast.success('Package transferred')
+      onTransferred()
+      onClose()
+    },
+  })
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Transfer {purchase.name}</DialogTitle>
+          <DialogDescription>
+            Moves every remaining credit to another client; {purchase.current_holder_name}
+            {'’'}s used credits stay in their own history.
+          </DialogDescription>
+        </DialogHeader>
+
+        <Form onSubmit={() => !incomplete && save.mutate()}>
+          <div className="grid gap-1">
+            <span className="text-xs text-muted-foreground">Transfer to</span>
+            <ClientFilter customer={target} onChange={setTarget} />
+          </div>
+
+          <div className="rounded-lg border bg-muted/40 p-3 text-sm">
+            <p className="mb-1 font-medium">Credits that will move</p>
+            <ul>
+              {purchase.credits.map((c) => (
+                <li key={c.service_id}>
+                  {c.service_name}: {c.credits_remaining} of {c.credits_total}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          {!purchase.transferable && (
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="transfer-override"
+                checked={override}
+                onCheckedChange={(on) => setOverride(on === true)}
+              />
+              <Label htmlFor="transfer-override" className="font-normal">
+                Override — this package is non-transferable by default
+              </Label>
+            </div>
+          )}
+
+          {upcoming.data && upcoming.data.length > 0 && (
+            <p className="text-sm text-amber-600 dark:text-amber-500">
+              {purchase.current_holder_name} has {upcoming.data.length} upcoming appointment
+              {upcoming.data.length === 1 ? '' : 's'} for these services — they won{'’'}t find
+              these credits at checkout once the transfer completes.
+            </p>
+          )}
+
+          <Field label="Reason" htmlFor="transfer-reason">
+            <Textarea
+              id="transfer-reason"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+            />
+          </Field>
+
+          {save.error && <FormError>{save.error.message}</FormError>}
+
+          <DialogFooter>
+            <Button type="button" variant="ghost" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={incomplete || save.isPending}>
+              {save.isPending ? 'Transferring…' : 'Transfer'}
+            </Button>
+          </DialogFooter>
+        </Form>
+      </DialogContent>
+    </Dialog>
+  )
 }
 
 /**

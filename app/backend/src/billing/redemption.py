@@ -7,10 +7,12 @@ prepaid draft line commit together or not at all. Booking, cancelling and no-sho
 this module — only completion spends a credit (CLAUDE.md "package credits deduct on
 completion").
 
-**Eligible** = the appointment's own customer (packages are non-transferable), credits
-activated (#71: the purchase invoice is fully paid), not voided by a refund (#73,
-`package_credit_voids`), a credit for the appointment's service with one left, and not past
-`expires_at` in the business's timezone. `_eligible` is the one place that rule lives.
+**Eligible** = the appointment's own customer is the purchase's *current holder* (#111: a
+purchase's latest transfer, else the purchaser — `billing/package_holder.py`; a transferred
+package's credits are offered to whoever holds it now, not to the purchaser or an earlier
+holder), credits activated (#71: the purchase invoice is fully paid), not voided by a refund
+(#73, `package_credit_voids`), a credit for the appointment's service with one left, and not
+past `expires_at` in the business's timezone. `_eligible` is the one place that rule lives.
 
 **Race safety.** The purchase row is locked `FOR UPDATE` before counting what is left, so a
 second completion racing for the last credit waits, recounts, and gets a clean 409. The
@@ -43,6 +45,7 @@ from billing.models import (
     PackagePurchase,
     PackagePurchaseCredit,
 )
+from billing.package_holder import current_holder_id
 from core.audit import record_event
 from core.db import SessionDep
 from scheduling.clock import today_in
@@ -90,7 +93,10 @@ async def _eligible(
         select(PackagePurchase, PackagePurchaseCredit)
         .join(PackagePurchaseCredit)
         .where(
-            PackagePurchase.customer_id == appointment.customer_id,
+            # #111: eligibility follows the *current holder* (a purchase's latest transfer,
+            # else the purchaser), not `PackagePurchase.customer_id` directly — a transferred
+            # purchase's credits are offered to the new holder and no longer to the old one.
+            current_holder_id() == appointment.customer_id,
             *spendable(today),
             PackagePurchaseCredit.service_id == appointment.service_id,
         )

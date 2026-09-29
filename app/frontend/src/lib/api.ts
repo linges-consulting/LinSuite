@@ -1516,25 +1516,48 @@ export async function refundPackagePurchase(
 }
 
 /** One service's remaining/used credits on a client's purchase
- *  (`ClientPackagePurchaseCreditOut`). */
+ *  (`ClientPackagePurchaseCreditOut`). `used_by_you` (#111) is this tab's own client's
+ *  redemptions specifically — the old holder's own history on a transferred-out purchase,
+ *  distinct from `credits_used`, which is every holder's combined usage. */
 export type ClientPackagePurchaseCredit = {
   service_id: string
   service_name: string
   credits_total: number
   credits_used: number
   credits_remaining: number
+  used_by_you: number
+}
+
+/** One hop of a purchase's transfer chain (`TransferHopOut`, #111). */
+export type PackageTransferHop = {
+  id: string
+  from_customer_id: string
+  from_customer_name: string
+  to_customer_id: string
+  to_customer_name: string
+  reason: string
+  override: boolean
+  transferred_at: string
 }
 
 /** A client's Packages tab (`GET /api/customers/{id}/package-purchases`, `billing.view`,
  *  logged like any other client-scoped financial read — `core/access_log.py`). `customer_id`
- *  is the purchaser, permanently; #111's package transfer will add a derived current holder
- *  and a transfer chain onto this same row without renaming it. */
+ *  is the purchaser, permanently. #111: `current_holder_id`/`current_holder_name` are derived
+ *  (the `to` of the purchase's latest transfer, else the purchaser); `held_by_viewer` says
+ *  whether *this* tab's client is that holder — false on a transferred-out purchase, which
+ *  still lists here (spec #96 story 22) so the old holder keeps their history. */
 export type ClientPackagePurchase = {
   id: string
   package_definition_id: string
   name: string
   price_cents: number
   customer_id: string
+  purchaser_name: string
+  current_holder_id: string
+  current_holder_name: string
+  held_by_viewer: boolean
+  transferable: boolean
+  transfers: PackageTransferHop[]
   purchased_at: string
   expires_at: string | null
   credits_activated: boolean
@@ -1550,6 +1573,60 @@ export async function fetchClientPackagePurchases(
   const res = await fetch(`/api/customers/${customerId}/package-purchases`, { cache: 'no-store' })
   if (!res.ok) throw await failure(res, 'Could not load this client’s packages')
   return (await res.json()).purchases
+}
+
+/** #111: `POST /api/packages/purchases/{id}/transfer` — `billing.manage`, Admin Mode. Moves
+ *  the purchase's whole remaining balance to `to_customer_id`; `from_customer_id` is the
+ *  admin's belief about the current holder, checked against the row-locked truth (refused
+ *  409 if someone already transferred it). `override` is required — checked server-side — only
+ *  when the package definition is non-transferable. */
+export type PackageTransferBody = {
+  to_customer_id: string
+  from_customer_id: string
+  reason: string
+  override: boolean
+}
+
+export type PackageTransferResult = {
+  package_purchase_id: string
+  current_holder_id: string
+  current_holder_name: string
+  transfers: PackageTransferHop[]
+}
+
+export async function transferPackagePurchase(
+  purchaseId: string,
+  body: PackageTransferBody,
+): Promise<PackageTransferResult> {
+  const res = await send(
+    'POST',
+    `/api/packages/purchases/${encodeURIComponent(purchaseId)}/transfer`,
+    body,
+  )
+  if (!res.ok) throw await failure(res, 'Could not transfer this package')
+  return res.json()
+}
+
+/** The transfer dialog's own warning (#111, spec #96 story 18): the current holder's upcoming
+ *  confirmed appointments for the services this purchase credits — not a refusal, since
+ *  credits deduct on completion, not booking; those visits simply won't find the credits once
+ *  the holder changes. */
+export type UpcomingAppointmentForTransfer = {
+  id: string
+  starts_at: string
+  service_name: string
+  staff_name: string
+}
+
+export async function fetchUpcomingAppointmentsForTransfer(
+  purchaseId: string,
+): Promise<UpcomingAppointmentForTransfer[]> {
+  const res = await fetch(
+    `/api/packages/purchases/${encodeURIComponent(purchaseId)}/upcoming-appointments`,
+    { cache: 'no-store' },
+  )
+  if (!res.ok) throw await failure(res, 'Could not load upcoming appointments')
+  return (await res.json()).appointments
 }
 
 // --- forms: templates and their frozen versions (Settings → Forms) ---------------------------
