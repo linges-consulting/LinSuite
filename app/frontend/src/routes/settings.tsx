@@ -5,11 +5,13 @@ import { ClosuresPanel } from '@/routes/settings-closures'
 import { FormsPanel } from '@/routes/settings-forms'
 import { NoteTemplatesPanel } from '@/routes/settings-notes'
 import { NotificationsPanel } from '@/routes/settings-notifications'
+import { ProductsPanel } from '@/routes/settings-products'
 import { ResourcesPanel } from '@/routes/settings-resources'
 import { ServicesPanel } from '@/routes/settings-services'
 import { RolesPanel } from '@/routes/settings-roles'
 import { SecurityPanel } from '@/routes/settings-security'
 import { StaffPanel } from '@/routes/settings-staff'
+import { TaxSettingsPanel } from '@/routes/settings-tax'
 
 /**
  * Everything about the business itself (PRD §1, §7).
@@ -32,6 +34,8 @@ export function SettingsPage() {
         <TabsTrigger value="staff">Staff</TabsTrigger>
         <TabsTrigger value="resources">Resources</TabsTrigger>
         <TabsTrigger value="services">Services</TabsTrigger>
+        <TabsTrigger value="products">Products</TabsTrigger>
+        <TabsTrigger value="tax">Tax</TabsTrigger>
         <TabsTrigger value="forms">Forms</TabsTrigger>
         <TabsTrigger value="notes">Note templates</TabsTrigger>
         <TabsTrigger value="closures">Closures</TabsTrigger>
@@ -55,6 +59,12 @@ export function SettingsPage() {
       </TabsContent>
       <TabsContent value="services">
         <ServicesPanel />
+      </TabsContent>
+      <TabsContent value="products">
+        <ProductsPanel />
+      </TabsContent>
+      <TabsContent value="tax">
+        <TaxSettingsPanel />
       </TabsContent>
       <TabsContent value="forms">
         <FormsPanel />

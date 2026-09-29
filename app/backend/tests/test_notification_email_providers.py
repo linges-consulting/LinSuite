@@ -8,6 +8,7 @@ instead, never this. `httpx.MockTransport` is httpx's own test transport (the sa
 fake SMTP class below is the same idea for `smtplib.SMTP`'s constructor/context-manager shape.
 """
 
+import base64
 import json
 import smtplib
 from datetime import UTC, datetime
@@ -19,6 +20,7 @@ from core.models import Business
 from notifications.credentials import encrypt_credential
 from notifications.providers import (
     ConsoleProvider,
+    EmailAttachment,
     PermanentDeliveryError,
     ResendProvider,
     SmtpProvider,
@@ -31,6 +33,34 @@ from notifications.providers import (
 
 def _business(**overrides) -> Business:
     return Business(id=1, name="Cedar Lane Clinic", timezone="America/Toronto", **overrides)
+
+
+# --- ConsoleProvider --------------------------------------------------------------------------
+
+
+def test_console_logs_attachment_filenames_but_never_the_bytes(caplog):
+    # #70: an attachment is routinely a client-linked financial document, unlike the reset
+    # link/MFA code `test_the_console_provider_writes_the_message_to_the_log`
+    # (`test_password_reset.py`) already proves is logged in full on purpose.
+    with caplog.at_level("INFO"):
+        ConsoleProvider().send_email(
+            "someone@cedar.example",
+            "Invoice #1",
+            "Your invoice is attached.",
+            attachments=[EmailAttachment(filename="invoice-1.pdf", content=b"%PDF-1.7 secret")],
+        )
+
+    assert "invoice-1.pdf" in caplog.text
+    assert "secret" not in caplog.text
+
+
+def test_console_send_email_is_unaffected_when_no_attachments_are_given(caplog):
+    # Every pre-#70 caller (password reset, MFA, the trigger dispatch table) never passes
+    # `attachments` — the extension must be a pure addition, not a changed default behaviour.
+    with caplog.at_level("INFO"):
+        ConsoleProvider().send_email("someone@cedar.example", "Reset", "body")
+
+    assert "attachment" not in caplog.text
 
 
 # --- ResendProvider --------------------------------------------------------------------------
@@ -78,6 +108,48 @@ def test_resend_omits_html_when_none():
     provider.send_email(to="c@d.example", subject="s", text="t")
 
     assert "html" not in json.loads(seen[0].content)
+
+
+def test_resend_base64_encodes_attachments_since_the_payload_is_json():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"id": "abc"})
+
+    provider = ResendProvider(
+        api_key="k",
+        from_address="a@b.example",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    provider.send_email(
+        to="c@d.example",
+        subject="s",
+        text="t",
+        attachments=[EmailAttachment(filename="invoice-1.pdf", content=b"%PDF-1.7 body")],
+    )
+
+    payload = json.loads(seen[0].content)
+    assert payload["attachments"] == [
+        {"filename": "invoice-1.pdf", "content": base64.b64encode(b"%PDF-1.7 body").decode()}
+    ]
+
+
+def test_resend_omits_attachments_when_none_are_given():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"id": "abc"})
+
+    provider = ResendProvider(
+        api_key="k",
+        from_address="a@b.example",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    provider.send_email(to="c@d.example", subject="s", text="t")
+
+    assert "attachments" not in json.loads(seen[0].content)
 
 
 def test_resend_raises_permanently_on_a_4xx_response():
@@ -253,6 +325,44 @@ def test_smtp_attaches_an_html_alternative_when_given():
     provider.send_email(to="c@d.example", subject="s", text="plain", html="<p>rich</p>")
 
     assert _FakeSMTP.instances[0].sent.is_multipart()
+
+
+def test_smtp_attaches_a_pdf_with_its_filename_and_content_type():
+    provider = SmtpProvider(
+        host="h",
+        port=25,
+        username=None,
+        password=None,
+        from_address="a@b.example",
+        smtp_cls=_FakeSMTP,
+    )
+    provider.send_email(
+        to="c@d.example",
+        subject="s",
+        text="plain",
+        attachments=[EmailAttachment(filename="receipt-1-1.pdf", content=b"%PDF-1.7 body")],
+    )
+
+    sent = _FakeSMTP.instances[0].sent
+    assert sent.is_multipart()
+    attachment = next(iter(sent.iter_attachments()))
+    assert attachment.get_filename() == "receipt-1-1.pdf"
+    assert attachment.get_content_type() == "application/pdf"
+    assert attachment.get_payload(decode=True) == b"%PDF-1.7 body"
+
+
+def test_smtp_send_email_is_unaffected_when_no_attachments_are_given():
+    provider = SmtpProvider(
+        host="h",
+        port=25,
+        username=None,
+        password=None,
+        from_address="a@b.example",
+        smtp_cls=_FakeSMTP,
+    )
+    provider.send_email(to="c@d.example", subject="s", text="plain")
+
+    assert not _FakeSMTP.instances[0].sent.is_multipart()
 
 
 # --- get_provider: tenant selection --------------------------------------------------------

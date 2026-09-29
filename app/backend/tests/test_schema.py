@@ -47,6 +47,9 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "audit_access_log": ("SELECT", "INSERT"),
     # A key is written once and never rewritten; only the purge role destroys one (0024).
     "customer_document_keys": ("SELECT", "INSERT"),
+    # The one business-owned key (#55/ADR-0003): written once, never rewritten, and — unlike
+    # a customer key — never destroyed by anyone in v1 either (0044).
+    "business_document_keys": ("SELECT", "INSERT"),
     # The record that an erasure was honoured: the app stamps `purged_at`, never deletes it.
     "erasure_requests": ("SELECT", "INSERT", "UPDATE"),
     # Sealed documents are immutable; only the purge role removes one (0026).
@@ -57,12 +60,55 @@ APP_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "form_links": ("SELECT", "INSERT", "UPDATE"),
     # A filled-in form is immutable; only the purge role removes one, when not held (0029).
     "form_submissions": ("SELECT", "INSERT"),
+    # The stock movement ledger is append-only; nothing purges it in v1, but the trigger
+    # still lets the purge role through, same shape as `audit_events` (#61, 0050).
+    "stock_movements": ("SELECT", "INSERT"),
+    # Voidable (#65, 0054): UPDATE stays granted — it is what reaches the one permitted
+    # cancel transition `invoices_voidable_guard` checks for — but DELETE never does.
+    "invoices": ("SELECT", "INSERT", "UPDATE"),
+    # Frozen invoice snapshot rows: append-only, same shape as `stock_movements` (#65, 0054).
+    "invoice_lines": ("SELECT", "INSERT"),
+    "invoice_line_discounts": ("SELECT", "INSERT"),
+    "invoice_line_taxes": ("SELECT", "INSERT"),
+    # Voidable-adjacent (#71, 0055): UPDATE stays granted for the one permitted activation
+    # transition `package_purchases_activation_guard` checks for; DELETE never does.
+    "package_purchases": ("SELECT", "INSERT", "UPDATE"),
+    # Frozen credit-grant rows: append-only, same shape as `invoice_lines` (#71, 0055).
+    "package_purchase_credits": ("SELECT", "INSERT"),
+    # Voidable (#75, 0056) — the same shape as `invoices`: UPDATE stays granted for the one
+    # permitted cancel transition, DELETE never does.
+    "retail_invoices": ("SELECT", "INSERT", "UPDATE"),
+    # Frozen retail invoice snapshot rows: append-only, same shape as `invoice_lines` (#75, 0056).
+    "retail_invoice_lines": ("SELECT", "INSERT"),
+    # Review R3/R4, 0065: frozen retail line discounts/taxes, same shape as `invoice_lines`.
+    "retail_invoice_line_discounts": ("SELECT", "INSERT"),
+    "retail_invoice_line_taxes": ("SELECT", "INSERT"),
+    # The commission ledger (#69, 0057): append-only, a correction is a second row
+    # (`kind="reversal"`), never an UPDATE of an existing one.
+    "commission_postings": ("SELECT", "INSERT"),
+    # #66, 0058: the payment ledger and the admin/owner balance-exception record are both
+    # financial records, append-only for the same reason `invoice_lines` is — never edited or
+    # voided in place; a correction is a new row, #67's job.
+    "invoice_payments": ("SELECT", "INSERT"),
+    "invoice_balance_authorizations": ("SELECT", "INSERT"),
+    # #68, 0059: the payment-transfer history is a financial record too — append-only.
+    "invoice_payment_transfers": ("SELECT", "INSERT"),
+    "invoice_refunds": ("SELECT", "INSERT"),  # #67
+    # #76, 0063: a return (and each line of it) is a record of what happened — append-only.
+    "retail_returns": ("SELECT", "INSERT"),
+    "retail_return_lines": ("SELECT", "INSERT"),
+    # #72, 0061: the package credit redemption ledger — spending a credit is a new row.
+    "package_credit_redemptions": ("SELECT", "INSERT"),
+    "package_credit_voids": ("SELECT", "INSERT"),  # #73, 0062
 }
 # The purge role reads and deletes everywhere and writes nowhere — except the fact of its own
 # purge, which ADR-0001 §6 puts in the purge transaction (0024, pre-flight D11).
 PURGE_PRIVILEGES = ("SELECT", "DELETE")
 PURGE_EXCEPTIONS: dict[str, tuple[str, ...]] = {
     "audit_events": ("SELECT", "INSERT", "DELETE"),
+    # Never destroyed by the purge role either (0044) — there is no crypto-shred of the
+    # business's own key in v1.
+    "business_document_keys": ("SELECT",),
 }
 # (table, trigger) pairs that must be attached and firing.
 TRIGGERS = (
@@ -72,10 +118,33 @@ TRIGGERS = (
     ("audit_events", "audit_events_no_rewrite"),
     ("audit_access_log", "audit_access_log_no_rewrite"),
     ("customer_document_keys", "customer_document_keys_guard"),
+    ("business_document_keys", "business_document_keys_guard"),
     ("documents", "documents_guard"),
     ("form_template_versions", "form_template_versions_append_only"),
     ("form_links", "form_links_guard"),
     ("form_submissions", "form_submissions_guard"),
+    ("stock_movements", "stock_movements_no_rewrite"),
+    ("invoices", "invoices_voidable_guard"),
+    ("invoice_lines", "invoice_lines_no_rewrite"),
+    ("invoice_line_discounts", "invoice_line_discounts_no_rewrite"),
+    ("invoice_line_taxes", "invoice_line_taxes_no_rewrite"),
+    ("package_purchases", "package_purchases_activation_guard"),
+    ("package_purchase_credits", "package_purchase_credits_no_rewrite"),
+    ("retail_invoices", "retail_invoices_voidable_guard"),
+    ("retail_invoice_lines", "retail_invoice_lines_no_rewrite"),
+    ("retail_invoice_line_discounts", "retail_invoice_line_discounts_no_rewrite"),
+    ("retail_invoice_line_taxes", "retail_invoice_line_taxes_no_rewrite"),
+    ("invoices", "invoices_tax_snapshot_frozen"),
+    ("retail_invoices", "retail_invoices_tax_snapshot_frozen"),
+    ("commission_postings", "commission_postings_no_rewrite"),
+    ("invoice_payments", "invoice_payments_no_rewrite"),
+    ("invoice_balance_authorizations", "invoice_balance_authorizations_no_rewrite"),
+    ("invoice_payment_transfers", "invoice_payment_transfers_no_rewrite"),
+    ("invoice_refunds", "invoice_refunds_no_rewrite"),
+    ("retail_returns", "retail_returns_no_rewrite"),
+    ("retail_return_lines", "retail_return_lines_no_rewrite"),
+    ("package_credit_redemptions", "package_credit_redemptions_guard"),
+    ("package_credit_voids", "package_credit_voids_no_rewrite"),
 )
 
 

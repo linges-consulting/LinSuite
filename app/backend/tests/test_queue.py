@@ -48,12 +48,17 @@ async def claimed_instance(client):
         await wipe_document_keys()
         async with session_scope() as db:
             for table in (
+                # #59's draft bill lines/bills FK to appointments with no cascade — deleted
+                # first, same reason queue_entries already precedes appointments below.
+                "service_bill_lines",
+                "service_bills",
                 "queue_entries",
                 "appointment_resources",
                 "appointments",
                 "customers",
                 "service_requirements",
                 "service_staff",
+                "package_definition_services",
                 "services",
                 "working_hours",
                 "time_off",

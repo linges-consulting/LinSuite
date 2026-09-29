@@ -37,10 +37,12 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from core.models import Business
 from customers.models import Customer
 from forms.models import FormLink, FormTemplateVersion
+from inventory.models import ProductVariant
 from notifications.models import NotificationTemplate
 from notifications.providers import email_ready, sms_ready
 from notifications.render import render
@@ -175,6 +177,52 @@ async def notify_form_link_issued(
         phone=customer.phone,
         context=context,
     )
+
+
+async def notify_low_stock(db: AsyncSession, variant_id: uuid.UUID) -> None:
+    """Inventory's one event (#62): a variant just crossed below its own `low_stock_threshold`
+    and `inventory/stock.py::record_movement` armed the alert for this crossing, inside its own
+    transaction. Called once, by the route/transaction that got `MovementResult.
+    low_stock_alert_armed=True` back, and only *after* that transaction's own commit — never
+    from inside `record_movement` itself, so a task queued here can never race a rollback
+    (CLAUDE.md: Celery workers, never inline).
+
+    Unlike every trigger above, the recipient is the business's own contact address
+    (`Business.email`), not a customer's — there is no `(customer_id, email, phone)` triple to
+    hand `dispatch()`, so this renders and enqueues directly. Gated exactly the way `dispatch()`
+    gates every other channel: the admin/owner opt-in (`low_stock_alert_email_enabled`, off by
+    default), a contact address to send to, and `email_ready(business)` — an unverified or
+    unconfigured sender is a silent no-op here too, the same degrade-safely rule every other
+    trigger-driven send already follows, never a crash and never a second send on a later call
+    that finds the variant already alerted (`record_movement` only returns
+    `low_stock_alert_armed=True` on the one call that makes the crossing).
+    """
+    business = await load_business(db)
+    if not business.low_stock_alert_email_enabled or not business.email:
+        return
+    if not email_ready(business):
+        return
+    template = await template_for(db, "low_stock", "email")
+    if template is None:
+        return
+    variant = await db.scalar(
+        select(ProductVariant)
+        .options(selectinload(ProductVariant.product))
+        .where(ProductVariant.id == variant_id)
+    )
+    if variant is None:
+        return
+    context = {
+        "business_name": business.name,
+        "product_name": variant.product.name,
+        "variant_name": variant.name,
+        "sku": variant.sku,
+        "quantity_on_hand": str(variant.quantity_on_hand),
+        "low_stock_threshold": str(variant.low_stock_threshold),
+    }
+    subject = render(template.subject_template or "", context)
+    body = render(template.body_template, context)
+    send_email.delay(business.email, subject, body, notification_type="low_stock")
 
 
 async def notify_package_notice(

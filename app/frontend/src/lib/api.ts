@@ -1084,6 +1084,9 @@ export type ServiceRow = {
   buffer_before_minutes: number
   buffer_after_minutes: number
   price_cents: number
+  /** Tax component codes this service toggles on, and how its price is entered. */
+  tax_component_keys: string[]
+  tax_convention: TaxConvention
   /** False is "staff may book it, the public portal may not offer it". */
   bookable_online: boolean
   active: boolean
@@ -1101,6 +1104,8 @@ export type ServiceDraft = {
   buffer_before_minutes: number
   buffer_after_minutes: number
   price_cents: number
+  tax_component_keys: string[]
+  tax_convention: TaxConvention
   bookable_online: boolean
   sort_order: number
 }
@@ -1152,6 +1157,137 @@ export async function deactivateService(id: string): Promise<ServiceRow> {
 export async function reactivateService(id: string): Promise<ServiceRow> {
   const res = await send('POST', `/api/admin/services/${id}/reactivate`, {})
   if (!res.ok) throw await failure(res, 'Could not reactivate the service')
+  return res.json()
+}
+
+// --- products: the retail catalog (M4 #56) ------------------------------------------------
+
+/** One sellable unit — a SKU, an optional barcode, a price and a whole-unit stock count,
+ *  with its own low-stock threshold independent of any sibling variant. Unlike a service's
+ *  eligible-staff set, a variant has identity of its own: it is created, edited, deactivated
+ *  and reactivated one at a time, never as part of a bulk save. */
+export type ProductVariantRow = {
+  id: string
+  product_id: string
+  name: string
+  sku: string
+  barcode: string | null
+  price_cents: number
+  quantity_on_hand: number
+  low_stock_threshold: number
+  tax_component_keys: string[]
+  tax_convention: TaxConvention
+  active: boolean
+  sort_order: number
+}
+
+export type ProductRow = {
+  id: string
+  name: string
+  description: string | null
+  active: boolean
+  sort_order: number
+  variants: ProductVariantRow[]
+}
+
+export type ProductDraft = { name: string; description: string | null; sort_order: number }
+
+export type ProductVariantDraft = {
+  name: string
+  sku: string
+  barcode: string | null
+  price_cents: number
+  low_stock_threshold: number
+  tax_component_keys: string[]
+  tax_convention: TaxConvention
+}
+
+export async function fetchProducts(includeInactive = false): Promise<ProductRow[]> {
+  const res = await fetch(`/api/admin/products${includeInactive ? '?include_inactive=true' : ''}`)
+  if (!res.ok) throw await failure(res, 'Could not load the products')
+  return (await res.json()).products
+}
+
+export async function createProduct(draft: ProductDraft): Promise<ProductRow> {
+  const res = await send('POST', '/api/admin/products', draft)
+  if (!res.ok) throw await failure(res, 'Could not create the product')
+  return res.json()
+}
+
+export async function updateProduct(
+  id: string,
+  draft: Partial<ProductDraft>,
+): Promise<ProductRow> {
+  const res = await send('PATCH', `/api/admin/products/${id}`, draft)
+  if (!res.ok) throw await failure(res, 'Could not save the product')
+  return res.json()
+}
+
+export async function deactivateProduct(id: string): Promise<ProductRow> {
+  const res = await send('POST', `/api/admin/products/${id}/deactivate`, {})
+  if (!res.ok) throw await failure(res, 'Could not deactivate the product')
+  return res.json()
+}
+
+export async function reactivateProduct(id: string): Promise<ProductRow> {
+  const res = await send('POST', `/api/admin/products/${id}/reactivate`, {})
+  if (!res.ok) throw await failure(res, 'Could not reactivate the product')
+  return res.json()
+}
+
+/** Every variant endpoint returns the whole product — the same shape the table reads — so a
+ *  screen that just created or edited one variant never has to refetch separately. */
+/** A delivery arriving (`inventory.receive`): the only way stock goes up outside a return. */
+export async function receiveStock(
+  productId: string,
+  variantId: string,
+  quantity: number,
+  reason: string | null,
+): Promise<ProductRow> {
+  const res = await send('POST', `/api/admin/products/${productId}/variants/${variantId}/receive`, {
+    quantity,
+    reason,
+  })
+  if (!res.ok) throw await failure(res, 'Could not receive the stock')
+  return res.json()
+}
+
+export async function createVariant(
+  productId: string,
+  draft: ProductVariantDraft,
+): Promise<ProductRow> {
+  const res = await send('POST', `/api/admin/products/${productId}/variants`, draft)
+  if (!res.ok) throw await failure(res, 'Could not create the variant')
+  return res.json()
+}
+
+export async function updateVariant(
+  productId: string,
+  variantId: string,
+  draft: Partial<ProductVariantDraft>,
+): Promise<ProductRow> {
+  const res = await send('PATCH', `/api/admin/products/${productId}/variants/${variantId}`, draft)
+  if (!res.ok) throw await failure(res, 'Could not save the variant')
+  return res.json()
+}
+
+export async function deactivateVariant(productId: string, variantId: string): Promise<ProductRow> {
+  const res = await send(
+    'POST',
+    `/api/admin/products/${productId}/variants/${variantId}/deactivate`,
+    {},
+  )
+  if (!res.ok) throw await failure(res, 'Could not deactivate the variant')
+  return res.json()
+}
+
+export async function reactivateVariant(productId: string, variantId: string): Promise<ProductRow> {
+  const res = await send(
+    'POST',
+    `/api/admin/products/${productId}/variants/${variantId}/reactivate`,
+    {},
+  )
+  if (!res.ok) throw await failure(res, 'Could not reactivate the variant')
   return res.json()
 }
 
@@ -1806,10 +1942,33 @@ export async function fetchAppointments(query: {
  * that is not `confirmed` any more; a no-show attempted before `starts_at` is 422
  * `not_yet_started`.
  */
-export async function completeAppointment(id: string): Promise<Appointment> {
-  const res = await send('POST', `/api/appointments/${id}/complete`, {})
+export async function completeAppointment(
+  id: string,
+  packagePurchaseId: string | null = null,
+): Promise<Appointment> {
+  const res = await send('POST', `/api/appointments/${id}/complete`, {
+    package_purchase_id: packagePurchaseId,
+  })
   if (!res.ok) throw await failure(res, 'Could not complete the appointment')
   return res.json()
+}
+
+/** One paid, unexpired, unrefunded package of this client's that still covers the
+ *  appointment's service (#72). `value_cents` is what the next session would be worth. */
+export type PackageCredit = {
+  package_purchase_id: string
+  name: string
+  purchased_at: string
+  expires_at: string | null
+  credits_total: number
+  credits_remaining: number
+  value_cents: number
+}
+
+export async function fetchPackageCredits(appointmentId: string): Promise<PackageCredit[]> {
+  const res = await fetch(`/api/appointments/${appointmentId}/package-credits`)
+  if (!res.ok) throw await failure(res, 'Could not load the client’s packages')
+  return (await res.json()).credits
 }
 
 export async function cancelAppointment(id: string, reason?: string | null): Promise<Appointment> {
@@ -2209,5 +2368,272 @@ export type QueueStartResult = {
 export async function startQueueEntry(id: string): Promise<QueueStartResult> {
   const res = await send('POST', `/api/queue-entries/${encodeURIComponent(id)}/start`, {})
   if (!res.ok) throw await failure(res, 'Could not start this walk-in')
+  return res.json()
+}
+
+// --- billing: tax components and their effective-dated rates (#57) ----------------------
+
+export type TaxRate = {
+  id: string
+  rate_bp: number
+  effective_from: string
+  /** Null: still in effect. Never edited once closed — a new rate always adds a row. */
+  effective_to: string | null
+}
+
+/** Whether a catalog price is entered before tax (tax added on top) or including it. */
+export type TaxConvention = 'exclusive' | 'inclusive'
+
+export type TaxComponent = {
+  id: string
+  code: string
+  name: string
+  /** Null: federal, applies whatever the business's own province is (e.g. GST). */
+  province: string | null
+  active: boolean
+  rates: TaxRate[]
+  /** The rate in effect today, in the business's own timezone. Null if the earliest rate is
+   *  still in the future. */
+  current_rate_bp: number | null
+  /** A hint only: whether this business's own province would pick this component up
+   *  (#57 acceptance criterion 1). Which components actually apply to one catalog item is a
+   *  later ticket's job. */
+  applicable_to_business: boolean
+}
+
+export type TaxComponentDraft = {
+  code: string
+  name: string
+  province: string | null
+  rate_bp: number
+  effective_from: string
+}
+
+export async function fetchTaxComponents(): Promise<TaxComponent[]> {
+  const res = await fetch('/api/admin/billing/tax-components')
+  if (!res.ok) throw await failure(res, 'Could not load the tax components')
+  return (await res.json()).tax_components
+}
+
+export async function createTaxComponent(draft: TaxComponentDraft): Promise<TaxComponent> {
+  const res = await send('POST', '/api/admin/billing/tax-components', draft)
+  if (!res.ok) throw await failure(res, 'Could not create the tax component')
+  return res.json()
+}
+
+export async function updateTaxComponent(
+  id: string,
+  patch: Partial<Pick<TaxComponent, 'name' | 'province' | 'active'>>,
+): Promise<TaxComponent> {
+  const res = await send('PATCH', `/api/admin/billing/tax-components/${id}`, patch)
+  if (!res.ok) throw await failure(res, 'Could not save the tax component')
+  return res.json()
+}
+
+export async function addTaxComponentRate(
+  id: string,
+  rate: { rate_bp: number; effective_from: string },
+): Promise<TaxComponent> {
+  const res = await send('POST', `/api/admin/billing/tax-components/${id}/rates`, rate)
+  if (!res.ok) throw await failure(res, 'Could not add the new rate')
+  return res.json()
+}
+
+// --- bill review: draft bill + discounts + tax, together (#63) --------------------------
+
+export type BillRef = { id: string; name: string }
+
+export type LineTax = {
+  pretax_cents: number
+  /** Keyed by `TaxComponent.code` (e.g. `"GST"`) — every applicable component appears, `0`
+   *  for one with no rate covering today, never omitted (`billing/tax.py`'s own rule). */
+  component_cents: Record<string, number>
+  tax_cents: number
+  total_cents: number
+}
+
+export type BillLine = {
+  id: string
+  appointment_id: string
+  service: BillRef
+  staff: BillRef
+  price_cents: number
+  /** Non-zero when a package credit paid for this session (#72) — its frozen value. */
+  prepaid_cents: number
+  applied_discount_ids: string[]
+  discounted_cents: number
+  tax: LineTax
+  line_total_cents: number
+}
+
+export type DiscountChoice = {
+  id: string
+  name: string
+  kind: 'percentage' | 'fixed'
+  percentage_bp: number | null
+  amount_cents: number | null
+  stackable: boolean
+  /** Whether this discount is part of the combination currently applied to the bill. */
+  applied: boolean
+}
+
+export type Bill = {
+  id: string
+  status: 'draft' | 'issued'
+  customer: BillRef
+  booking_group_id: string | null
+  created_at: string
+  updated_at: string
+  lines: BillLine[]
+  /** Every enabled discount eligible for at least one line — the picker's own choices, not
+   *  only the ones currently applied. */
+  eligible_discounts: DiscountChoice[]
+  subtotal_cents: number
+  discount_total_cents: number
+  tax_totals_by_component: Record<string, number>
+  tax_total_cents: number
+  grand_total_cents: number
+  /** An admin/owner-authorized exception (#64: an approved staff request, or a direct inline
+   *  admin edit) — reported alongside `grand_total_cents` rather than replacing it. */
+  override_total_cents: number | null
+  override_reason: string | null
+  bill_override_requests_enabled: boolean
+  inline_admin_bill_edit_enabled: boolean
+}
+
+export type BillSummary = {
+  id: string
+  customer: BillRef
+  booking_group_id: string | null
+  created_at: string
+  line_count: number
+  subtotal_cents: number
+}
+
+export async function fetchDraftBills(): Promise<BillSummary[]> {
+  const res = await fetch('/api/bills', { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the draft bills')
+  return (await res.json()).bills
+}
+
+export async function fetchBill(id: string): Promise<Bill> {
+  const res = await fetch(`/api/bills/${encodeURIComponent(id)}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load this bill')
+  return res.json()
+}
+
+/**
+ * Replaces the whole applied combination in one call — reapplying with a changed selection
+ * is how "add or remove a discount" both work, the same "recomputed live" screen either way.
+ * A 422 means the combination was refused (not stackable together, or exceeds the eligible
+ * charge); `ApiError.message` carries the server's own specific reason verbatim.
+ */
+export async function applyBillDiscounts(id: string, discountIds: string[]): Promise<Bill> {
+  const res = await send('PUT', `/api/bills/${encodeURIComponent(id)}/discounts`, {
+    discount_ids: discountIds,
+  })
+  if (!res.ok) throw await failure(res, 'Could not apply these discounts')
+  return res.json()
+}
+
+// --- bill review authority (#64): staff-request review + inline admin edit ----------------
+
+export type OverrideRequest = {
+  id: string
+  bill_id: string
+  kind: 'discount' | 'price_override'
+  reason: string
+  requested_total_cents: number
+  requested_by_email: string
+  requested_at: string
+  bill_revision_as_of: string
+  status: 'pending' | 'approved' | 'rejected'
+  decided_by_email: string | null
+  decided_at: string | null
+  decision_note: string | null
+  decided_total_cents: number | null
+}
+
+export async function fetchOverrideRequests(billId: string): Promise<OverrideRequest[]> {
+  const res = await fetch(`/api/bills/${encodeURIComponent(billId)}/override-requests`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) throw await failure(res, 'Could not load the override requests')
+  return (await res.json()).requests
+}
+
+export async function requestBillOverride(
+  billId: string,
+  body: { kind: 'discount' | 'price_override'; requested_total_cents: number; reason: string },
+): Promise<OverrideRequest> {
+  const res = await send('POST', `/api/bills/${encodeURIComponent(billId)}/override-requests`, body)
+  if (!res.ok) throw await failure(res, 'Could not submit this request')
+  return res.json()
+}
+
+/** Approve as-is (omit `decided_total_cents`), revise (include it), or reject. A 409 means the
+ *  bill changed since the request was made — the stale-approval guard — and the caller should
+ *  tell staff to resubmit rather than retry the same decision. */
+export async function decideOverrideRequest(
+  billId: string,
+  requestId: string,
+  body: { decision: 'approved' | 'rejected'; decided_total_cents?: number; note?: string },
+): Promise<OverrideRequest> {
+  const res = await send(
+    'POST',
+    `/api/bills/${encodeURIComponent(billId)}/override-requests/${encodeURIComponent(requestId)}/decision`,
+    body,
+  )
+  if (!res.ok) throw await failure(res, 'Could not record this decision')
+  return res.json()
+}
+
+export type InlineAdminStatus = {
+  active: boolean
+  admin_email: string | null
+  hard_limit_at: string | null
+}
+
+export async function fetchInlineAdminStatus(billId: string): Promise<InlineAdminStatus> {
+  const res = await fetch(`/api/bills/${encodeURIComponent(billId)}/inline-admin`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) throw await failure(res, 'Could not check the inline admin status')
+  return res.json()
+}
+
+/** The admin/owner's own credentials, entered on the staff screen. `totp` is only sent when
+ *  the account is enrolled and the server asks for one (`mfa_required`). */
+export async function authenticateInlineAdmin(
+  billId: string,
+  body: { email: string; password: string; totp?: string },
+): Promise<InlineAdminStatus> {
+  const res = await send(
+    'POST',
+    `/api/bills/${encodeURIComponent(billId)}/inline-admin/authenticate`,
+    body,
+  )
+  if (!res.ok) throw await failure(res, 'Could not authenticate')
+  return res.json()
+}
+
+/** Ends inline authority early — called when staff navigate away from the bill while it is
+ *  still active, so it never outlives the visit to the screen it was granted on. */
+export async function releaseInlineAdmin(billId: string): Promise<void> {
+  const res = await send('POST', `/api/bills/${encodeURIComponent(billId)}/inline-admin/release`)
+  if (!res.ok) throw await failure(res, 'Could not release inline admin authority')
+}
+
+/** The supervised edit itself. One save consumes the authenticated window outright. */
+export async function applyInlineAdminEdit(
+  billId: string,
+  body: { total_cents: number; reason: string },
+): Promise<Bill> {
+  const res = await send(
+    'PUT',
+    `/api/bills/${encodeURIComponent(billId)}/inline-admin/override`,
+    body,
+  )
+  if (!res.ok) throw await failure(res, 'Could not save this edit')
   return res.json()
 }

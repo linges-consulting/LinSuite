@@ -9,11 +9,13 @@ from sqlalchemy.ext.asyncio import create_async_engine
 # Every model module must be imported here, or its table is missing from the metadata
 # that autogenerate compares the database against.
 from auth import models as _auth_models  # noqa: F401
+from billing import models as _billing_models  # noqa: F401
 from core import models as _core_models  # noqa: F401
 from core.config import get_settings
 from core.db import Base
 from customers import models as _customers_models  # noqa: F401
 from forms import models as _forms_models  # noqa: F401
+from inventory import models as _inventory_models  # noqa: F401
 from notes import models as _notes_models  # noqa: F401
 from notifications import models as _notifications_models  # noqa: F401
 from scheduling import models as _scheduling_models  # noqa: F401

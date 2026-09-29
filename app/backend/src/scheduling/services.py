@@ -37,6 +37,7 @@ from sqlalchemy.exc import IntegrityError
 from auth.capabilities import Requires
 from auth.models import User
 from auth.session import CurrentUser
+from billing.tax_routes import TaxConvention, normalize_tax_component_keys
 from core.audit import record_event
 from core.db import SessionDep
 from scheduling import cache
@@ -93,6 +94,10 @@ class _ServiceFacts(BaseModel):
     buffer_before_minutes: int
     buffer_after_minutes: int
     price_cents: int
+    # Review R1/R2: the tax components (codes) this service toggles on, and whether
+    # `price_cents` is entered tax-inclusive or tax-exclusive.
+    tax_component_keys: list[str]
+    tax_convention: str
     bookable_online: bool
     sort_order: int
     requirements: list[RequirementOut]
@@ -168,6 +173,8 @@ def _facts(service: Service) -> dict:
         "buffer_before_minutes": service.buffer_before_minutes,
         "buffer_after_minutes": service.buffer_after_minutes,
         "price_cents": service.price_cents,
+        "tax_component_keys": list(service.tax_component_keys),
+        "tax_convention": service.tax_convention,
         "bookable_online": service.bookable_online,
         "sort_order": service.sort_order,
         "requirements": _requirements(service),
@@ -238,6 +245,8 @@ class ServiceFields(BaseModel):
     buffer_before_minutes: Buffer = 0
     buffer_after_minutes: Buffer = 0
     price_cents: Price = 0
+    tax_component_keys: list[str] = []
+    tax_convention: TaxConvention = "exclusive"
     bookable_online: bool = True
     sort_order: int = 0
 
@@ -270,6 +279,8 @@ _NOT_NULLABLE = (
     "buffer_before_minutes",
     "buffer_after_minutes",
     "price_cents",
+    "tax_component_keys",
+    "tax_convention",
     "bookable_online",
     "sort_order",
 )
@@ -284,6 +295,8 @@ class ServicePatch(BaseModel):
     buffer_before_minutes: Buffer | None = None
     buffer_after_minutes: Buffer | None = None
     price_cents: Price | None = None
+    tax_component_keys: list[str] | None = None
+    tax_convention: TaxConvention | None = None
     bookable_online: bool | None = None
     sort_order: int | None = None
 
@@ -409,7 +422,11 @@ async def _kinds_in_stock(db: SessionDep) -> set[str]:
 async def create_service(
     payload: ServiceFields, admin: CatalogManager, db: SessionDep
 ) -> ServiceOut:
-    service = Service(**payload.model_dump(), active=True)
+    fields = payload.model_dump()
+    fields["tax_component_keys"] = await normalize_tax_component_keys(
+        db, payload.tax_component_keys
+    )
+    service = Service(**fields, active=True)
     db.add(service)
     try:
         await db.flush()
@@ -443,6 +460,10 @@ async def update_service(
 
     # Before anything is set — see `_admin_forms.refuse_emptied_field`.
     refuse_emptied_field(sent, _NOT_NULLABLE)
+    if "tax_component_keys" in sent:
+        sent["tax_component_keys"] = await normalize_tax_component_keys(
+            db, sent["tax_component_keys"]
+        )
 
     changed = []
     for field, value in sent.items():

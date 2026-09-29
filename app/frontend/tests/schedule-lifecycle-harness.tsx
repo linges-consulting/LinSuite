@@ -58,7 +58,7 @@ export const LINK_B = {
 
 export type Call = { url: string; method: string; body?: any }
 
-export function fakeServer(appointments: any[] = []): Call[] {
+export function fakeServer(appointments: any[] = [], packageCredits: any[] = []): Call[] {
   const calls: Call[] = []
   appointments = appointments.map((a) => ({ ...a }))
   vi.stubGlobal(
@@ -94,6 +94,7 @@ export function fakeServer(appointments: any[] = []): Call[] {
       }
       if (url === '/api/staff') return Response.json({ staff: ROSTER })
       if (url === '/api/catalog/services') return Response.json({ services: [] })
+      if (url.endsWith('/package-credits')) return Response.json({ credits: packageCredits })
       if (url.startsWith('/api/schedule?')) {
         const params = new URLSearchParams(url.split('?')[1])
         const includeCancelled = params.get('include_cancelled') === 'true'

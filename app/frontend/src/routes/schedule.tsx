@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 import { CancelConfirm } from '@/components/calendar/cancel-confirm'
 import { Grid } from '@/components/calendar/grid'
 import { OverrideConfirm } from '@/components/calendar/override-confirm'
+import { PackagePicker } from '@/components/calendar/package-picker'
 import { SlotButtons } from '@/components/calendar/slot-buttons'
 import type { Change, Column, Prefill } from '@/components/calendar/types'
 import { ClassificationBadge } from '@/components/classification-badge'
@@ -42,6 +43,7 @@ import {
   fetchAvailability,
   fetchCatalog,
   fetchGroupAvailability,
+  fetchPackageCredits,
   fetchRoster,
   fetchSchedule,
   markNoShow,
@@ -56,6 +58,7 @@ import {
   type GroupSlot,
   type Override,
   type OverrideRule,
+  type PackageCredit,
   type RosterEntry,
   type Schedule,
 } from '@/lib/api'
@@ -107,6 +110,9 @@ export function SchedulePage() {
   const [override, setOverride] = useState<PendingMove | null>(null)
   const [showCancelled, setShowCancelled] = useState(false)
   const [cancelling, setCancelling] = useState<CancelTarget | null>(null)
+  const [completing, setCompleting] = useState<
+    { appointment: Appointment; credits: PackageCredit[] } | null
+  >(null)
   const roster = useQuery({ queryKey: ROSTER, queryFn: fetchRoster })
   const ownStaffId = roster.data?.find((m) => m.user_id === user?.id)?.id ?? null
   // Until the zone is known there is no "today" to ask for.
@@ -132,11 +138,27 @@ export function SchedulePage() {
     invalidateScheduling(queryClient)
   }
   const complete = useMutation({
-    mutationFn: completeAppointment,
+    mutationFn: ({ id, packagePurchaseId }: { id: string; packagePurchaseId: string | null }) =>
+      completeAppointment(id, packagePurchaseId),
     onSuccess: (a) => toast.success(`Completed ${a.customer.first_name} ${a.customer.last_name}`),
     onError: (error) => toast.error(`Not completed: ${error.message}`),
-    onSettled: refreshAfterStatusChange,
+    onSettled: () => {
+      setCompleting(null)
+      refreshAfterStatusChange()
+    },
   })
+  // #72: a client holding an eligible package is asked which pays; nobody else sees a dialog.
+  const startCompleting = async (appointment: Appointment) => {
+    let credits: PackageCredit[]
+    try {
+      credits = await fetchPackageCredits(appointment.id)
+    } catch (error) {
+      toast.error(`Not completed: ${(error as Error).message}`)
+      return
+    }
+    if (credits.length === 0) complete.mutate({ id: appointment.id, packagePurchaseId: null })
+    else setCompleting({ appointment, credits })
+  }
   const noShow = useMutation({
     mutationFn: markNoShow,
     onSuccess: (a) => toast.success(`Marked ${a.customer.first_name} ${a.customer.last_name} a no-show`),
@@ -285,12 +307,24 @@ export function SchedulePage() {
           canManage={canManage}
           onCreate={setBooking}
           onChange={(appointment, next) => change.mutate({ appointment, change: next })}
-          onComplete={(a) => complete.mutate(a.id)}
+          onComplete={startCompleting}
           onNoShow={(a) => noShow.mutate(a.id)}
           onCancel={(a) => setCancelling({ kind: 'appointment', appointment: a })}
           onCancelGroup={(a) =>
             a.booking_group_id && setCancelling({ kind: 'group', groupId: a.booking_group_id })
           }
+        />
+      )}
+
+      {completing && (
+        <PackagePicker
+          clientName={`${completing.appointment.customer.first_name} ${completing.appointment.customer.last_name}`}
+          credits={completing.credits}
+          pending={complete.isPending}
+          onConfirm={(packagePurchaseId) =>
+            complete.mutate({ id: completing.appointment.id, packagePurchaseId })
+          }
+          onCancel={() => setCompleting(null)}
         />
       )}
 

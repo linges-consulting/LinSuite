@@ -130,6 +130,52 @@ CAPABILITIES: tuple[Capability, ...] = (
         "Add walk-in clients to the queue, see who is waiting, and mark them as gone.",
         "Queue",
     ),
+    # M4's billing family (m4.md): three Wave 1 tickets (#57 tax components, #58 discounts,
+    # #60 packages/bundles) each independently named this in their own parallel worktree —
+    # merged to one entry at integration. Every later billing-admin surface reuses this exact
+    # key rather than minting a near-duplicate. A `billing.view` for staff-facing reads (bill
+    # review, #63) is a separate key for whichever ticket first needs one.
+    Capability(
+        "billing.manage",
+        "Configure tax components and rates, discounts, packages, bundles and other billing "
+        "configuration.",
+        "Billing",
+        requires_admin_mode=True,
+    ),
+    # M4 #61: two distinct, independently grantable keys, rather than one — receiving a
+    # delivery and correcting a miscount are different trust decisions, and an owner may want
+    # to hand the first to a trusted lead without the second. Both default to admin/owner
+    # only. A future sale-driven deduction (#75) never checks either (m4.md, `inventory/
+    # stock.py::record_movement` takes no capability at all — only the two routes below do).
+    Capability(
+        "inventory.receive",
+        "Record stock received from a delivery.",
+        "Inventory",
+        requires_admin_mode=True,
+    ),
+    Capability(
+        "inventory.adjust",
+        "Correct a variant's stock count and record why.",
+        "Inventory",
+        requires_admin_mode=True,
+    ),
+    # #63: front-desk work (reviewing a visit's own draft bill before checkout), so no
+    # `requires_admin_mode` — the same reasoning `queue.manage`/`forms.issue` already give for
+    # the front desk. `billing.manage`'s own docstring reserved this exact key for whichever
+    # ticket first needed a staff-facing billing read/write, rather than a near-duplicate.
+    Capability(
+        "billing.view",
+        "See a visit's draft service bill and apply eligible discounts before checkout.",
+        "Billing",
+    ),
+    # #69: commission rates and amounts are never staff-facing (m4.md's own note; #54's
+    # acceptance criteria) — `audit.view`'s own shape, Administrator-only, Admin Mode.
+    Capability(
+        "commission.view",
+        "See what staff have earned in commission, and export the report.",
+        "Billing",
+        requires_admin_mode=True,
+    ),
 )
 
 BY_KEY: dict[str, Capability] = {c.key: c for c in CAPABILITIES}

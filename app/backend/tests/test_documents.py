@@ -96,6 +96,7 @@ async def store(
         document_id = await documents.store_document(
             db,
             key=key,
+            key_owner="customer",
             customer_id=uuid.UUID(customer_id),
             kind="form_submission",
             source_id=source_id or uuid.uuid4(),
@@ -111,7 +112,11 @@ async def fetch(customer_id: str, document_id: uuid.UUID) -> tuple[bytes, str]:
         key = await keys.existing_key(db, uuid.UUID(customer_id))
         assert key is not None
         return await documents.fetch_document(
-            db, key=key, customer_id=uuid.UUID(customer_id), document_id=document_id
+            db,
+            key=key,
+            key_owner="customer",
+            customer_id=uuid.UUID(customer_id),
+            document_id=document_id,
         )
 
 
@@ -517,6 +522,7 @@ async def test_a_document_inserted_while_the_purge_runs_defers_the_shred(client,
         await documents.store_document(
             db,
             key=key,
+            key_owner="customer",
             customer_id=uuid.UUID(customer_id),
             kind="form_submission",
             source_id=uuid.uuid4(),

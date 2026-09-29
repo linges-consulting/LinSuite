@@ -28,6 +28,8 @@ existing callers (password reset, MFA, `forms/links.py`, staff notifications) ar
 Task 5's trigger functions pass a customer through.
 """
 
+import base64
+
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -36,7 +38,12 @@ from core.config import get_settings
 from core.db import run_task
 from core.models import Business
 from notifications.failures import record_permanent_failure
-from notifications.providers import PermanentDeliveryError, get_provider, get_sms_provider
+from notifications.providers import (
+    EmailAttachment,
+    PermanentDeliveryError,
+    get_provider,
+    get_sms_provider,
+)
 
 
 async def _fetch_business() -> Business | None:
@@ -70,9 +77,50 @@ def send_email(
     *,
     customer_id: str | None = None,
     notification_type: str | None = None,
+    attachments: list[dict[str, str]] | None = None,
 ) -> None:
+    """`attachments` (#70) is JSON-safe, the same reason `business` never crosses the Celery
+    boundary directly (module docstring): each entry is `{"filename", "content_b64",
+    "content_type"}`, decoded into `EmailAttachment`s here — the one place bytes re-enter the
+    picture. Optional and keyword-only, so every pre-#70 `.delay(...)` call (password reset,
+    MFA, `notifications/triggers.py::dispatch`) is unaffected."""
+    parsed = [
+        EmailAttachment(
+            filename=a["filename"],
+            content=base64.b64decode(a["content_b64"]),
+            content_type=a.get("content_type", "application/pdf"),
+        )
+        for a in (attachments or [])
+    ]
+    deliver_email(
+        to,
+        subject,
+        text,
+        html,
+        attachments=parsed or None,
+        customer_id=customer_id,
+        notification_type=notification_type,
+    )
+
+
+def deliver_email(
+    to: str,
+    subject: str,
+    text: str,
+    html: str | None = None,
+    *,
+    attachments: list[EmailAttachment] | None = None,
+    customer_id: str | None = None,
+    notification_type: str | None = None,
+) -> None:
+    """The send itself, for a task body that already holds the attachment bytes — M4 review
+    R21: `billing.documents.email_document` fetches a stored PDF inside the worker and calls
+    this, so the bytes never ride in a queue message. A transient failure propagates to the
+    calling task's own autoretry."""
     try:
-        get_provider(_load_business()).send_email(to=to, subject=subject, text=text, html=html)
+        get_provider(_load_business()).send_email(
+            to=to, subject=subject, text=text, html=html, attachments=attachments
+        )
     except PermanentDeliveryError as error:
         record_permanent_failure(customer_id, "email", notification_type, to, error)
 

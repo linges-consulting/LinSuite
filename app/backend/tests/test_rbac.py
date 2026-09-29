@@ -248,6 +248,9 @@ async def test_the_two_system_roles_are_seeded_and_marked(client):
         # Taking a walk-in's name at the door is front-desk work too (0042, #12) — the same
         # call `forms.issue` already made.
         "queue.manage",
+        # Reviewing a visit's own draft bill before checkout is front-desk work too (0051,
+        # #63) — the same call `queue.manage`/`forms.issue` already made.
+        "billing.view",
     }
 
 

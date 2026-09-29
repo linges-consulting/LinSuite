@@ -17,6 +17,20 @@ from auth.passwords import router as passwords_router
 from auth.roles import router as roles_router
 from auth.setup import bootstrap_setup_token
 from auth.setup import router as setup_router
+from billing.bill_authority import router as bill_authority_router
+from billing.bill_review import router as bill_review_router
+from billing.commission_report import router as commission_report_router
+from billing.invoices import router as invoices_router
+from billing.package_liability import router as package_liability_router
+from billing.package_purchase import router as package_purchase_router
+from billing.package_refund import router as package_refund_router
+from billing.packages import router as package_definitions_router
+from billing.payments import retail_router as retail_payments_router
+from billing.payments import router as invoice_payments_router
+from billing.redemption import router as package_credits_router
+from billing.retail_sales import router as retail_sales_router
+from billing.routes import router as discounts_router
+from billing.tax_routes import router as tax_router
 from core.config import get_settings
 from core.db import SessionDep, get_engine, session_scope
 from core.errors import (
@@ -39,6 +53,9 @@ from forms.public import router as public_forms_router
 from forms.routes import router as forms_router
 from forms.scans import router as form_scans_router
 from forms.submissions import router as form_submissions_router
+from inventory.routes import public as inventory_catalog_router
+from inventory.routes import router as inventory_router
+from inventory.stock_routes import router as stock_router
 from notes.routes import router as notes_router
 from scheduling.appointments import router as appointments_router
 from scheduling.closures import router as closures_router
@@ -241,6 +258,9 @@ api.include_router(hours_router)
 api.include_router(time_off_router)
 api.include_router(closures_router)
 api.include_router(services_router)
+# Settings → Billing: discount definitions (`billing.manage`, Admin Mode). No application
+# logic mounted here yet — #63 is what will resolve these against a real bill.
+api.include_router(discounts_router)
 # The read side of the catalog, on its own prefix: `/admin` is administration, `/catalog` is
 # what the availability engine and the booking screen read with no capability at all.
 api.include_router(catalog_router)
@@ -276,4 +296,54 @@ api.include_router(public_booking_router)
 api.include_router(business_router)
 api.include_router(notification_settings_router)
 api.include_router(branding_router)
+# Settings → Packages & bundles (#60): prepaid credit definitions (`billing.manage`, Admin
+# Mode). Definitions only — no purchase flow yet.
+api.include_router(package_definitions_router)
+# Settings → Products (M4 #56): products and their variants — SKU, barcode, price, stock.
+api.include_router(inventory_router)
+# The read side, on `/catalog` beside the service catalog: what retail checkout reads.
+api.include_router(inventory_catalog_router)
+# Receiving a delivery and correcting a stock count (`inventory.receive`/`inventory.adjust`,
+# both Admin Mode, #61) — the append-only `stock_movements` ledger behind `quantity_on_hand`.
+api.include_router(stock_router)
+# Settings → Billing → Tax: tax components and their effective-dated rates (`billing.manage`,
+# Admin Mode, #57).
+api.include_router(tax_router)
+# The staff-facing draft-bill review screen (`billing.view`, Staff Mode, #63): #59's draft
+# bill, #58's discounts and #57's tax come together here for the first time.
+api.include_router(bill_review_router)
+# Bill review authority (#64): staff-request review (`billing.manage`, Admin Mode) and inline
+# admin edit (own credentials, verified on the staff screen) — the two override paths on top
+# of #63's screen. Same `/bills` prefix as `bill_review_router`; no path collides.
+api.include_router(bill_authority_router)
+# Invoice issue (#65): `POST /bills/{id}/issue` turns a reviewed, approved draft into an
+# issued, immutable invoice (`billing.view`, Staff Mode — checkout, not an admin action), plus
+# `GET /invoices`/`GET /invoices/{id}` to read one back from its own frozen snapshot.
+api.include_router(invoices_router)
+# Package/bundle purchase (#71): `POST /packages/{id}/purchase` issues an invoice through the
+# exact same machinery as #65 — same counter, same `Invoice` table (`billing.view`, Staff
+# Mode). Credits are frozen but never activated here; see `billing/package_purchase.py`.
+api.include_router(package_purchase_router)
+# #73: package/bundle refunds (`billing.manage`, Admin Mode) — see `billing/package_refund.py`.
+api.include_router(package_refund_router)
+# #74: unused-package liability report (`billing.manage`, Admin Mode).
+api.include_router(package_liability_router)
+# Retail sale (#75): draft cart -> atomic, stock-deducting issue (`billing.view`, Staff Mode).
+# Always its own invoice, never combined with a service invoice — a separate table pair and a
+# separate router, sharing only the `business_invoice_counters` numbering series.
+api.include_router(retail_sales_router)
+# Commission posting (#69) has no route of its own — it is one more thing `invoices_router`'s
+# own issue endpoint does, in the same transaction. This is the report: what every staff member
+# has earned, `commission.view`, Administrator-only, Admin Mode.
+api.include_router(commission_report_router)
+# Manual payment ledger + checkout gate (#66): `POST/GET /invoices/{id}/payments` (`billing.
+# view`, Staff Mode) records split cash/e-transfer/card/insurer payments; `POST/GET /invoices/
+# {id}/balance-exceptions` (`billing.manage`, Admin Mode) authorizes an outstanding balance.
+# Outstanding balance and checkout-complete are derived, never stored — see `billing/payments.
+# py`'s own docstring.
+api.include_router(invoice_payments_router)
+# #76: the same ledger for retail invoices — `/retail-invoices/{id}/payments|refunds`.
+api.include_router(retail_payments_router)
+# #72: what an appointment could redeem on completion (`schedule.manage`).
+api.include_router(package_credits_router)
 app.include_router(api)

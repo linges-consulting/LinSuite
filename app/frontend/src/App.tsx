@@ -4,6 +4,7 @@ import { AppShell } from '@/components/app-shell'
 import { fetchSetupStatus } from '@/lib/api'
 import { useSession } from '@/lib/auth'
 import { useApplyBranding } from '@/lib/branding'
+import { BillReviewPage, BillsPage } from '@/routes/bills'
 import { BookingPage } from '@/routes/booking'
 import { ManageBookingPage } from '@/routes/booking-manage'
 import { ChangePasswordPage } from '@/routes/change-password'
@@ -173,6 +174,8 @@ function AppRoutes() {
         <Route path="clients" element={<ClientsPage />} />
         <Route path="clients/:id" element={<ClientPage />} />
         <Route path="catalog" element={<PlaceholderPage title="Catalog" />} />
+        <Route path="bills" element={<BillsPage />} />
+        <Route path="bills/:id" element={<BillReviewPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="security" element={<SecurityPage />} />
       </Route>

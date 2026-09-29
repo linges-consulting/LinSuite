@@ -45,6 +45,13 @@ def localize(moment: datetime, tz: str | ZoneInfo) -> datetime:
     return moment.replace(tzinfo=zone).astimezone(UTC)
 
 
+def today_in(tz: str | ZoneInfo) -> Date:
+    """Today's date on the business's wall calendar, not UTC's — which is already tomorrow
+    for a Vancouver business every evening. The one place "today" is read for effective-dated
+    rules (tax rates, package expiry, a report's "as of")."""
+    return datetime.now(tz if isinstance(tz, ZoneInfo) else ZoneInfo(tz)).date()
+
+
 def local_blocks_to_instants(
     blocks: Iterable[tuple[int, int]], day: Date, tz: str | ZoneInfo
 ) -> list[tuple[datetime, datetime]]:

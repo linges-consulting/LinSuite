@@ -1,4 +1,12 @@
-import { CalendarDays, ListOrdered, Package, Settings, Users, type LucideIcon } from 'lucide-react'
+import {
+  CalendarDays,
+  ListOrdered,
+  Package,
+  Receipt,
+  Settings,
+  Users,
+  type LucideIcon,
+} from 'lucide-react'
 import type { User } from '@/lib/api'
 
 export type NavItem = {
@@ -43,6 +51,9 @@ export const NAV: NavItem[] = [
     requiresFlag: 'queueEnabled',
   },
   { to: '/catalog', label: 'Catalog', icon: Package },
+  // #63: front-desk bill review — no `requiresFlag`, unlike Queue, since a draft bill exists
+  // the moment an appointment completes regardless of any business toggle.
+  { to: '/bills', label: 'Bills', icon: Receipt, anyOf: ['billing.view'] },
   { to: '/settings', label: 'Settings', icon: Settings, anyOf: ADMINISTRATIVE },
 ]
 

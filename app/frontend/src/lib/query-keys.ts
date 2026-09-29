@@ -33,6 +33,8 @@ export const BRANDING = ['business-branding'] as const
 /** The service catalog. One key: the table and the create dialog both read it, and a
  *  service created in the dialog has to reach the table behind it. */
 export const SERVICES = ['services'] as const
+/** The retail catalog: products and their variants (M4 #56). */
+export const PRODUCTS = ['products'] as const
 /** The schedule's column roster (`/api/staff`), and the appointments on a day. The list key
  *  takes the date as a second element, so booking invalidates every day the tab has seen. */
 export const ROSTER = ['roster'] as const
@@ -75,3 +77,14 @@ export const NOTE_APPOINTMENTS = ['note-appointments'] as const
  *  `enable_walk_in_queue` is off (the server's whole-surface 404) — `lib/nav.ts`'s gate and
  *  the queue screen itself both read that shape off the same query, one fetch either way. */
 export const QUEUE = ['queue'] as const
+/** Settings → Billing → Tax: components and their effective-dated rates (#57). */
+export const TAX_COMPONENTS = ['tax-components'] as const
+/** Bill review (#63): the draft-bill list, and one bill (id after) with its lines, eligible
+ *  discounts and tax — recomputed by the server on every read/apply, never cached stale
+ *  across a discount toggle. */
+export const DRAFT_BILLS = ['draft-bills'] as const
+export const BILL = ['bill'] as const
+/** Bill review authority (#64): one bill's override requests, and its inline-admin window
+ *  status — both take the bill id after them. */
+export const OVERRIDE_REQUESTS = ['override-requests'] as const
+export const INLINE_ADMIN = ['inline-admin'] as const
