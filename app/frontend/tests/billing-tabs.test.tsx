@@ -5,10 +5,10 @@ import { renderApp, stubApi } from './harness'
 
 /**
  * Billing's tab shell (#97/#95): `To review` is the unchanged draft-bill list
- * (`routes/bills.tsx`'s own `BillsPage`, covered by `tests/bills.test.tsx`); `Invoices` and
- * the invoice view are empty slots for later tickets. This file only covers the shell —
- * that both tabs exist, that switching between them works, and that the invoice-view route
- * renders.
+ * (`routes/bills.tsx`'s own `BillsPage`, covered by `tests/bills.test.tsx`); `Invoices` is
+ * now the real tab (#99, covered in depth by `tests/invoices-tab.test.tsx`) and the invoice
+ * view stays an empty slot for #102. This file only covers the shell — that both tabs exist,
+ * that switching between them works, and that the invoice-view route renders.
  */
 
 afterEach(() => vi.unstubAllGlobals())
@@ -37,8 +37,18 @@ function billingStub() {
   return stubApi({
     signedIn: true,
     respond: (url) => {
+      const parsed = new URL(url, 'http://test')
       if (url === '/api/auth/me') return Response.json(ACCOUNT)
       if (url === '/api/bills') return Response.json({ bills: [] })
+      if (parsed.pathname === '/api/invoices') {
+        return Response.json({
+          invoices: [],
+          total: 0,
+          from: '2026-08-30',
+          to: '2026-09-29',
+          timezone: 'America/Toronto',
+        })
+      }
       return undefined
     },
   })
@@ -61,7 +71,7 @@ test('switching to Invoices shows its empty state', async () => {
 
   await user.click(await screen.findByRole('tab', { name: 'Invoices' }))
 
-  expect(await screen.findByText('Invoices are not built yet')).toBeInTheDocument()
+  expect(await screen.findByText('No invoices in this range')).toBeInTheDocument()
 })
 
 test('the invoice view route renders its empty state', async () => {

@@ -122,8 +122,10 @@ async def test_reissuing_the_draft_links_the_lineage_both_ways_with_a_new_number
     original = (await client.get(f"{INVOICES}/{invoice_id}")).json()
     assert original["replaced_by_invoice_id"] == replacement["id"]
     assert original["status"] == "cancelled"
+    # #99: the list is newest-issued first now (`billing/invoices.py::list_invoices`), so the
+    # replacement (the higher invoice number) leads.
     listed = (await client.get(INVOICES)).json()["invoices"]
-    assert [i["status"] for i in listed] == ["cancelled", "issued"]
+    assert [i["status"] for i in listed] == ["issued", "cancelled"]
 
 
 async def test_cancelling_an_unknown_invoice_404s(client):

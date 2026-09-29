@@ -4,8 +4,9 @@ import { renderApp, stubApi } from './harness'
 
 /**
  * The client profile's Invoices and Packages cards (#97/#95 user stories 54/65): behind
- * `billing.view`, the same front-desk capability Billing and Sell already use. Empty slots
- * for later tickets — this only covers whether the cards render at all.
+ * `billing.view`, the same front-desk capability Billing and Sell already use. Invoices is
+ * now the real card (#99, covered in depth by `tests/client-invoices.test.tsx`); Packages
+ * stays an empty slot. This file only covers whether the cards render at all.
  */
 
 afterEach(() => vi.unstubAllGlobals())
@@ -62,6 +63,24 @@ function profileStub(capabilities: string[]) {
       const parsed = new URL(url, 'http://test')
       if (url === '/api/auth/me') return Response.json(ACCOUNT(capabilities))
       if (parsed.pathname === '/api/customers/c1') return Response.json(PROFILE)
+      if (parsed.pathname === '/api/invoices') {
+        return Response.json({
+          invoices: [],
+          total: 0,
+          from: '2026-08-30',
+          to: '2026-09-29',
+          timezone: 'America/Toronto',
+        })
+      }
+      if (parsed.pathname === '/api/retail-invoices') {
+        return Response.json({
+          retail_invoices: [],
+          total: 0,
+          from: '2026-08-30',
+          to: '2026-09-29',
+          timezone: 'America/Toronto',
+        })
+      }
       return undefined
     },
   })
@@ -72,7 +91,7 @@ test('a client with billing.view sees Invoices and Packages cards, both empty', 
   renderApp('/clients/c1')
 
   expect(await screen.findByRole('heading', { name: 'Priya Nair' })).toBeInTheDocument()
-  expect(await screen.findByText('Invoices are not built yet')).toBeInTheDocument()
+  expect(await screen.findByText('No invoices yet')).toBeInTheDocument()
   expect(screen.getByText('Packages are not built yet')).toBeInTheDocument()
 })
 
@@ -81,6 +100,6 @@ test('without billing.view neither card renders', async () => {
   renderApp('/clients/c1')
 
   await screen.findByRole('heading', { name: 'Priya Nair' })
-  await waitFor(() => expect(screen.queryByText('Invoices are not built yet')).not.toBeInTheDocument())
+  await waitFor(() => expect(screen.queryByText('No invoices yet')).not.toBeInTheDocument())
   expect(screen.queryByText('Packages are not built yet')).not.toBeInTheDocument()
 })

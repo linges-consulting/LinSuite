@@ -22,23 +22,27 @@ resolved discounts (rule + cents) and tax components (rate + cents).
 """
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from typing import Annotated
+from datetime import date as Date
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 
 from auth.capabilities import Requires
 from auth.models import User
 from billing.bill_review import (
+    INVOICE_LIST_MAX_PAGE_SIZE,
+    INVOICE_LIST_PAGE_SIZE,
     LineTaxOut,
     applicable_components,
     business_or_404,
     components_for,
     discount_input,
     eligible_discounts,
+    invoice_list_window,
     tax_out,
 )
 from billing.commission import commission_amount_cents
@@ -61,8 +65,11 @@ from billing.models import (
 )
 from billing.payments import (
     AdminReviewer,
+    ListStatus,
     balance,
+    balances,
     carry_payments,
+    invoice_list_status,
     lock_issued,
     lock_lineage,
     record_refund,
@@ -211,9 +218,32 @@ class RetailInvoiceSummaryOut(BaseModel):
     id: str
     invoice_number: int
     customer_id: str | None
+    # `None` for an anonymous walk-in sale — the row reads "Walk-in". Never PHI, joined in the
+    # same way `billing/invoices.py::InvoiceSummaryOut.customer_name` is.
+    customer_name: str | None
     status: str
+    # #99: the Invoices list's status badge — see `billing/invoices.py::InvoiceSummaryOut`'s
+    # own field for the same reasoning.
+    list_status: ListStatus
     grand_total_cents: int
     issued_at: datetime
+    # The list's "balance" column, and the rest of `Balance` alongside it — the same fields
+    # `InvoiceSummaryOut` carries, so the Invoices tab reads one shape for either kind.
+    outstanding_cents: int
+    pending_insurer_cents: int
+    client_outstanding_cents: int
+    checkout_complete: bool
+    refunded_cents: int
+    prepaid_cents: int
+    held_credit_cents: int
+
+
+class RetailInvoiceListOut(BaseModel):
+    retail_invoices: list[RetailInvoiceSummaryOut]
+    total: int
+    from_: Date = Field(serialization_alias="from")
+    to: Date
+    timezone: str
 
 
 @dataclass
@@ -796,26 +826,58 @@ async def issue_retail_sale(
     ],
 )
 async def list_retail_invoices(
-    _: RetailSeller, db: SessionDep, customer_id: uuid.UUID | None = None
-) -> dict[str, list[RetailInvoiceSummaryOut]]:
-    """`?customer_id=` narrows to one client's retail history (a linked sale's invoice)."""
-    query = select(RetailInvoice).order_by(RetailInvoice.invoice_number)
+    _: RetailSeller,
+    db: SessionDep,
+    customer_id: uuid.UUID | None = None,
+    from_: Annotated[Date | None, Query(alias="from")] = None,
+    to: Date | None = None,
+    status: Literal["outstanding", "paid", "cancelled"] | None = None,
+    page: Annotated[int, Query(ge=1)] = 1,
+    page_size: Annotated[int, Query(ge=1, le=INVOICE_LIST_MAX_PAGE_SIZE)] = INVOICE_LIST_PAGE_SIZE,
+) -> RetailInvoiceListOut:
+    """The retail half of the Invoices tab (#99) — `?customer_id=` narrows to one client's
+    retail history (a linked sale's invoice), the same date/status/pagination shape
+    `billing/invoices.py::list_invoices` gives the service side, kept as a separate list and a
+    separate numbering series (CLAUDE.md: "Services and retail invoice separately")."""
+    from_date, to_date, start, end, timezone = await invoice_list_window(db, from_, to)
+    # Outer join: an anonymous walk-in sale has no customer row at all (the row reads
+    # "Walk-in" client-side) — never PHI either way, same reasoning as the service list.
+    query = (
+        select(RetailInvoice, Customer.first_name, Customer.last_name)
+        .outerjoin(Customer, Customer.id == RetailInvoice.customer_id)
+        .where(RetailInvoice.issued_at >= start, RetailInvoice.issued_at < end)
+    )
     if customer_id is not None:
         query = query.where(RetailInvoice.customer_id == customer_id)
-    invoices = await db.scalars(query)
-    return {
-        "retail_invoices": [
+    rows = list(await db.execute(query.order_by(RetailInvoice.invoice_number.desc())))
+    invoices = [r[0] for r in rows]
+    names = {r[0].id: (f"{r[1]} {r[2]}" if r[1] is not None else None) for r in rows}
+    by_id = await balances(db, invoices)
+    if status is not None:
+        invoices = [i for i in invoices if invoice_list_status(i, by_id[i.id]) == status]
+    total = len(invoices)
+    start_row = (page - 1) * page_size
+    page_rows = invoices[start_row : start_row + page_size]
+    return RetailInvoiceListOut(
+        retail_invoices=[
             RetailInvoiceSummaryOut(
                 id=str(i.id),
                 invoice_number=i.invoice_number,
                 customer_id=str(i.customer_id) if i.customer_id is not None else None,
+                customer_name=names[i.id],
                 status=i.status,
+                list_status=invoice_list_status(i, by_id[i.id]),
                 grand_total_cents=i.grand_total_cents,
                 issued_at=i.issued_at,
+                **asdict(by_id[i.id]),
             )
-            for i in invoices
-        ]
-    }
+            for i in page_rows
+        ],
+        total=total,
+        from_=from_date,
+        to=to_date,
+        timezone=timezone,
+    )
 
 
 @router.get(

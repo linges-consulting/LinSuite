@@ -94,3 +94,7 @@ export const INLINE_ADMIN = ['inline-admin'] as const
  *  the simulate control at all. */
 export const PHONE_LOOKUP = ['phone-lookup'] as const
 export const DEMO_MODE = ['cti-demo-mode'] as const
+/** The Invoices tab (#99): service and retail issued invoices, each its own key since they
+ *  are never merged into one list — filters (date/status/client) and the page follow after. */
+export const INVOICES = ['invoices'] as const
+export const RETAIL_INVOICES = ['retail-invoices'] as const
