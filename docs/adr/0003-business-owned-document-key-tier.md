@@ -33,7 +33,7 @@ M4 adds financial documents — invoices and treatment receipts — that this mo
 
 **4. Financial retention is its own column, not derived from the customer's hold.**
 
-`documents.retain_until`, nullable, is a business-keyed document's own CRA-clock expiry, set by its caller. It is independent of `customers.retention_expires_at` by construction — nothing reads the customer's hold to decide a business-keyed document's fate. No purge job reads `retain_until` yet; that is a later ticket's work. This one only makes sure the value has somewhere to live from the first financial document on, so that ticket needs no further migration.
+`documents.retain_until`, nullable, is a business-keyed document's own CRA-clock expiry, set by its caller. It is independent of `customers.retention_expires_at` by construction — nothing reads the customer's hold to decide a business-keyed document's fate. At the time of this ADR no purge job read `retain_until` yet; that was a later ticket's work. This one only made sure the value had somewhere to live from the first financial document on, so that ticket needed no further migration. **Note — 2026-09-29 (#84, ADR-0001 amendment):** that later ticket has since shipped. A business-keyed document is erased by ordinary row deletion — never a crypto-shred, since §5 below gives the business key no purge-eligible branch — once its own `retain_until` has passed and any `linked_customer_id` is not itself under a clinical hold. The guard function this row's DELETE runs through, and the nightly job that proposes candidates, are `public.customer_record_guard()` (migration 0068) and `customers/tasks.py::_purge_expired`'s third step.
 
 **5. The business key never shreds, in v1.** Unlike a customer's key, `business_document_keys` has no purge-eligible branch: `business_document_keys_guard` refuses UPDATE and DELETE to every runtime role, unconditionally, table-owner only. There is nothing here to make it "held" or "not held" against — it is the deployment's own key, not a client's, and destroying it would make every financial document unreadable at once, which no acceptance criterion of this ticket calls for.
 
@@ -50,7 +50,7 @@ M4 adds financial documents — invoices and treatment receipts — that this mo
 **Negative**
 
 - Two columns (`customer_id`, `linked_customer_id`) can both notionally "point at a customer" on the same table, for different tiers, which is one more thing a future reader has to keep straight. The CHECK constraints make the invariant machine-checked (a customer-keyed row never sets `linked_customer_id`; a business-keyed row never sets `customer_id`), but the two-column shape is real complexity, accepted because collapsing them reintroduces the exact coupling this ADR exists to avoid.
-- `retain_until` is written but not yet enforced by any purge path — a business document is safe from a customer's shred today, but nothing yet deletes one once its own CRA clock expires. Tracked, not yet acted on.
+- `retain_until` was written but not yet enforced by any purge path at the time this ADR was accepted — a business document was safe from a customer's shred, but nothing yet deleted one once its own CRA clock expired. Closed by #84 (see the note under §4): the purge path exists now.
 
 **Neutral**
 
