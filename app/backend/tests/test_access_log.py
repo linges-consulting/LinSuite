@@ -88,6 +88,8 @@ LOGGED = {
     ("GET", "/api/invoices"),
     ("GET", "/api/retail-invoices"),
     ("GET", "/api/admin/reports/package-liability"),
+    ("GET", "/api/customers/{customer_id}/retail-invoices/{invoice_id}/pdf"),
+    ("POST", "/api/customers/{customer_id}/retail-invoices/{invoice_id}/email"),
 }
 # Customer-scoped GETs that deliberately do not log. Empty: nothing under a customer's path
 # is metadata yet (the access report itself will live under `/api/admin/...`).

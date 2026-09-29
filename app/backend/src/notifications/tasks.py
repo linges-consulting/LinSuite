@@ -92,9 +92,34 @@ def send_email(
         )
         for a in (attachments or [])
     ]
+    deliver_email(
+        to,
+        subject,
+        text,
+        html,
+        attachments=parsed or None,
+        customer_id=customer_id,
+        notification_type=notification_type,
+    )
+
+
+def deliver_email(
+    to: str,
+    subject: str,
+    text: str,
+    html: str | None = None,
+    *,
+    attachments: list[EmailAttachment] | None = None,
+    customer_id: str | None = None,
+    notification_type: str | None = None,
+) -> None:
+    """The send itself, for a task body that already holds the attachment bytes — M4 review
+    R21: `billing.documents.email_document` fetches a stored PDF inside the worker and calls
+    this, so the bytes never ride in a queue message. A transient failure propagates to the
+    calling task's own autoretry."""
     try:
         get_provider(_load_business()).send_email(
-            to=to, subject=subject, text=text, html=html, attachments=parsed or None
+            to=to, subject=subject, text=text, html=html, attachments=attachments
         )
     except PermanentDeliveryError as error:
         record_permanent_failure(customer_id, "email", notification_type, to, error)

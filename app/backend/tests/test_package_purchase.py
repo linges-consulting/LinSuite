@@ -229,6 +229,20 @@ async def test_purchasing_a_single_service_package_issues_an_invoice(client):
     assert invoice_count == 1
 
 
+async def test_a_package_purchase_invoice_renders_to_a_printable_pdf(client):
+    # M4 review R22: rendered in the worker after the purchase commits, served by the same
+    # audited client-scoped invoice route a service invoice uses.
+    await as_admin(client)
+    massage = await make_service(client, price_cents=12000)
+    package = await make_package(client, [{"service_id": massage["id"], "credits": 10}])
+    customer_id = await make_customer(client)
+    body = await purchase(client, package["id"], customer_id)
+
+    pdf = await client.get(f"{CUSTOMERS}/{customer_id}/invoices/{body['invoice_id']}/pdf")
+    assert pdf.status_code == 200, pdf.text
+    assert pdf.content.startswith(b"%PDF")
+
+
 async def test_purchase_needs_billing_view(client):
     await as_admin(client)
     massage = await make_service(client)

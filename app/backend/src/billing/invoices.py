@@ -24,7 +24,6 @@ acceptance criterion, checked directly in `tests/test_commission_leakage.py`). R
 Administrator-only, Admin Mode).
 """
 
-import base64
 import uuid
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -32,12 +31,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import ColumnElement, exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from auth.capabilities import Requires
+from auth.models import User
 from billing.bill_review import (
     BillViewer,
     LineConflict,
@@ -48,7 +48,12 @@ from billing.bill_review import (
     price_bill,
 )
 from billing.commission import commission_amount_cents
-from billing.documents import render_invoice_documents
+from billing.documents import (
+    email_document,
+    receipt_kind,
+    receipt_status,
+    render_invoice_documents,
+)
 from billing.invoice_numbering import allocate_invoice_number
 from billing.keys import business_key
 from billing.models import (
@@ -58,6 +63,7 @@ from billing.models import (
     InvoiceLine,
     InvoiceLineDiscount,
     InvoiceLineTax,
+    RetailInvoice,
     ServiceBill,
 )
 from billing.payments import balance, balances, carry_payments
@@ -69,7 +75,6 @@ from core.documents import fetch_document
 from core.models import Document
 from customers.models import Customer
 from notifications.providers import email_ready
-from notifications.tasks import send_email as send_email_task
 
 router = APIRouter(tags=["billing"])
 
@@ -620,17 +625,15 @@ async def get_invoice(invoice_id: uuid.UUID, _: BillViewer, db: SessionDep) -> I
     return await invoice_out(db, invoice)
 
 
-# --- PDF print/download and email (#70) ------------------------------------------------------
+# --- PDF print/download and email (#70, M4 review T4) ----------------------------------------
 #
-# Mounted under `/customers/{customer_id}/...` — the same shape `forms/submissions.py::
-# view_pdf` already established for a client-linked document's audited read — so `LogAccess`
-# (`core.access_log`) can be reused exactly, unmodified, rather than this ticket inventing a
-# second audited-read mechanism for a route that has no customer id in its path otherwise.
-# `billing.view` gates every route below, the same capability issuing and reading an invoice
-# already use: printing/downloading needs no verified email sender (it never reaches
-# `NotificationProvider`); emailing does, checked explicitly with `email_ready` before anything
-# is sent — an unconfigured business gets a 422, never a silent no-op the way a background
-# trigger's `dispatch()` degrades.
+# Client-linked documents mount under `/customers/{customer_id}/...` so `LogAccess` records the
+# read (`forms/submissions.py::view_pdf`'s shape). An anonymous retail invoice has no client to
+# log against and mounts at `/retail-invoices/{id}/...` instead — that path refuses a linked
+# one, so the audited path cannot be sidestepped. `billing.view` gates all of them. Print needs
+# no verified sender; email does (`email_ready`, 422 otherwise). Rendering is the worker's job:
+# a document not stored yet is a 202, never an inline render. Email queues the document *id*
+# (R21) — `billing.documents.email_document` fetches the bytes inside the worker.
 
 
 async def _load_invoice_for_customer(
@@ -644,35 +647,130 @@ async def _load_invoice_for_customer(
     return invoice
 
 
-async def _load_line_for_customer(
+async def _load_receipt(
     db: SessionDep, customer_id: uuid.UUID, invoice_id: uuid.UUID, line_id: uuid.UUID
-) -> tuple[Invoice, InvoiceLine]:
+) -> tuple[Invoice, str]:
+    """The invoice and the stored kind of this line's receipt at its current status; 409 while
+    it is not released (R20: issued and checkout complete)."""
     invoice = await _load_invoice_for_customer(db, customer_id, invoice_id)
     line = await db.scalar(
         select(InvoiceLine).where(InvoiceLine.id == line_id, InvoiceLine.invoice_id == invoice_id)
     )
     if line is None:
         raise HTTPException(status_code=404, detail="No such treatment receipt.")
-    return invoice, line
+    status = receipt_status(invoice, line, await balance(db, invoice))
+    if status is None:
+        raise HTTPException(
+            status_code=409,
+            detail="A treatment receipt is released once the invoice's checkout is complete.",
+        )
+    return invoice, receipt_kind(status)
 
 
-async def _fetch_stored(db: SessionDep, *, kind: str, source_id: uuid.UUID) -> bytes | None:
-    """`None` when the Celery render hasn't landed yet — the same "still rendering" window
-    `forms/submissions.py::view_pdf` already reports as a 202, never a synchronous fallback
-    render on the request path (CLAUDE.md: PDF generation is a worker job)."""
-    document_id = await db.scalar(
+async def _load_retail(
+    db: SessionDep, invoice_id: uuid.UUID, customer_id: uuid.UUID | None
+) -> RetailInvoice:
+    invoice = await db.get(RetailInvoice, invoice_id)
+    if invoice is None or invoice.customer_id != customer_id:
+        raise HTTPException(status_code=404, detail="No such retail invoice.")
+    return invoice
+
+
+async def _stored_id(db: SessionDep, kind: str, source_id: uuid.UUID) -> uuid.UUID | None:
+    return await db.scalar(
         select(Document.id).where(Document.kind == kind, Document.source_id == source_id)
     )
-    if document_id is None:
-        return None
-    key = await business_key(db)
-    content, _ = await fetch_document(db, key=key, key_owner="business", document_id=document_id)
-    return content
 
 
 _PENDING = JSONResponse(
     {"status": "rendering"}, status_code=202, headers={"Cache-Control": "no-store"}
 )
+
+
+async def _pdf(db: SessionDep, kind: str, source_id: uuid.UUID, filename: str) -> Response:
+    document_id = await _stored_id(db, kind, source_id)
+    if document_id is None:
+        return _PENDING
+    content, _ = await fetch_document(
+        db, key=await business_key(db), key_owner="business", document_id=document_id
+    )
+    return Response(
+        content,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"inline; filename={filename}",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+class EmailedOut(BaseModel):
+    status: str
+    to: str
+
+
+class EmailDocumentIn(BaseModel):
+    # Retail only (R22): a typed-in recipient — required for an anonymous sale, optional
+    # (defaulting to the client's own address) for a linked one.
+    to: EmailStr | None = None
+
+
+async def _customer_email(db: SessionDep, customer_id: uuid.UUID) -> str:
+    customer = await db.get(Customer, customer_id)
+    if customer is None or not customer.email:
+        raise HTTPException(status_code=422, detail="This client has no email address on file.")
+    return customer.email
+
+
+async def _email(
+    db: SessionDep,
+    actor: User,
+    *,
+    kind: str,
+    source_id: uuid.UUID,
+    to: str,
+    subject: str,
+    body: str,
+    filename: str,
+    event: str,
+    target_type: str,
+    customer_id: uuid.UUID | None,
+    notification_type: str,
+) -> Response | EmailedOut:
+    """An explicit staff action, audited (`core/audit.py`) beside the `LogAccess` read. Touches
+    no invoice/ledger/stock row, so a resend is one more email and audit row, never a second
+    financial effect."""
+    document_id = await _stored_id(db, kind, source_id)
+    if document_id is None:
+        return _PENDING
+    record_event(
+        db,
+        event,
+        target_type=target_type,
+        target_id=str(source_id),
+        actor_user_id=actor.id,
+        metadata={"to": to, "document_id": str(document_id)},
+    )
+    await db.commit()
+    email_document.delay(
+        str(document_id),
+        to,
+        subject,
+        body,
+        filename,
+        customer_id=str(customer_id) if customer_id else None,
+        notification_type=notification_type,
+    )
+    return EmailedOut(status="queued", to=to)
+
+
+async def _ready_business(db: SessionDep):
+    business = await business_or_404(db)
+    if not email_ready(business):
+        raise HTTPException(
+            status_code=422, detail="Email is not configured and verified for this business."
+        )
+    return business
 
 
 @router.get(
@@ -684,17 +782,7 @@ _PENDING = JSONResponse(
 )
 async def invoice_pdf(customer_id: uuid.UUID, invoice_id: uuid.UUID, db: SessionDep) -> Response:
     invoice = await _load_invoice_for_customer(db, customer_id, invoice_id)
-    content = await _fetch_stored(db, kind="invoice", source_id=invoice_id)
-    if content is None:
-        return _PENDING
-    return Response(
-        content,
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": f"inline; filename=invoice-{invoice.invoice_number}.pdf",
-            "Cache-Control": "no-store",
-        },
-    )
+    return await _pdf(db, "invoice", invoice_id, f"invoice-{invoice.invoice_number}.pdf")
 
 
 @router.get(
@@ -707,30 +795,8 @@ async def invoice_pdf(customer_id: uuid.UUID, invoice_id: uuid.UUID, db: Session
 async def treatment_receipt_pdf(
     customer_id: uuid.UUID, invoice_id: uuid.UUID, line_id: uuid.UUID, db: SessionDep
 ) -> Response:
-    invoice, _line = await _load_line_for_customer(db, customer_id, invoice_id, line_id)
-    content = await _fetch_stored(db, kind="treatment_receipt", source_id=line_id)
-    if content is None:
-        return _PENDING
-    return Response(
-        content,
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": f"inline; filename=receipt-{invoice.invoice_number}.pdf",
-            "Cache-Control": "no-store",
-        },
-    )
-
-
-class EmailedOut(BaseModel):
-    status: str
-    to: str
-
-
-async def _customer_email(db: SessionDep, customer_id: uuid.UUID) -> str:
-    customer = await db.get(Customer, customer_id)
-    if customer is None or not customer.email:
-        raise HTTPException(status_code=422, detail="This client has no email address on file.")
-    return customer.email
+    invoice, kind = await _load_receipt(db, customer_id, invoice_id, line_id)
+    return await _pdf(db, kind, line_id, f"receipt-{invoice.invoice_number}.pdf")
 
 
 @router.post(
@@ -743,47 +809,22 @@ async def _customer_email(db: SessionDep, customer_id: uuid.UUID) -> str:
 async def email_invoice(
     customer_id: uuid.UUID, invoice_id: uuid.UUID, actor: BillViewer, db: SessionDep
 ) -> EmailedOut:
-    business = await business_or_404(db)
-    if not email_ready(business):
-        raise HTTPException(
-            status_code=422, detail="Email is not configured and verified for this business."
-        )
+    business = await _ready_business(db)
     invoice = await _load_invoice_for_customer(db, customer_id, invoice_id)
-    to = await _customer_email(db, customer_id)
-    content = await _fetch_stored(db, kind="invoice", source_id=invoice_id)
-    if content is None:
-        return _PENDING  # type: ignore[return-value]
-
-    # An explicit staff action, audited like any other (`core/audit.py`) — distinct from the
-    # `LogAccess` read above, which only records that the document was opened. Nothing here
-    # touches `invoices`/`service_bills`/commission/stock, so a resend is trivially idempotent:
-    # re-running this route re-sends the same already-rendered bytes and writes one more audit
-    # row, never a second financial effect.
-    record_event(
+    return await _email(  # type: ignore[return-value]
         db,
-        "invoice.emailed",
+        actor,
+        kind="invoice",
+        source_id=invoice_id,
+        to=await _customer_email(db, customer_id),
+        subject=f"Invoice #{invoice.invoice_number} — {business.name}",
+        body=f"Your invoice #{invoice.invoice_number} from {business.name} is attached.",
+        filename=f"invoice-{invoice.invoice_number}.pdf",
+        event="invoice.emailed",
         target_type="invoice",
-        target_id=str(invoice_id),
-        actor_user_id=actor.id,
-        metadata={"to": to},
-    )
-    await db.commit()
-
-    send_email_task.delay(
-        to,
-        f"Invoice #{invoice.invoice_number} — {business.name}",
-        f"Your invoice #{invoice.invoice_number} from {business.name} is attached.",
-        attachments=[
-            {
-                "filename": f"invoice-{invoice.invoice_number}.pdf",
-                "content_b64": base64.b64encode(content).decode(),
-                "content_type": "application/pdf",
-            }
-        ],
-        customer_id=str(customer_id),
+        customer_id=customer_id,
         notification_type="invoice_document",
     )
-    return EmailedOut(status="queued", to=to)
 
 
 @router.post(
@@ -800,39 +841,98 @@ async def email_treatment_receipt(
     actor: BillViewer,
     db: SessionDep,
 ) -> EmailedOut:
-    business = await business_or_404(db)
-    if not email_ready(business):
-        raise HTTPException(
-            status_code=422, detail="Email is not configured and verified for this business."
-        )
-    invoice, _line = await _load_line_for_customer(db, customer_id, invoice_id, line_id)
-    to = await _customer_email(db, customer_id)
-    content = await _fetch_stored(db, kind="treatment_receipt", source_id=line_id)
-    if content is None:
-        return _PENDING  # type: ignore[return-value]
-
-    record_event(
+    business = await _ready_business(db)
+    invoice, kind = await _load_receipt(db, customer_id, invoice_id, line_id)
+    return await _email(  # type: ignore[return-value]
         db,
-        "treatment_receipt.emailed",
+        actor,
+        kind=kind,
+        source_id=line_id,
+        to=await _customer_email(db, customer_id),
+        subject=f"Your receipt — {business.name}",
+        body=f"Your treatment receipt from {business.name} is attached.",
+        filename=f"receipt-{invoice.invoice_number}.pdf",
+        event="treatment_receipt.emailed",
         target_type="invoice_line",
-        target_id=str(line_id),
-        actor_user_id=actor.id,
-        metadata={"to": to, "invoice_id": str(invoice_id)},
-    )
-    await db.commit()
-
-    send_email_task.delay(
-        to,
-        f"Your receipt — {business.name}",
-        f"Your treatment receipt from {business.name} is attached.",
-        attachments=[
-            {
-                "filename": f"receipt-{invoice.invoice_number}.pdf",
-                "content_b64": base64.b64encode(content).decode(),
-                "content_type": "application/pdf",
-            }
-        ],
-        customer_id=str(customer_id),
+        customer_id=customer_id,
         notification_type="treatment_receipt",
     )
-    return EmailedOut(status="queued", to=to)
+
+
+# --- retail invoices (R22) ---------------------------------------------------------------------
+
+
+async def _retail_pdf(db: SessionDep, invoice: RetailInvoice) -> Response:
+    return await _pdf(
+        db, "retail_invoice", invoice.id, f"retail-invoice-{invoice.invoice_number}.pdf"
+    )
+
+
+async def _email_retail(
+    db: SessionDep, actor: User, invoice: RetailInvoice, to: str
+) -> Response | EmailedOut:
+    business = await _ready_business(db)
+    return await _email(
+        db,
+        actor,
+        kind="retail_invoice",
+        source_id=invoice.id,
+        to=to,
+        subject=f"Retail invoice #{invoice.invoice_number} — {business.name}",
+        body=f"Your invoice #{invoice.invoice_number} from {business.name} is attached.",
+        filename=f"retail-invoice-{invoice.invoice_number}.pdf",
+        event="retail_invoice.emailed",
+        target_type="retail_invoice",
+        customer_id=invoice.customer_id,
+        notification_type="retail_invoice_document",
+    )
+
+
+@router.get(
+    "/customers/{customer_id}/retail-invoices/{invoice_id}/pdf",
+    dependencies=[
+        _ViewInvoiceDocs,
+        Depends(LogAccess("retail_invoice_document", resource_param="invoice_id")),
+    ],
+)
+async def linked_retail_invoice_pdf(
+    customer_id: uuid.UUID, invoice_id: uuid.UUID, db: SessionDep
+) -> Response:
+    return await _retail_pdf(db, await _load_retail(db, invoice_id, customer_id))
+
+
+@router.get("/retail-invoices/{invoice_id}/pdf", dependencies=[_ViewInvoiceDocs])
+async def anonymous_retail_invoice_pdf(invoice_id: uuid.UUID, db: SessionDep) -> Response:
+    """An anonymous sale only; a client-linked one is opened under its client (audited)."""
+    return await _retail_pdf(db, await _load_retail(db, invoice_id, None))
+
+
+@router.post(
+    "/customers/{customer_id}/retail-invoices/{invoice_id}/email",
+    dependencies=[
+        _ViewInvoiceDocs,
+        Depends(LogAccess("retail_invoice_document", resource_param="invoice_id")),
+    ],
+)
+async def email_linked_retail_invoice(
+    customer_id: uuid.UUID,
+    invoice_id: uuid.UUID,
+    payload: EmailDocumentIn,
+    actor: BillViewer,
+    db: SessionDep,
+) -> EmailedOut:
+    invoice = await _load_retail(db, invoice_id, customer_id)
+    to = payload.to or await _customer_email(db, customer_id)
+    return await _email_retail(db, actor, invoice, to)  # type: ignore[return-value]
+
+
+@router.post("/retail-invoices/{invoice_id}/email")
+async def email_anonymous_retail_invoice(
+    invoice_id: uuid.UUID, payload: EmailDocumentIn, actor: BillViewer, db: SessionDep
+) -> EmailedOut:
+    invoice = await _load_retail(db, invoice_id, None)
+    if payload.to is None:
+        raise HTTPException(
+            status_code=422, detail="Enter a recipient email for an anonymous sale."
+        )
+    return await _email_retail(db, actor, invoice, payload.to)  # type: ignore[return-value]

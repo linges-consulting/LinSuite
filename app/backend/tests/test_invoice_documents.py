@@ -21,13 +21,16 @@ from datetime import UTC, datetime
 from sqlalchemy import text
 
 from billing.documents import (
+    _money,
     _plus_years,
-    payment_status_label,
     receipt_number,
+    receipt_status,
+    render_invoice_html,
     render_receipt_html,
     show_clinical_fields,
 )
 from billing.models import Invoice, InvoiceLine, InvoiceLineTax
+from billing.payments import Balance
 from core.db import session_scope
 from core.models import Business
 from customers.models import Customer
@@ -68,10 +71,19 @@ async def _make_email_ready() -> None:
         await db.commit()
 
 
-async def _issued_invoice_with_emailed_customer(client, **overrides) -> tuple[str, str, str]:
-    """`(invoice_id, invoice_number_url, customer_id)` for a visit whose client has an email on
-    file — `complete_a_visit`'s own `CUSTOMER` fixture has none, since most of #65's own tests
-    never need one."""
+async def _pay(client, invoice_id: str, amount_cents: int, **overrides) -> None:
+    body = {"payer_type": "client", "method": "card", "amount_cents": amount_cents}
+    body.update(overrides)
+    resp = await client.post(f"{INVOICES}/{invoice_id}/payments", json=body)
+    assert resp.status_code == 201, resp.text
+
+
+async def _issued_invoice_with_emailed_customer(
+    client, *, pay: bool = True, **overrides
+) -> tuple[str, str, str]:
+    """`(invoice_id, customer_id, invoice_number)` for a visit whose client has an email on
+    file — `complete_a_visit`'s own `CUSTOMER` fixture has none. `pay` settles it in full, so
+    checkout is complete and the treatment receipt is released (R20)."""
     bill_id, _service_id = await complete_a_visit(client, **overrides)
     async with session_scope() as db:
         customer_id = await db.scalar(
@@ -85,6 +97,8 @@ async def _issued_invoice_with_emailed_customer(client, **overrides) -> tuple[st
     await as_staff(client)
     issued = await client.post(issue_url(bill_id), json={})
     assert issued.status_code == 201, issued.text
+    if pay:
+        await _pay(client, issued.json()["id"], issued.json()["grand_total_cents"])
     return issued.json()["id"], str(customer_id), issued.json()["invoice_number"]
 
 
@@ -124,7 +138,7 @@ async def test_issuing_renders_the_invoice_pdf_and_one_receipt_per_appointment(c
                 )
             ).all()
         )
-    assert counts == {"invoice": 1, "treatment_receipt": 1}
+    assert counts == {"invoice": 1, "treatment_receipt:paid": 1}
 
 
 async def test_invoice_pdf_downloads_and_logs_an_audited_read(client):
@@ -293,6 +307,135 @@ async def test_a_resend_never_rerenders_or_retouches_the_invoice(client, sent_em
     assert len(sent_emails) == 2  # the send itself is not idempotent, only the money is
 
 
+# --- S1: receipt release and labels follow checkout (R20) --------------------------------------
+
+
+async def _receipt_kinds(line_id: str) -> list[str]:
+    async with session_scope() as db:
+        rows = await db.scalars(
+            text("SELECT kind FROM documents WHERE source_id = :l ORDER BY created_at"),
+            {"l": line_id},
+        )
+        return list(rows)
+
+
+async def test_an_unpaid_invoice_releases_no_receipt(client):
+    await as_admin(client)
+    invoice_id, customer_id, _number = await _issued_invoice_with_emailed_customer(
+        client, pay=False
+    )
+    line_id = await _first_line_id(invoice_id)
+
+    resp = await client.get(_receipt_pdf_url(customer_id, invoice_id, line_id))
+    assert resp.status_code == 409, resp.text
+    assert await _receipt_kinds(line_id) == []
+    # The invoice itself is still printable — only the receipt waits for checkout.
+    assert (await client.get(_pdf_url(customer_id, invoice_id))).status_code == 200
+
+
+async def test_pending_insurer_money_is_labelled_pending_then_paid_on_arrival(client):
+    await as_admin(client)
+    invoice_id, customer_id, _number = await _issued_invoice_with_emailed_customer(
+        client, pay=False
+    )
+    line_id = await _first_line_id(invoice_id)
+    total = (await client.get(f"{INVOICES}/{invoice_id}")).json()["grand_total_cents"]
+    insurer = {"payer_type": "insurer", "method": "insurer"}
+
+    await _pay(client, invoice_id, total - 4000)
+    assert await _receipt_kinds(line_id) == []  # client portion not yet settled
+    await _pay(client, invoice_id, 4000, status="pending", **insurer)
+    assert await _receipt_kinds(line_id) == ["treatment_receipt:pending_insurer"]
+    assert (await client.get(_receipt_pdf_url(customer_id, invoice_id, line_id))).status_code == 200
+
+    await _pay(client, invoice_id, 4000, **insurer)
+    # A new document for the new status; the earlier (immutable) one is kept as history.
+    assert await _receipt_kinds(line_id) == [
+        "treatment_receipt:pending_insurer",
+        "treatment_receipt:paid",
+    ]
+
+
+async def test_an_authorized_balance_exception_releases_a_receipt_that_does_not_say_paid(client):
+    await as_admin(client)
+    invoice_id, _customer_id, _number = await _issued_invoice_with_emailed_customer(
+        client, pay=False
+    )
+    line_id = await _first_line_id(invoice_id)
+    client.cookies.clear()
+    await as_admin(client)
+
+    resp = await client.post(
+        f"{INVOICES}/{invoice_id}/balance-exceptions", json={"reason": "hardship"}
+    )
+    assert resp.status_code == 201, resp.text
+    assert await _receipt_kinds(line_id) == ["treatment_receipt:authorized_balance"]
+
+
+async def test_the_email_queue_carries_the_document_id_never_its_bytes(
+    client, sent_emails, monkeypatch
+):
+    from billing.documents import email_document
+
+    await as_admin(client)
+    invoice_id, customer_id, _number = await _issued_invoice_with_emailed_customer(client)
+    await _make_email_ready()
+    queued: list[tuple] = []
+    real_delay = email_document.delay
+
+    def spy(*args, **kwargs):
+        queued.append((args, kwargs))
+        return real_delay(*args, **kwargs)
+
+    monkeypatch.setattr(email_document, "delay", spy)
+    resp = await client.post(f"{CUSTOMERS}/{customer_id}/invoices/{invoice_id}/email", json={})
+    assert resp.status_code == 200, resp.text
+
+    async with session_scope() as db:
+        document_id = await db.scalar(
+            text("SELECT id FROM documents WHERE kind = 'invoice' AND source_id = :i"),
+            {"i": invoice_id},
+        )
+    [(args, kwargs)] = queued
+    assert args[0] == str(document_id)
+    assert all(isinstance(a, str) and len(a) < 200 for a in args)
+    assert "attachments" not in kwargs
+    assert sent_emails[0].attachments[0].content.startswith(b"%PDF")
+
+
+# --- S1: the beat reconciler (R23) -------------------------------------------------------------
+
+
+async def test_the_reconciler_re_renders_documents_that_never_landed(client):
+    from billing.documents import reconcile_renders
+    from tests.test_form_links import as_owner
+
+    await as_admin(client)
+    invoice_id, customer_id, _number = await _issued_invoice_with_emailed_customer(client)
+    line_id = await _first_line_id(invoice_id)
+    await as_owner("DELETE FROM documents WHERE source_id IN (:i, :l)", i=invoice_id, l=line_id)
+    assert (await client.get(_pdf_url(customer_id, invoice_id))).status_code == 202
+
+    reconcile_renders()
+
+    assert (await client.get(_pdf_url(customer_id, invoice_id))).status_code == 200
+    assert await _receipt_kinds(line_id) == ["treatment_receipt:paid"]
+
+
+async def test_the_reconciler_leaves_unreleased_receipts_alone(client):
+    from billing.documents import reconcile_renders
+
+    await as_admin(client)
+    invoice_id, _customer_id, _number = await _issued_invoice_with_emailed_customer(
+        client, pay=False
+    )
+    line_id = await _first_line_id(invoice_id)
+
+    reconcile_renders()
+
+    assert await _receipt_kinds(line_id) == []
+
+
 # --- S1: clinical field gating, over the real HTTP surface -----------------------------------
 
 
@@ -326,11 +469,69 @@ def test_show_clinical_fields_is_true_only_for_regulated_health():
     assert show_clinical_fields(_business(retention_profile="general_business")) is False
 
 
-def test_payment_status_label_is_paid_today_the_checkout_complete_approximation():
-    # #66 (the payment ledger) isn't merged; see `billing/documents.py`'s own module docstring
-    # for exactly what to change here once it is.
-    invoice = Invoice(grand_total_cents=12000)
-    assert payment_status_label(invoice) == "Paid"
+def _bal(**overrides) -> Balance:
+    fields = {
+        "outstanding_cents": 0,
+        "pending_insurer_cents": 0,
+        "client_outstanding_cents": 0,
+        "checkout_complete": True,
+        "refunded_cents": 0,
+    }
+    fields.update(overrides)
+    return Balance(**fields)
+
+
+def test_receipt_status_follows_the_ledger_and_never_says_paid_for_pending_money():
+    issued = Invoice(status="issued")
+    line = InvoiceLine(line_total_cents=10000, prepaid_cents=0)
+    assert receipt_status(issued, line, _bal(checkout_complete=False)) is None
+    assert receipt_status(Invoice(status="cancelled"), line, _bal()) is None
+    assert receipt_status(issued, line, _bal()) == "Paid"
+    pending = _bal(outstanding_cents=4000, pending_insurer_cents=4000)
+    assert receipt_status(issued, line, pending) == "Pending insurer"
+    assert receipt_status(issued, line, _bal(outstanding_cents=500)) == (
+        "Balance outstanding (authorized)"
+    )
+    prepaid = InvoiceLine(line_total_cents=10000, prepaid_cents=10000)
+    assert receipt_status(issued, prepaid, pending) == "Prepaid (package credit)"
+
+
+def test_money_is_formatted_from_integer_cents():
+    assert _money(0, "$") == "$0.00"
+    assert _money(5, "$") == "$0.05"
+    assert _money(-123456, "$") == "-$1,234.56"
+    assert _money(10**15 + 1, "$") == "$10,000,000,000,000.01"  # no float rounding
+
+
+def test_an_overridden_invoice_prints_the_billed_tax_not_the_computed_one():
+    invoice = Invoice(
+        invoice_number=3,
+        status="issued",
+        issued_at=datetime(2026, 1, 5, 15, 0, tzinfo=UTC),
+        computed_subtotal_cents=10000,
+        computed_discount_total_cents=0,
+        computed_tax_total_cents=999,
+        tax_totals_by_component={"GST": 450},
+        override_applied_cents=9450,
+        override_reason="goodwill",
+        grand_total_cents=9450,
+        lines=[
+            InvoiceLine(
+                id=uuid.uuid4(),
+                price_cents=10000,
+                discounted_cents=9000,
+                override_adjustment_cents=-1000,
+                tax_cents=450,
+                line_total_cents=9450,
+                created_at=datetime(2026, 1, 5, tzinfo=UTC),
+            )
+        ],
+    )
+    customer = Customer(first_name="Priya", last_name="Nair")
+    html = render_invoice_html(invoice, _business(), customer, {})
+    assert "$4.50" in html
+    assert "$9.99" not in html
+    assert "-$10.00" in html  # the authorized adjustment, so the totals add up to $94.50
 
 
 def test_receipt_number_is_the_invoice_number_and_the_lines_ordinal():
@@ -386,14 +587,14 @@ def test_render_receipt_html_includes_credentials_only_for_regulated_health():
     invoice, line, appointment, regulated = _transient_receipt_fixtures(
         retention_profile="regulated_health"
     )
-    html = render_receipt_html(invoice, line, appointment, regulated, 1)
+    html = render_receipt_html(invoice, line, appointment, regulated, 1, payment_status="Paid")
     assert "RMT" in html
     assert "12345" in html
 
     invoice2, line2, appointment2, general = _transient_receipt_fixtures(
         retention_profile="general_business"
     )
-    html2 = render_receipt_html(invoice2, line2, appointment2, general, 1)
+    html2 = render_receipt_html(invoice2, line2, appointment2, general, 1, payment_status="Paid")
     assert "RMT" not in html2
     assert "12345" not in html2
 
@@ -402,6 +603,6 @@ def test_render_receipt_html_shows_the_frozen_attributable_value_never_a_live_pr
     invoice, line, appointment, business = _transient_receipt_fixtures(
         retention_profile="general_business"
     )
-    html = render_receipt_html(invoice, line, appointment, business, 1)
+    html = render_receipt_html(invoice, line, appointment, business, 1, payment_status="Paid")
     assert "135.60" in html  # line.line_total_cents, not the service's live price
     assert "Paid" in html

@@ -372,6 +372,17 @@ async def is_checkout_complete(db: AsyncSession, invoice: AnyInvoice) -> bool:
     return (await balance(db, invoice)).checkout_complete
 
 
+def requeue_receipts(invoice: AnyInvoice) -> None:
+    """M4 review R20: a service invoice's treatment-receipt status (released? Paid / Pending
+    insurer / ...) follows its ledger, so every ledger write re-queues its render *after*
+    commit. The renderer only stores what is missing, so a no-op change costs two reads."""
+    if isinstance(invoice, Invoice) and invoice.service_bill_id is not None:
+        # Imported here: `billing.documents` reads this module's `balance`.
+        from billing.documents import render_invoice_documents
+
+        render_invoice_documents.delay(str(invoice.id))
+
+
 # --- what goes over the wire -----------------------------------------------------------------
 
 
@@ -590,6 +601,7 @@ async def _record_payment(
         assert purchase is not None
         await activate_credits(db, purchase)
     await db.commit()
+    requeue_receipts(invoice)
     return _payment_out(payment)
 
 
@@ -716,6 +728,7 @@ async def _correct_payment(
         },
     )
     await db.commit()
+    requeue_receipts(invoice)
     return _payment_out(correction)
 
 
@@ -738,6 +751,7 @@ async def refund(
         db, invoice, amount_cents=payload.amount_cents, reason=payload.reason, approver=actor
     )
     await db.commit()
+    requeue_receipts(invoice)
     return refund_out(created)
 
 
@@ -800,6 +814,7 @@ async def _authorize(
         metadata={"outstanding_cents": outstanding, "reason": payload.reason},
     )
     await db.commit()
+    requeue_receipts(invoice)
     return _authorization_out(authorization)
 
 
