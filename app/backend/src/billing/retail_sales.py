@@ -185,6 +185,11 @@ class RetailInvoiceLineOut(BaseModel):
     # R26: no commission rate or basis — this payload is staff-facing (`billing.view`); the
     # admin-only commission report (`commission.view`) is where retail commission is read.
     staff_id: str
+    # #105: units already brought back by a #76 return (restocked or not) — `quantity -
+    # returned_quantity` is what the Returns dialog may still select for this line. Least
+    # invasive addition to this read model: reuses #76's own `_returned_by_line` rather than a
+    # new endpoint.
+    returned_quantity: int
 
 
 class RetailInvoiceOut(BaseModel):
@@ -369,6 +374,7 @@ async def _invoice_out(db: SessionDep, invoice: RetailInvoice) -> RetailInvoiceO
         if variant_ids
         else {}
     )
+    returned = await _returned_by_line(db, invoice.id)
     return RetailInvoiceOut(
         outstanding_cents=money.outstanding_cents,
         refunded_cents=money.refunded_cents,
@@ -435,6 +441,7 @@ async def _invoice_out(db: SessionDep, invoice: RetailInvoice) -> RetailInvoiceO
                     for t in line.taxes
                 ],
                 staff_id=str(line.staff_id),
+                returned_quantity=returned.get(line.id, 0),
             )
             for line in invoice.lines
         ],

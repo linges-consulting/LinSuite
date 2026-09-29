@@ -157,6 +157,20 @@ async def test_a_return_needs_billing_manage_in_admin_mode(client):
     assert resp.status_code == 403, resp.text
 
 
+# --- the invoice read exposes what remains returnable (#105) --------------------------------------
+
+
+async def test_the_invoice_read_exposes_returned_quantity_per_line(client):
+    invoice, _ = await sell(client, quantity=3)
+
+    resp = await client.post(returns_url(invoice["id"]), json=a_return(invoice, quantity=2))
+    assert resp.status_code == 201, resp.text
+
+    after = await read(client, invoice["id"])
+    assert after["lines"][0]["returned_quantity"] == 2
+    assert after["lines"][0]["quantity"] == 3
+
+
 # --- never over-returning a line ------------------------------------------------------------------
 
 
