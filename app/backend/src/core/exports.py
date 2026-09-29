@@ -15,14 +15,13 @@ anything calls `build_report_export`.
 
 and an endpoint that calls `request_export(db, kind="my_kind", params=..., requested_by=...)`
 then, after `db.commit()`, `build_report_export.delay(str(export.id))` — see
-`billing/commission_report.py` for the shape a request/poll/download trio takes around it.
+`billing/commission_report.py` for the shape a request/poll/download trio takes around it,
+and `billing/package_liability.py` (#88) for a kind that filters by, and audits reads of, a
+customer.
 
-**The erasure cascade convention (ADR-0001 rule 14).** A kind whose `params` names the
-customer it is scoped to uses the key `"customer_id"` — `access_log` (#87) does, and any
-later kind that filters by customer (`package_liability`, #88) should reuse the same name
-rather than invent its own. `delete_customer_exports` below deletes every export naming a
-customer that way, pending or ready, kind-agnostic; the caller (`customers/erasure.py`)
-runs it in the same transaction as the erasure write, before commit.
+A kind whose `params` names a customer stores that id under `params["customer_id"]`
+(`delete_customer_exports` below matches on exactly that key) — ADR-0001 rule 14: the export
+is deleted the moment that customer's erasure is requested, in the same transaction.
 """
 
 import uuid

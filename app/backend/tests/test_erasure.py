@@ -528,6 +528,41 @@ async def test_an_unknown_client_is_404(client):
     assert (await erase(client, str(uuid.uuid4()))).status_code == 404
 
 
+# --- ADR-0001 rule 14: an export naming a client is deleted when they are erased (#88) -----
+
+
+async def export_ids() -> list[str]:
+    async with session_scope() as db:
+        return [str(i) for i in await db.scalars(text("SELECT id FROM report_exports"))]
+
+
+async def test_requesting_erasure_deletes_liability_exports_filtered_to_that_client(client):
+    customer_id, _, _ = await ready_customer(client)
+    other = await client.post(CUSTOMERS, json={"first_name": "Zed", "last_name": "Nair"})
+    assert other.status_code == 201, other.text
+    other_id = other.json()["id"]
+    theirs = await client.post(
+        "/api/admin/reports/package-liability/exports", json={"customer_id": customer_id}
+    )
+    assert theirs.status_code == 202, theirs.text
+    someone_elses = await client.post(
+        "/api/admin/reports/package-liability/exports", json={"customer_id": other_id}
+    )
+    assert someone_elses.status_code == 202, someone_elses.text
+    unfiltered = await client.post("/api/admin/reports/package-liability/exports", json={})
+    assert unfiltered.status_code == 202, unfiltered.text
+    assert sorted(await export_ids()) == sorted(
+        [theirs.json()["id"], someone_elses.json()["id"], unfiltered.json()["id"]]
+    )
+
+    assert (await erase(client, customer_id)).status_code == 201
+
+    remaining = await export_ids()
+    assert theirs.json()["id"] not in remaining
+    assert someone_elses.json()["id"] in remaining
+    assert unfiltered.json()["id"] in remaining
+
+
 # --- fix round 1 -------------------------------------------------------------------------
 
 
@@ -889,8 +924,7 @@ async def test_erasure_deletes_the_clients_access_log_exports_pending_or_ready(c
             ),
             {
                 "params": (
-                    f'{{"customer_id": "{customer_id}", "from": "2026-01-01", '
-                    '"to": "2026-01-31"}'
+                    f'{{"customer_id": "{customer_id}", "from": "2026-01-01", "to": "2026-01-31"}}'
                 ),
                 "requested_by": await admin_id(),
             },
