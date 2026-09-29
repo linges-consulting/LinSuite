@@ -1857,6 +1857,63 @@ export async function fetchAccessLog(
   return res.json()
 }
 
+// --- CSV exports (#86/#95's shared mechanism): request, poll, download -----------------
+
+/** The one shape every export kind's request/poll endpoint answers in
+ *  (`core/exports.py`'s `ReportExport`, as `access_log`/`commission`/`package_liability`
+ *  each serialise it) — `<ExportControl>` (`components/export-control.tsx`) knows only this
+ *  shape, never a report's own params. */
+export type ExportJob = {
+  id: string
+  status: 'pending' | 'ready' | 'failed'
+  created_at: string
+  completed_at: string | null
+  download_url: string | null
+}
+
+/** Fetches a ready export and saves it under the filename the server chose
+ *  (`Content-Disposition`, never guessed client-side) — the one download mechanics every
+ *  export kind shares. Rejects with the same `ApiError` a 410/409 always throws. */
+async function downloadExportFile(url: string): Promise<void> {
+  const res = await fetch(url, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not download the export')
+  const filename = /filename="([^"]+)"/.exec(res.headers.get('Content-Disposition') ?? '')?.[1] ?? 'export.csv'
+  const blobUrl = URL.createObjectURL(await res.blob())
+  const link = document.createElement('a')
+  link.href = blobUrl
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(blobUrl)
+}
+
+/** Requests the client access-log CSV (#87) for the panel's own range — `audit.view`, Admin
+ *  Mode. Polled with `fetchAccessLogExportStatus`, downloaded with `downloadAccessLogExport`. */
+export async function requestAccessLogExport(
+  customerId: string,
+  query: { from?: string; to?: string },
+): Promise<ExportJob> {
+  const res = await post(
+    `/api/admin/customers/${encodeURIComponent(customerId)}/access-log/exports`,
+    { from: query.from, to: query.to },
+  )
+  if (!res.ok) throw await failure(res, 'Could not request the export')
+  return res.json()
+}
+
+export async function fetchAccessLogExportStatus(customerId: string, exportId: string): Promise<ExportJob> {
+  const res = await fetch(
+    `/api/admin/customers/${encodeURIComponent(customerId)}/access-log/exports/${encodeURIComponent(exportId)}`,
+  )
+  if (!res.ok) throw await failure(res, 'Could not check the export')
+  return res.json()
+}
+
+export function downloadAccessLogExport(customerId: string, exportId: string): Promise<void> {
+  return downloadExportFile(
+    `/api/admin/customers/${encodeURIComponent(customerId)}/access-log/exports/${encodeURIComponent(exportId)}/csv`,
+  )
+}
+
 /** Every field the edit dialog can send. A key left out of the object is left alone on the
  *  server — never sent as `null` by accident — which is what lets the dialog submit only
  *  what actually changed. */
