@@ -16,6 +16,13 @@ anything calls `build_report_export`.
 and an endpoint that calls `request_export(db, kind="my_kind", params=..., requested_by=...)`
 then, after `db.commit()`, `build_report_export.delay(str(export.id))` — see
 `billing/commission_report.py` for the shape a request/poll/download trio takes around it.
+
+**The erasure cascade convention (ADR-0001 rule 14).** A kind whose `params` names the
+customer it is scoped to uses the key `"customer_id"` — `access_log` (#87) does, and any
+later kind that filters by customer (`package_liability`, #88) should reuse the same name
+rather than invent its own. `delete_customer_exports` below deletes every export naming a
+customer that way, pending or ready, kind-agnostic; the caller (`customers/erasure.py`)
+runs it in the same transaction as the erasure write, before commit.
 """
 
 import uuid
@@ -23,6 +30,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -52,6 +60,17 @@ def is_registered(kind: str) -> bool:
 
 def is_expired(export: ReportExport, *, now: datetime | None = None) -> bool:
     return (now or datetime.now(UTC)) >= export.expires_at
+
+
+async def delete_customer_exports(db: AsyncSession, customer_id: uuid.UUID) -> int:
+    """Deletes every export whose `params` names this customer under the `"customer_id"` key
+    (`params->>'customer_id' = :id`), whatever its `kind` or `status` — the convention this
+    module's docstring documents. Stages the deletes in the caller's own transaction; it does
+    not commit."""
+    result = await db.execute(
+        delete(ReportExport).where(ReportExport.params["customer_id"].astext == str(customer_id))
+    )
+    return result.rowcount
 
 
 async def request_export(
