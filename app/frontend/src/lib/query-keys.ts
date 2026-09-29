@@ -101,3 +101,7 @@ export const DEMO_MODE = ['cti-demo-mode'] as const
  *  cached across a filter change beyond what the query params already key on. */
 export const COMMISSION_REPORT = ['commission-report'] as const
 export const PACKAGE_LIABILITY_REPORT = ['package-liability-report'] as const
+/** The Invoices tab (#99): service and retail issued invoices, each its own key since they
+ *  are never merged into one list — filters (date/status/client) and the page follow after. */
+export const INVOICES = ['invoices'] as const
+export const RETAIL_INVOICES = ['retail-invoices'] as const

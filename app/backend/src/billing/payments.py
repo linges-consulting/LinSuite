@@ -379,6 +379,21 @@ async def is_checkout_complete(db: AsyncSession, invoice: AnyInvoice) -> bool:
     return (await balance(db, invoice)).checkout_complete
 
 
+ListStatus = Literal["outstanding", "paid", "cancelled"]
+
+
+def invoice_list_status(invoice: AnyInvoice, b: Balance) -> ListStatus:
+    """The Invoices list's status badge (#99) — `outstanding | paid | cancelled`, derived from
+    exactly the `Balance` the invoice view itself reads, never a second definition of "paid".
+    A cancelled/voided invoice is `cancelled` regardless of what it still holds
+    (`held_credit_cents`); an issued one is `paid` once its checkout gate is (the same
+    `checkout_complete` #70's receipt release and #54's balance screen both trust), else
+    `outstanding`."""
+    if invoice.status != "issued":
+        return "cancelled"
+    return "paid" if b.checkout_complete else "outstanding"
+
+
 def requeue_receipts(invoice: AnyInvoice) -> None:
     """M4 review R20: a service invoice's treatment-receipt status (released? Paid / Pending
     insurer / ...) follows its ledger, so every ledger write re-queues its render *after*

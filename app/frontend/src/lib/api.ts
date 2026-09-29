@@ -2808,6 +2808,106 @@ export async function applyInlineAdminEdit(
   return res.json()
 }
 
+// --- the Invoices lists: service and retail, filtered and paginated (#99) -----------------
+
+/** `outstanding | paid | cancelled` — derived server-side from the same balance the invoice
+ *  view itself reads (`billing/payments.py::invoice_list_status`), never computed here. */
+export type InvoiceListStatus = 'outstanding' | 'paid' | 'cancelled'
+
+/** The fields every row of either list carries, beyond its own `id`/`invoice_number`/
+ *  `customer_id`/`status`/`issued_at` — the balance breakdown `billing/payments.py::Balance`
+ *  computes, the same figures the invoice view (#102) will show in full. */
+type InvoiceListBalance = {
+  outstanding_cents: number
+  pending_insurer_cents: number
+  client_outstanding_cents: number
+  checkout_complete: boolean
+  refunded_cents: number
+  prepaid_cents: number
+  held_credit_cents: number
+}
+
+export type InvoiceSummary = InvoiceListBalance & {
+  id: string
+  invoice_number: number
+  customer_id: string
+  /** Never PHI — joined in server-side, so the row never triggers an audited profile read. */
+  customer_name: string
+  /** The raw ledger status (`issued`/`cancelled`) — `list_status` is the badge to show. */
+  status: 'issued' | 'cancelled'
+  list_status: InvoiceListStatus
+  grand_total_cents: number
+  issued_at: string
+}
+
+export type RetailInvoiceSummary = InvoiceListBalance & {
+  id: string
+  invoice_number: number
+  /** `null` for an anonymous walk-in sale — the row reads "Walk-in". */
+  customer_id: string | null
+  customer_name: string | null
+  status: 'issued' | 'cancelled'
+  list_status: InvoiceListStatus
+  grand_total_cents: number
+  issued_at: string
+}
+
+/** Query params both lists share; `from`/`to` are business-local dates (server default: the
+ *  last 30 days). */
+type InvoiceListQuery = {
+  customer_id?: string
+  from?: string
+  to?: string
+  status?: InvoiceListStatus
+  page?: number
+  page_size?: number
+}
+
+function invoiceListParams(query: InvoiceListQuery): URLSearchParams {
+  const params = new URLSearchParams()
+  if (query.customer_id) params.set('customer_id', query.customer_id)
+  if (query.from) params.set('from', query.from)
+  if (query.to) params.set('to', query.to)
+  if (query.status) params.set('status', query.status)
+  if (query.page) params.set('page', String(query.page))
+  if (query.page_size) params.set('page_size', String(query.page_size))
+  return params
+}
+
+export type InvoiceList = {
+  invoices: InvoiceSummary[]
+  total: number
+  /** The date range actually applied — the server's 30-day default when none was sent. */
+  from: string
+  to: string
+  timezone: string
+}
+
+/** Service invoices only — `billing/invoices.py::list_invoices`. `?customer_id=` is the same
+ *  narrowing (and the same audited read, logged only when filtered) a client's own Invoices
+ *  tab reuses this call for. */
+export async function fetchInvoices(query: InvoiceListQuery = {}): Promise<InvoiceList> {
+  const res = await fetch(`/api/invoices?${invoiceListParams(query)}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the invoices')
+  return res.json()
+}
+
+export type RetailInvoiceList = {
+  retail_invoices: RetailInvoiceSummary[]
+  total: number
+  from: string
+  to: string
+  timezone: string
+}
+
+/** Retail invoices only — `billing/retail_sales.py::list_retail_invoices`, kept as its own
+ *  list and its own numbering series (never merged with the service list). */
+export async function fetchRetailInvoices(query: InvoiceListQuery = {}): Promise<RetailInvoiceList> {
+  const res = await fetch(`/api/retail-invoices?${invoiceListParams(query)}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the retail invoices')
+  return res.json()
+}
+
 // --- CTI: phone lookup, demo mode, the simulated call (Phase 14, #16) -----------------------
 
 /** A previous provider (`scheduling/cti.py`'s own shape): the most recent visit with each
