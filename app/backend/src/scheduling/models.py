@@ -353,6 +353,10 @@ class Service(Base):
     __tablename__ = "services"
     __table_args__ = (
         CheckConstraint(
+            "tax_convention IS NULL OR tax_convention IN ('inclusive', 'exclusive')",
+            name="ck_services_tax_convention",
+        ),
+        CheckConstraint(
             f"duration_minutes >= {MIN_DURATION} AND duration_minutes % {MINUTE_STEP} = 0",
             name="ck_services_duration",
         ),
@@ -379,6 +383,11 @@ class Service(Base):
     # False is "staff may book it, the public portal may not offer it" — a consultation a
     # receptionist schedules by hand, not a service that has been withdrawn.
     bookable_online: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    # Review R1/R2: which business tax components (by `TaxComponent.code`) tax this item, and
+    # whether `price_cents` is entered tax-inclusive or tax-exclusive (the default). Read live
+    # while drafting; frozen onto the issued line.
+    tax_component_keys: Mapped[list[str]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    tax_convention: Mapped[str] = mapped_column(String(16), server_default=text("'exclusive'"))
     active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     sort_order: Mapped[int] = mapped_column(Integer, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

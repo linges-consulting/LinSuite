@@ -3,6 +3,7 @@ import { MoreHorizontal, Pencil, Plus, Power, PowerOff, Scissors, X } from 'luci
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { EmptyState } from '@/components/empty-state'
+import { TaxSettingsFields } from '@/components/tax-settings'
 import { Field, Form, FormError } from '@/components/form'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -379,6 +380,8 @@ function ServiceDialog(props: {
   const [after, setAfter] = useState(String(existing?.buffer_after_minutes ?? 0))
   const [price, setPrice] = useState(centsToDollars(existing?.price_cents ?? 0))
   const [online, setOnline] = useState(existing?.bookable_online ?? true)
+  const [taxKeys, setTaxKeys] = useState<string[]>(existing?.tax_component_keys ?? [])
+  const [taxConvention, setTaxConvention] = useState(existing?.tax_convention ?? 'exclusive')
   const [staffIds, setStaffIds] = useState<string[]>(existing?.staff_ids ?? [])
   const [requirements, setRequirements] = useState<DraftRequirement[]>(
     toDraft(existing?.requirements ?? []),
@@ -423,6 +426,8 @@ function ServiceDialog(props: {
         buffer_before_minutes: beforeMinutes as number,
         buffer_after_minutes: afterMinutes as number,
         price_cents: cents as number,
+        tax_component_keys: taxKeys,
+        tax_convention: taxConvention,
         bookable_online: online,
         sort_order: existing?.sort_order ?? 0,
       }
@@ -535,7 +540,9 @@ function ServiceDialog(props: {
             label="Price"
             htmlFor="service-price"
             error={problems.price}
-            hint="In dollars, before tax."
+            hint={
+              taxConvention === 'inclusive' ? 'In dollars, including tax.' : 'In dollars, before tax.'
+            }
           >
             <Input
               id="service-price"
@@ -545,6 +552,14 @@ function ServiceDialog(props: {
               onChange={(e) => setPrice(e.target.value)}
             />
           </Field>
+
+          <TaxSettingsFields
+            idPrefix="service"
+            keys={taxKeys}
+            onKeysChange={setTaxKeys}
+            convention={taxConvention}
+            onConventionChange={setTaxConvention}
+          />
 
           <div className="flex items-start gap-2">
             <Checkbox

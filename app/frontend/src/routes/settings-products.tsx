@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { toast } from 'sonner'
 import { EmptyState } from '@/components/empty-state'
 import { Field, Form, FormError } from '@/components/form'
+import { TaxSettingsFields } from '@/components/tax-settings'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -431,6 +432,8 @@ function VariantDialog(props: {
   const [price, setPrice] = useState(centsToDollars(existing?.price_cents ?? 0))
   const [quantity, setQuantity] = useState('0')
   const [threshold, setThreshold] = useState(String(existing?.low_stock_threshold ?? 0))
+  const [taxKeys, setTaxKeys] = useState<string[]>(existing?.tax_component_keys ?? [])
+  const [taxConvention, setTaxConvention] = useState(existing?.tax_convention ?? 'exclusive')
 
   const cents = dollarsToCents(price)
   const wholeUnit = (value: string) => {
@@ -458,6 +461,8 @@ function VariantDialog(props: {
         barcode: barcode.trim() || null,
         price_cents: cents as number,
         low_stock_threshold: thresholdValue as number,
+        tax_component_keys: taxKeys,
+        tax_convention: taxConvention,
       }
       if (existing) return updateVariant(props.product.id, existing.id, draft)
       const product = await createVariant(props.product.id, draft)
@@ -559,6 +564,13 @@ function VariantDialog(props: {
               />
             </Field>
           </div>
+          <TaxSettingsFields
+            idPrefix="variant"
+            keys={taxKeys}
+            onKeysChange={setTaxKeys}
+            convention={taxConvention}
+            onConventionChange={setTaxConvention}
+          />
           {save.error && <FormError>{save.error.message}</FormError>}
           <DialogFooter>
             <Button type="button" variant="ghost" onClick={props.onClose}>

@@ -40,26 +40,20 @@ from sqlalchemy.orm import aliased
 from auth.capabilities import Requires
 from billing.bill_review import (
     BillViewer,
-    _applicable_components,
     _business,
     _compute,
     _LineConflict,
     _load_bill,
     _persisted_selection,
-    _today_in,
+    price_bill,
 )
-from billing.commission import (
-    CommissionDiscountInput,
-    commission_amount_cents,
-    commission_basis_cents,
-)
+from billing.commission import commission_amount_cents
 from billing.documents import render_invoice_documents
 from billing.invoice_numbering import allocate_invoice_number
 from billing.keys import business_key
 from billing.models import (
     BillOverrideRequest,
     CommissionPosting,
-    Discount,
     Invoice,
     InvoiceLine,
     InvoiceLineDiscount,
@@ -67,6 +61,7 @@ from billing.models import (
     ServiceBill,
 )
 from billing.payments import balance, balances, carry_payments
+from billing.tax import invoice_tax_totals
 from core.access_log import LogAccess
 from core.audit import record_event
 from core.db import SessionDep
@@ -95,6 +90,10 @@ class InvoiceLineDiscountOut(BaseModel):
     discount_id: str
     discount_name: str
     discount_kind: str
+    # Review R4: the rule and resolved cents, frozen at issue (NULL on pre-0065 invoices).
+    percentage_bp: int | None
+    amount_cents: int | None
+    resolved_amount_cents: int | None
 
 
 class InvoiceLineTaxOut(BaseModel):
@@ -115,6 +114,8 @@ class InvoiceLineOut(BaseModel):
     tax_cents: int
     line_total_cents: int
     prepaid_cents: int
+    tax_convention: str
+    override_adjustment_cents: int
     discounts: list[InvoiceLineDiscountOut]
     taxes: list[InvoiceLineTaxOut]
 
@@ -136,9 +137,14 @@ class InvoiceOut(BaseModel):
     computed_discount_total_cents: int
     computed_tax_total_cents: int
     computed_grand_total_cents: int
+    # The tax actually billed (== computed unless an override was distributed, review R5).
     tax_totals_by_component: dict[str, int]
+    tax_rates_by_component: dict[str, int]
+    # Package-purchase invoices only; service lines carry their own.
+    tax_convention: str | None
     override_applied_cents: int | None
     override_reason: str | None
+    override_tax_convention: str | None
     grand_total_cents: int
     issued_at: datetime
     issued_by: str
@@ -189,11 +195,16 @@ def _line_out(line: InvoiceLine) -> InvoiceLineOut:
         tax_cents=line.tax_cents,
         line_total_cents=line.line_total_cents,
         prepaid_cents=line.prepaid_cents,
+        tax_convention=line.tax_convention,
+        override_adjustment_cents=line.override_adjustment_cents,
         discounts=[
             InvoiceLineDiscountOut(
                 discount_id=str(d.discount_id),
                 discount_name=d.discount_name,
                 discount_kind=d.discount_kind,
+                percentage_bp=d.percentage_bp,
+                amount_cents=d.amount_cents,
+                resolved_amount_cents=d.resolved_amount_cents,
             )
             for d in line.discounts
         ],
@@ -226,8 +237,11 @@ async def _invoice_out(db: SessionDep, invoice: Invoice) -> InvoiceOut:
         computed_tax_total_cents=invoice.computed_tax_total_cents,
         computed_grand_total_cents=invoice.computed_grand_total_cents,
         tax_totals_by_component=invoice.tax_totals_by_component,
+        tax_rates_by_component=invoice.tax_rates_by_component,
+        tax_convention=invoice.tax_convention,
         override_applied_cents=invoice.override_applied_cents,
         override_reason=invoice.override_reason,
+        override_tax_convention=invoice.override_tax_convention,
         grand_total_cents=invoice.grand_total_cents,
         issued_at=invoice.issued_at,
         issued_by=str(invoice.issued_by),
@@ -294,18 +308,16 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
     selected_ids = await _persisted_selection(db, bill_id)
     try:
         computed = await _compute(db, business, bill, selected_ids=selected_ids)
+        priced_bill = await price_bill(db, business, bill, selected_ids=selected_ids)
     except _LineConflict as error:
         raise HTTPException(status_code=409, detail=error.detail) from error
 
-    today = _today_in(business)
-    resolved_components = await _applicable_components(db, business, today)
-    components_by_code = {c.code: c.rate_bp for c in resolved_components}
-
-    override_applied_cents = computed.override_total_cents
-    override_reason = computed.override_reason
-    grand_total_cents = (
-        override_applied_cents if override_applied_cents is not None else computed.grand_total_cents
-    )
+    components_by_code = {c.code: c.rate_bp for c in priced_bill.pool}
+    overridden = priced_bill.overridden
+    # Review R5: under an override the lines carry the distributed amounts, so the invoice's
+    # billed tax and total are those lines summed — reconciling to the cent.
+    billed_tax_totals = invoice_tax_totals([p.billed for p in priced_bill.lines])
+    grand_total_cents = sum(p.billed.total_cents for p in priced_bill.lines)
 
     # #68: a draft reopened by cancelling its invoice replaces that (not-yet-replaced) invoice.
     successor = aliased(Invoice)
@@ -328,9 +340,12 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
         computed_discount_total_cents=computed.discount_total_cents,
         computed_tax_total_cents=computed.tax_total_cents,
         computed_grand_total_cents=computed.grand_total_cents,
-        tax_totals_by_component=computed.tax_totals_by_component,
-        override_applied_cents=override_applied_cents,
-        override_reason=override_reason,
+        tax_totals_by_component=billed_tax_totals,
+        tax_rates_by_component=components_by_code,
+        override_applied_cents=computed.override_total_cents,
+        override_reason=computed.override_reason,
+        override_tax_convention=computed.override_tax_convention,
+        override_commission_basis=bill.override_commission_basis if overridden else None,
         grand_total_cents=grand_total_cents,
         issued_by=actor.id,
         replaces_invoice_id=replaces.id if replaces is not None else None,
@@ -342,21 +357,13 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
         # Under the lineage lock (R9) — see `carry_payments`.
         await carry_payments(db, replaces, invoice, actor.id)
 
-    # Discount definitions frozen at this exact moment — one more query, never a live re-join
-    # once this transaction commits (module section in `billing/models.py`).
-    all_discount_ids = {
-        uuid.UUID(discount_id)
-        for line_out in computed.lines
-        for discount_id in line_out.applied_discount_ids
-    }
-    discounts_by_id = {}
-    if all_discount_ids:
-        discounts_by_id = {
-            d.id: d
-            for d in await db.scalars(select(Discount).where(Discount.id.in_(all_discount_ids)))
-        }
-
-    for bill_line, line_out in zip(bill.lines, computed.lines, strict=True):
+    for p in priced_bill.lines:
+        bill_line, priced, billed = p.bill_line, p.priced, p.billed
+        # The billed amount in the line's own convention: pre-tax for an exclusive line, the
+        # tax-included total for an inclusive one (== priced.discounted_cents, no override).
+        discounted = billed.pretax_cents if priced.convention == "exclusive" else billed.total_cents
+        if not overridden:
+            discounted = priced.discounted_cents
         invoice_line = InvoiceLine(
             invoice_id=invoice.id,
             service_bill_line_id=bill_line.id,
@@ -365,21 +372,20 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
             staff_id=bill_line.staff_id,
             price_cents=bill_line.price_cents,
             commission_rate_bp=bill_line.commission_rate_bp,
-            discounted_cents=line_out.discounted_cents,
-            pretax_cents=line_out.tax.pretax_cents,
-            tax_cents=line_out.tax.tax_cents,
-            line_total_cents=line_out.line_total_cents,
+            discounted_cents=discounted,
+            pretax_cents=billed.pretax_cents,
+            tax_cents=billed.tax_cents,
+            line_total_cents=billed.total_cents,
             prepaid_cents=bill_line.prepaid_cents,
+            tax_convention=priced.convention,
+            override_adjustment_cents=discounted - priced.discounted_cents,
         )
         db.add(invoice_line)
         await db.flush()
 
-        applied_discounts = []
-        for discount_id_str in line_out.applied_discount_ids:
-            discount = discounts_by_id.get(uuid.UUID(discount_id_str))
-            if discount is None:  # pragma: no cover — defensive; _compute already validated this
-                continue
-            applied_discounts.append(discount)
+        # The rule and the cents it took off, frozen at this exact moment (review R4) — never
+        # a live re-join once this transaction commits.
+        for discount in p.discounts:
             db.add(
                 InvoiceLineDiscount(
                     invoice_line_id=invoice_line.id,
@@ -387,29 +393,22 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
                     discount_name=discount.name,
                     discount_kind=discount.kind,
                     commission_basis=discount.commission_basis,
+                    percentage_bp=discount.percentage_bp,
+                    amount_cents=discount.amount_cents,
+                    stackable=discount.stackable,
+                    resolved_amount_cents=priced.discount_amounts[discount.id],
                 )
             )
 
         # #69: commission, posted in this same transaction — the rate is always
-        # `bill_line.commission_rate_bp` (snapshotted at completion, #59, never re-read live),
-        # the basis is `billing/commission.py`'s own formula against the *live* `Discount`
-        # rows fetched above (still live at this exact moment, before they are frozen onto
-        # `InvoiceLineDiscount` a few lines up) — see that module's docstring for why the live
-        # rows, not the frozen ones, are what the formula needs. `staff_id` is always
-        # `bill_line.staff_id` — the delivering staff member, never inferred from a package
-        # sale (module docstring; #72's own constraint).
-        commission_discounts = [
-            CommissionDiscountInput(
-                id=d.id,
-                kind=d.kind,
-                stackable=d.stackable,
-                percentage_bp=d.percentage_bp,
-                amount_cents=d.amount_cents,
-                commission_basis=d.commission_basis,
-            )
-            for d in applied_discounts
-        ]
-        basis_cents = commission_basis_cents(bill_line.price_cents, commission_discounts)
+        # `bill_line.commission_rate_bp` (snapshotted at completion, #59, never re-read live).
+        # The basis is pre-tax (`pricing.price_line`: "absorbed" discounts left out); under an
+        # override whose commission basis is "reduces" (the spec §142 default) it is the
+        # revised line's own pre-tax amount instead. `staff_id` is always the delivering staff
+        # member, never inferred from a package sale (#72's own constraint).
+        basis_cents = priced.commission_basis_cents
+        if overridden and bill.override_commission_basis == "reduces":
+            basis_cents = billed.pretax_cents
         db.add(
             CommissionPosting(
                 invoice_line_id=invoice_line.id,
@@ -421,7 +420,7 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
             )
         )
 
-        for code, amount_cents in line_out.tax.component_cents.items():
+        for code, amount_cents in billed.component_cents.items():
             db.add(
                 InvoiceLineTax(
                     invoice_line_id=invoice_line.id,

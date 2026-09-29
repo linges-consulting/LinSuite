@@ -51,6 +51,7 @@ async def claimed_instance(client):
         async with session_scope() as db:
             for table in (
                 "service_bill_discounts",
+                "retail_sale_discounts",  # review T1, 0065
                 "discount_eligible_items",
                 "discounts",
                 "tax_component_rates",
@@ -146,7 +147,7 @@ async def make_customer(client) -> str:
 
 
 async def complete_a_visit(
-    client, *, price_cents: int = 12000, service_name: str = "Swedish Massage"
+    client, *, price_cents: int = 12000, service_name: str = "Swedish Massage", **service
 ) -> tuple[str, str]:
     """Books, confirms and completes one appointment end to end — the only way #59's hook
     ever creates a draft bill — and returns `(bill_id, service_id)`. `service_name` only
@@ -159,7 +160,9 @@ async def complete_a_visit(
         json={"blocks": [{"weekday": 0, "start_minute": 540, "end_minute": 1020}]},
     )
     assert resp.status_code == 200, resp.text
-    service_id = await make_service(client, [me], price_cents=price_cents, name=service_name)
+    service_id = await make_service(
+        client, [me], price_cents=price_cents, name=service_name, **service
+    )
     customer_id = await make_customer(client)
 
     monday = date.today() + timedelta(days=7 + (7 - date.today().weekday()) % 7)
@@ -425,7 +428,9 @@ async def test_tax_is_included_using_the_business_own_province_and_todays_rate(c
     assert business.status_code == 200, business.text
     await make_tax_component(client, code="gst", province=None, rate_bp=500)  # federal, 5%
     await make_tax_component(client, code="qst", province="QC", rate_bp=975)  # a different province
-    bill_id, _ = await complete_a_visit(client, price_cents=10000)
+    bill_id, _ = await complete_a_visit(
+        client, price_cents=10000, tax_component_keys=["gst", "qst"]
+    )
 
     resp = await client.get(f"{BILLS}/{bill_id}")
 
@@ -442,7 +447,7 @@ async def test_tax_is_included_using_the_business_own_province_and_todays_rate(c
 async def test_tax_is_computed_on_the_discounted_amount(client):
     await as_admin(client)
     await make_tax_component(client, code="gst", province=None, rate_bp=500)
-    bill_id, _ = await complete_a_visit(client, price_cents=10000)
+    bill_id, _ = await complete_a_visit(client, price_cents=10000, tax_component_keys=["GST"])
     discount = await make_discount(client, percentage_bp=1000)  # 10% off -> 9000
 
     resp = await client.put(f"{BILLS}/{bill_id}/discounts", json={"discount_ids": [discount["id"]]})

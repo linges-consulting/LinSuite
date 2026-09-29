@@ -647,6 +647,8 @@ async def test_the_catalog_read_endpoint_is_the_shape_the_engine_needs(client):
             "buffer_before_minutes": 5,
             "buffer_after_minutes": 15,
             "price_cents": 12000,
+            "tax_component_keys": [],
+            "tax_convention": "exclusive",
             "bookable_online": True,
             "sort_order": 0,
             "staff_ids": [ana["id"]],

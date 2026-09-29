@@ -3,24 +3,15 @@ discounts and #57's tax components first come together into one demoable screen.
 view` (Staff Mode, no admin window) gates every route here — nothing on this screen needs
 admin/owner approval yet, that is #64's job.
 
-**Calls the existing pure functions, never reimplements their math.** Discount stacking is
-`discount_resolver.resolve_stacked_discounts`; tax is `tax.compute_line_tax`/
-`invoice_tax_totals`/`resolve_rate_bp`. This module's only job is resolving *which* discounts
-and tax components apply to *this* bill's lines and gluing the results into one response.
+**Calls the existing pure functions, never reimplements their math.** One line's discounts
+and tax are `billing/pricing.py::price_line`; an admin/owner override is spread over the lines
+by `pricing.distribute_override`. This module's only job is resolving *which* discounts and
+tax components apply to *this* bill's lines and gluing the results into one response.
 
-**Two scope decisions this ticket had to make that nothing upstream decided yet** (both
-documented in `.superpowers/sdd/m4/progress.md`'s `#63 detail`):
-
-1. **Which tax components apply to a line.** No catalog item selects its own components yet
-   (`billing/models.py::TaxComponent`'s own docstring: "#63 is what actually selects a
-   catalog item's applicable components and no selection endpoint exists yet"). V1: every
-   `active`, business-applicable component (`province is None or province == business.
-   province` — the same hint `tax_routes.py` already computes) applies to every service bill
-   line. A future per-service selection narrows this without touching `billing/tax.py`.
-2. **Tax convention.** No catalog item states inclusive/exclusive either. `Service.price_cents`
-   is treated as the pre-tax "catalog default" `billing/tax.py`'s own docstring already calls
-   exclusive pricing — so every line here is computed `"exclusive"`. A future per-service
-   convention field would be read here instead of the constant.
+**Tax per item (review R1/R2).** A line is taxed by the business-applicable components
+(`province is None or province == business.province`, with a rate covering today) that its
+own `Service.tax_component_keys` selects, in the service's own `tax_convention` (inclusive or
+exclusive). Both are read live while the bill is a draft; issue freezes them.
 
 **Discount application is bill-level, not line-level** (`billing/models.py::
 ServiceBillDiscount`'s own docstring): staff picks a combination once, and it is intersected
@@ -30,6 +21,7 @@ with no reapply step.
 """
 
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from datetime import date as Date
 from typing import Annotated
@@ -42,15 +34,17 @@ from sqlalchemy.orm import selectinload
 
 from auth.capabilities import Requires
 from auth.models import User
-from billing.discount_resolver import (
-    DiscountConflict,
-    DiscountEligibility,
-    DiscountInput,
-    is_eligible,
-    resolve_stacked_discounts,
+from billing.commission import CommissionDiscountInput
+from billing.discount_resolver import DiscountConflict, DiscountEligibility, is_eligible
+from billing.models import (
+    Discount,
+    ServiceBill,
+    ServiceBillDiscount,
+    ServiceBillLine,
+    TaxComponent,
 )
-from billing.models import Discount, ServiceBill, ServiceBillDiscount, TaxComponent
-from billing.tax import ComponentRate, compute_line_tax, invoice_tax_totals, resolve_rate_bp
+from billing.pricing import OverrideConflict, PricedLine, distribute_override, price_line
+from billing.tax import ComponentRate, LineTax, invoice_tax_totals, resolve_rate_bp
 from core.audit import record_event
 from core.db import SessionDep
 from core.models import Business
@@ -60,8 +54,6 @@ from scheduling.models import Service, Staff
 router = APIRouter(prefix="/bills", tags=["billing"])
 
 BillViewer = Annotated[User, Depends(Requires("billing.view"))]
-
-TAX_CONVENTION = "exclusive"  # see the module docstring's scope decision 2.
 
 
 # --- what goes over the wire -----------------------------------------------------------------
@@ -79,19 +71,35 @@ class LineTaxOut(BaseModel):
     total_cents: int
 
 
+def tax_out(tax: LineTax) -> LineTaxOut:
+    return LineTaxOut(
+        pretax_cents=tax.pretax_cents,
+        component_cents=tax.component_cents,
+        tax_cents=tax.tax_cents,
+        total_cents=tax.total_cents,
+    )
+
+
 class BillLineOut(BaseModel):
     id: str
     appointment_id: str
     service: Ref
     staff: Ref
     price_cents: int
+    # The convention `price_cents`/`discounted_cents` are stated in (the service's own).
+    tax_convention: str
     applied_discount_ids: list[str]
+    # Cents each applied discount took off this line (id -> cents).
+    discount_amounts: dict[str, int]
     discounted_cents: int
     tax: LineTaxOut
     line_total_cents: int
     # #72: a redeemed package credit's frozen session value; the line is already settled by
     # it (no discount, no second tax), so it is never a new amount to collect.
     prepaid_cents: int
+    # What this line bills once an admin/owner override is spread across the bill (review
+    # R5) — equal to `tax` when there is no override.
+    billed: LineTaxOut
 
 
 class DiscountChoiceOut(BaseModel):
@@ -113,6 +121,7 @@ class BillOut(BaseModel):
     updated_at: datetime
     lines: list[BillLineOut]
     eligible_discounts: list[DiscountChoiceOut]
+    # `subtotal - discount_total + tax_total == grand_total`, whatever mix of conventions.
     subtotal_cents: int
     discount_total_cents: int
     tax_totals_by_component: dict[str, int]
@@ -121,11 +130,13 @@ class BillOut(BaseModel):
     # #72: the part of `grand_total_cents` package credits already settled.
     prepaid_total_cents: int
     # #64: an admin/owner-authorized exception (staff-request approval or inline admin edit),
-    # reported alongside the ordinarily-computed total rather than replacing it — see
-    # `billing/models.py::ServiceBill`'s own "bill review authority" section for why this is a
-    # separate field and not a second way to arrive at `grand_total_cents`.
+    # reported alongside the ordinarily-computed total rather than replacing it. As entered —
+    # a tax-inclusive total or a pre-tax amount per `override_tax_convention`.
     override_total_cents: int | None
     override_reason: str | None
+    override_tax_convention: str | None
+    # What the bill actually charges under the override: the lines' `billed` totals summed.
+    override_grand_total_cents: int | None
     # The two business-setting toggles (#64), read fresh on every bill view so the screen can
     # decide whether to offer either override path without a second request.
     bill_override_requests_enabled: bool
@@ -173,9 +184,9 @@ async def _load_bill(db: SessionDep, bill_id: uuid.UUID) -> ServiceBill:
 async def _applicable_components(
     db: SessionDep, business: Business, today: Date
 ) -> list[ComponentRate]:
-    """Scope decision 1 (module docstring): every active, business-applicable component taxes
-    every line. A component with no rate covering today contributes nothing — there is no
-    number to charge, not an error."""
+    """Every active, business-applicable component with a rate covering `today` — the pool an
+    item's own `tax_component_keys` selects from (`components_for`). A component with no rate
+    covering today contributes nothing — there is no number to charge, not an error."""
     components = await db.scalars(
         select(TaxComponent).options(selectinload(TaxComponent.rates)).where(TaxComponent.active)
     )
@@ -190,11 +201,38 @@ async def _applicable_components(
     return resolved
 
 
+def components_for(pool: list[ComponentRate], keys: list[str]) -> list[ComponentRate]:
+    """The components one catalog item toggles on (review R1: "GST yes, PST no")."""
+    wanted = set(keys)
+    return [c for c in pool if c.code in wanted]
+
+
 def _eligibility_of(discount: Discount) -> DiscountEligibility:
     return DiscountEligibility(
         applies_to_all=discount.eligibility_scope == "all",
         eligible_items=frozenset((i.item_type, i.item_id) for i in discount.eligible_items),
     )
+
+
+def discount_input(discount: Discount) -> CommissionDiscountInput:
+    return CommissionDiscountInput(
+        id=discount.id,
+        kind=discount.kind,
+        stackable=discount.stackable,
+        percentage_bp=discount.percentage_bp,
+        amount_cents=discount.amount_cents,
+        commission_basis=discount.commission_basis,
+    )
+
+
+def eligible_discounts(
+    enabled: list[Discount], selected_ids: set[uuid.UUID], item_type: str, item_id: uuid.UUID
+) -> list[Discount]:
+    return [
+        d
+        for d in enabled
+        if d.id in selected_ids and is_eligible(_eligibility_of(d), item_type, item_id)
+    ]
 
 
 class _LineConflict(Exception):
@@ -207,108 +245,126 @@ class _LineConflict(Exception):
         super().__init__(self.detail)
 
 
+@dataclass
+class PricedBillLine:
+    bill_line: ServiceBillLine
+    service: Service | None
+    discounts: list[Discount]
+    components: list[ComponentRate]
+    priced: PricedLine
+    billed: LineTax  # == priced.tax unless an override is distributed
+
+
+@dataclass
+class PricedBill:
+    lines: list[PricedBillLine]
+    pool: list[ComponentRate]  # every applicable component with today's rate
+    overridden: bool
+
+
+async def price_bill(
+    db: SessionDep, business: Business, bill: ServiceBill, *, selected_ids: set[uuid.UUID]
+) -> PricedBill:
+    """Every line priced, plus the override (if any) distributed — the one computation the
+    review screen, the authority routes and issue all share. Raises `_LineConflict`."""
+    service_ids = {line.service_id for line in bill.lines}
+    services = (
+        {s.id: s for s in await db.scalars(select(Service).where(Service.id.in_(service_ids)))}
+        if service_ids
+        else {}
+    )
+    enabled = list(await db.scalars(select(Discount).where(Discount.enabled)))
+    pool = await _applicable_components(db, business, _today_in(business))
+
+    lines: list[PricedBillLine] = []
+    for line in bill.lines:
+        service = services.get(line.service_id)
+        # #72: a prepaid line gets no discount (the purchase already set its price) and no
+        # tax (the purchase invoice already carried it).
+        prepaid = line.prepaid_cents > 0
+        applied = (
+            [] if prepaid else eligible_discounts(enabled, selected_ids, "service", line.service_id)
+        )
+        components = (
+            [] if prepaid or service is None else components_for(pool, service.tax_component_keys)
+        )
+        convention = service.tax_convention if service is not None else "exclusive"
+        try:
+            priced = price_line(
+                line.price_cents, convention, components, [discount_input(d) for d in applied]
+            )
+        except DiscountConflict as error:
+            raise _LineConflict(service.name if service else "This service", str(error)) from error
+        lines.append(PricedBillLine(line, service, applied, components, priced, priced.tax))
+
+    overridden = bill.manual_override_cents is not None
+    if overridden:
+        try:
+            billed = distribute_override(
+                bill.manual_override_cents,
+                bill.override_tax_convention,
+                [(p.priced.tax, p.components, p.bill_line.prepaid_cents > 0) for p in lines],
+            )
+        except OverrideConflict as error:
+            raise _LineConflict("Override", str(error)) from error
+        for p, tax in zip(lines, billed, strict=True):
+            p.billed = tax
+    return PricedBill(lines=lines, pool=pool, overridden=overridden)
+
+
 async def _compute(
     db: SessionDep, business: Business, bill: ServiceBill, *, selected_ids: set[uuid.UUID]
 ) -> BillOut:
     """The whole screen's numbers, for one candidate `selected_ids` combination — used both to
     render the currently-applied state (GET) and to validate/preview a new one before it is
     persisted (PUT), so the two never compute it two different ways."""
-    today = _today_in(business)
+    priced_bill = await price_bill(db, business, bill, selected_ids=selected_ids)
     customer = await db.get(Customer, bill.customer_id)
-
-    service_ids = {line.service_id for line in bill.lines}
     staff_ids = {line.staff_id for line in bill.lines}
-    services = (
-        {s.id: s for s in await db.scalars(select(Service).where(Service.id.in_(service_ids)))}
-        if service_ids
-        else {}
-    )
     staff_by_id = (
         {s.id: s for s in await db.scalars(select(Staff).where(Staff.id.in_(staff_ids)))}
         if staff_ids
         else {}
     )
 
-    enabled_discounts = list(await db.scalars(select(Discount).where(Discount.enabled)))
-
-    components = await _applicable_components(db, business, today)
-
     line_outs: list[BillLineOut] = []
-    subtotal_cents = 0
-    discount_total_cents = 0
-    line_taxes = []
     touched_discount_ids: set[uuid.UUID] = set()
-
-    for line in bill.lines:
-        service = services.get(line.service_id)
+    for p in priced_bill.lines:
+        line, priced = p.bill_line, p.priced
         member = staff_by_id.get(line.staff_id)
-        # #72: a prepaid line gets no discount (the purchase already set its price) and no
-        # tax (the purchase invoice already carried it).
-        prepaid = line.prepaid_cents > 0
-        eligibility_checked = [
-            d
-            for d in enabled_discounts
-            if not prepaid
-            and d.id in selected_ids
-            and is_eligible(_eligibility_of(d), "service", line.service_id)
-        ]
-        if eligibility_checked:
-            inputs = [
-                DiscountInput(
-                    id=d.id,
-                    kind=d.kind,
-                    stackable=d.stackable,
-                    percentage_bp=d.percentage_bp,
-                    amount_cents=d.amount_cents,
-                )
-                for d in eligibility_checked
-            ]
-            try:
-                discounted_cents = resolve_stacked_discounts(line.price_cents, inputs)
-            except DiscountConflict as error:
-                raise _LineConflict(
-                    service.name if service else "This service", str(error)
-                ) from error
-            touched_discount_ids.update(d.id for d in eligibility_checked)
-        else:
-            discounted_cents = line.price_cents
-
-        line_tax = compute_line_tax(discounted_cents, [] if prepaid else components, TAX_CONVENTION)
-        line_taxes.append(line_tax)
-        subtotal_cents += line.price_cents
-        discount_total_cents += line.price_cents - discounted_cents
-
+        touched_discount_ids.update(d.id for d in p.discounts)
         line_outs.append(
             BillLineOut(
                 id=str(line.id),
                 appointment_id=str(line.appointment_id),
-                service=Ref(id=str(line.service_id), name=service.name if service else "—"),
+                service=Ref(id=str(line.service_id), name=p.service.name if p.service else "—"),
                 staff=Ref(id=str(line.staff_id), name=member.display_name if member else "—"),
                 price_cents=line.price_cents,
-                applied_discount_ids=sorted(str(d.id) for d in eligibility_checked),
-                discounted_cents=discounted_cents,
-                tax=LineTaxOut(
-                    pretax_cents=line_tax.pretax_cents,
-                    component_cents=line_tax.component_cents,
-                    tax_cents=line_tax.tax_cents,
-                    total_cents=line_tax.total_cents,
-                ),
-                line_total_cents=line_tax.total_cents,
+                tax_convention=priced.convention,
+                applied_discount_ids=sorted(str(d.id) for d in p.discounts),
+                discount_amounts={str(k): v for k, v in priced.discount_amounts.items()},
+                discounted_cents=priced.discounted_cents,
+                tax=tax_out(priced.tax),
+                line_total_cents=priced.tax.total_cents,
                 prepaid_cents=line.prepaid_cents,
+                billed=tax_out(p.billed),
             )
         )
 
-    tax_totals = invoice_tax_totals(line_taxes)
+    tax_totals = invoice_tax_totals([p.priced.tax for p in priced_bill.lines])
     tax_total_cents = sum(tax_totals.values())
     grand_total_cents = sum(o.line_total_cents for o in line_outs)
+    discount_total_cents = sum(o.price_cents - o.discounted_cents for o in line_outs)
 
     # Every enabled discount eligible for at least one line, not just the ones selected —
     # the picker needs to offer what *could* be applied, not only what already is.
+    enabled_discounts = list(await db.scalars(select(Discount).where(Discount.enabled)))
     eligible_any = [
         d
         for d in enabled_discounts
         if any(is_eligible(_eligibility_of(d), "service", line.service_id) for line in bill.lines)
     ]
+    overridden = priced_bill.overridden
 
     return BillOut(
         id=str(bill.id),
@@ -333,7 +389,7 @@ async def _compute(
             )
             for d in eligible_any
         ],
-        subtotal_cents=subtotal_cents,
+        subtotal_cents=grand_total_cents - tax_total_cents + discount_total_cents,
         discount_total_cents=discount_total_cents,
         tax_totals_by_component=tax_totals,
         tax_total_cents=tax_total_cents,
@@ -341,6 +397,10 @@ async def _compute(
         prepaid_total_cents=sum(line.prepaid_cents for line in bill.lines),
         override_total_cents=bill.manual_override_cents,
         override_reason=bill.manual_override_reason,
+        override_tax_convention=bill.override_tax_convention if overridden else None,
+        override_grand_total_cents=(
+            sum(p.billed.total_cents for p in priced_bill.lines) if overridden else None
+        ),
         bill_override_requests_enabled=business.enable_bill_override_requests,
         inline_admin_bill_edit_enabled=business.enable_inline_admin_bill_edit,
     )

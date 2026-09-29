@@ -24,7 +24,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from billing.allocation import allocate_bundle_price
-from billing.bill_review import BillViewer, _applicable_components, _business, _today_in
+from billing.bill_review import (
+    BillViewer,
+    _applicable_components,
+    _business,
+    _today_in,
+    components_for,
+)
 from billing.invoice_numbering import allocate_invoice_number
 from billing.models import (
     Invoice,
@@ -189,12 +195,16 @@ async def purchase_package(
             )
         )
 
-    # Tax: the same exclusive-convention, every-applicable-component treatment `bill_review.py`
-    # already documents for a service line (module section in `billing/models.py`) — one
+    # Tax: the definition's own component toggles and price convention (review R1/R2) — one
     # "line" (the whole purchase), so `Invoice.tax_totals_by_component` already *is* this
-    # purchase's own per-component breakdown; no separate child table needed.
-    resolved_components = await _applicable_components(db, business, today)
-    line_tax = compute_line_tax(definition.price_cents, resolved_components, "exclusive")
+    # purchase's own per-component breakdown, with the resolved rates and the convention
+    # frozen beside it (`tax_rates_by_component`/`tax_convention`).
+    resolved_components = components_for(
+        await _applicable_components(db, business, today), definition.tax_component_keys
+    )
+    line_tax = compute_line_tax(
+        definition.price_cents, resolved_components, definition.tax_convention
+    )
 
     invoice_number = await allocate_invoice_number(db, business_id=business.id)
 
@@ -209,6 +219,8 @@ async def purchase_package(
         computed_tax_total_cents=line_tax.tax_cents,
         computed_grand_total_cents=line_tax.total_cents,
         tax_totals_by_component=line_tax.component_cents,
+        tax_rates_by_component={c.code: c.rate_bp for c in resolved_components},
+        tax_convention=definition.tax_convention,
         grand_total_cents=line_tax.total_cents,
         issued_by=actor.id,
     )

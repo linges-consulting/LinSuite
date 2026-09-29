@@ -1084,6 +1084,9 @@ export type ServiceRow = {
   buffer_before_minutes: number
   buffer_after_minutes: number
   price_cents: number
+  /** Tax component codes this service toggles on, and how its price is entered. */
+  tax_component_keys: string[]
+  tax_convention: TaxConvention
   /** False is "staff may book it, the public portal may not offer it". */
   bookable_online: boolean
   active: boolean
@@ -1101,6 +1104,8 @@ export type ServiceDraft = {
   buffer_before_minutes: number
   buffer_after_minutes: number
   price_cents: number
+  tax_component_keys: string[]
+  tax_convention: TaxConvention
   bookable_online: boolean
   sort_order: number
 }
@@ -1171,6 +1176,7 @@ export type ProductVariantRow = {
   quantity_on_hand: number
   low_stock_threshold: number
   tax_component_keys: string[]
+  tax_convention: TaxConvention
   active: boolean
   sort_order: number
 }
@@ -1192,6 +1198,8 @@ export type ProductVariantDraft = {
   barcode: string | null
   price_cents: number
   low_stock_threshold: number
+  tax_component_keys: string[]
+  tax_convention: TaxConvention
 }
 
 export async function fetchProducts(includeInactive = false): Promise<ProductRow[]> {
@@ -2372,6 +2380,9 @@ export type TaxRate = {
   /** Null: still in effect. Never edited once closed — a new rate always adds a row. */
   effective_to: string | null
 }
+
+/** Whether a catalog price is entered before tax (tax added on top) or including it. */
+export type TaxConvention = 'exclusive' | 'inclusive'
 
 export type TaxComponent = {
   id: string

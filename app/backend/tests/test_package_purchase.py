@@ -73,6 +73,7 @@ async def claimed_instance(client):
             for table in (
                 "bill_override_requests",
                 "service_bill_discounts",
+                "retail_sale_discounts",  # review T1, 0065
                 "discount_eligible_items",
                 "discounts",
                 "tax_component_rates",
@@ -381,11 +382,14 @@ async def test_purchase_freezes_the_computed_expiry_date(client):
 async def test_purchase_is_taxed_the_same_way_a_service_line_is(client):
     await as_admin(client)
     massage = await make_service(client)
+    await make_tax_component(client, rate_bp=500)
     package = await make_package(
-        client, [{"service_id": massage["id"], "credits": 5}], price_cents=10000
+        client,
+        [{"service_id": massage["id"], "credits": 5}],
+        price_cents=10000,
+        tax_component_keys=["GST"],
     )
     customer_id = await make_customer(client)
-    await make_tax_component(client, rate_bp=500)
 
     body = await purchase(client, package["id"], customer_id)
 

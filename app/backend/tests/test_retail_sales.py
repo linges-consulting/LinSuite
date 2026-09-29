@@ -55,6 +55,8 @@ async def claimed_instance(client):
         await purge.execute(text("DELETE FROM invoice_payments"))  # #66/#76
         await purge.execute(text("DELETE FROM invoice_balance_authorizations"))  # R8
         await purge.execute(text("DELETE FROM invoice_payment_transfers"))  # #68, R15
+        await purge.execute(text("DELETE FROM retail_invoice_line_taxes"))  # 0065
+        await purge.execute(text("DELETE FROM retail_invoice_line_discounts"))  # 0065
         await purge.execute(text("DELETE FROM retail_invoice_lines"))
         await purge.execute(text("DELETE FROM retail_invoices"))
         await purge.execute(text("DELETE FROM commission_postings"))  # #69
@@ -74,6 +76,7 @@ async def claimed_instance(client):
             "products",
             "bill_override_requests",
             "service_bill_discounts",
+            "retail_sale_discounts",  # review T1, 0065
             "discount_eligible_items",
             "discounts",
             "tax_component_rates",

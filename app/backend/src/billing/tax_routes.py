@@ -25,13 +25,14 @@ acceptance criterion 1's "selected from the business's jurisdiction, not hardcod
 import uuid
 from datetime import date as Date
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from auth.capabilities import Requires
@@ -43,6 +44,24 @@ from core.db import SessionDep
 from core.models import PROVINCE_CODES, Business
 
 BillingManager = Annotated[User, Depends(Requires("billing.manage"))]
+
+TaxConvention = Literal["inclusive", "exclusive"]
+
+
+async def normalize_tax_component_keys(db: AsyncSession, keys: list[str]) -> list[str]:
+    """A catalog item's component toggles (review R1), upper-cased, de-duplicated and sorted;
+    every code must name an existing component (422 otherwise). Called by the service,
+    package-definition and product-variant admin routes."""
+    codes = sorted({key.strip().upper() for key in keys if key.strip()})
+    if codes:
+        known = set(await db.scalars(select(TaxComponent.code).where(TaxComponent.code.in_(codes))))
+        unknown = [code for code in codes if code not in known]
+        if unknown:
+            raise HTTPException(
+                status_code=422, detail=f"No such tax component: {', '.join(unknown)}."
+            )
+    return codes
+
 
 router = APIRouter(
     prefix="/admin/billing", tags=["billing"], dependencies=[Depends(Requires("billing.manage"))]
