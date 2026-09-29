@@ -44,7 +44,7 @@ Decisions are final unless a documented trigger says otherwise. Each entry recor
 * **Decision:** Only the access log (`audit_access_log`) is partitioned from day one, using native PostgreSQL declarative partitioning by year. Old data stays in the same database. Appointments and documents stay unpartitioned in v1.
 * **Why the access log:** It is by far the highest-volume table (every profile, note and form read, not just writes), and it is append-only, so a partition boundary never has to move a row. The requirement's actual goal is keeping operational queries fast, and partitioning achieves that directly — date-filtered queries touch only the current partition — without a second storage system to back up and restore consistently. This removes the archive-tiering background worker from scope entirely.
 * **Why not appointments or documents (yet):** a partitioned table's primary and unique keys must include the partition key, so partitioning either would force the partition key into every foreign key that points at them — a schema-wide change, not a local one. Worse for appointments: the `EXCLUDE USING gist` resource-overlap constraint (CLAUDE.md, "Concurrency") only holds *within* one partition, so a booking that straddles New Year's would escape double-booking protection entirely. Revisit both at roughly one million rows, when query latency, not compliance, forces the question — and only with a migration plan for the constraint.
-* **If the access log does become too large:** detach an old partition and dump it to an encrypted file. A runbook step, not a service.
+* **If the access log does become too large:** detach an old partition and dump it to an encrypted file. A runbook step ([`docs/runbook.md`](runbook.md) §10 — schema-owner only, never automated), not a service.
 * **How partitions appear:** `ensure_access_log_partitions()` (migration 0021), a `SECURITY DEFINER` function the app role may execute but not replicate, creates this year's and next year's partitions if missing; the app calls it on every boot and the Celery `beat` service triggers it nightly at 03:15 UTC. `beat` must be running — on-prem included, it is part of the compose stack — or next year's partition only appears when the app next restarts. After that nightly run (and after the nightly purge) succeeds, the task GETs the optional `HEALTHCHECK_URL_MAINTENANCE` — a dead-man ping so a stopped scheduler or worker is caught long before a missing partition causes write failures in January; a failed ping is only logged. `/api/health` also reports whether next year's partition is attached (`partitions: "ok" | "next_year_missing"`, status code unchanged), for an uptime monitor or a glance to catch the same failure another way.
 
 ## 4. Background Workers & Task Processing: **Celery (Python)**
@@ -95,10 +95,12 @@ Cancelled invoices are retained rather than deleted: CRA requires business recor
 
 ### Provisioning: manual runbook, not infrastructure-as-code
 
-* **Decision:** New tenants are provisioned by following a written runbook. No Terraform, Ansible, or Kubernetes.
+* **Decision:** New tenants are provisioned by following a written runbook — [`docs/runbook.md`](runbook.md). No Terraform, Ansible, or Kubernetes.
 * **Why:** Each business's stack configuration can differ meaningfully by use case, so a parameterised IaC module would accumulate branches faster than it saves work at current tenant counts.
 
 ### On-prem differences the runbook must cover
+
+Covered step by step in [`docs/runbook.md`](runbook.md) §1 (provisioning) and §4 (on-prem TLS).
 
 | | DigitalOcean | On-prem |
 |---|---|---|
@@ -106,16 +108,19 @@ Cancelled invoices are retained rather than deleted: CRA requires business recor
 | Backups | DO snapshots plus offsite restic | Customer must configure; highest-risk gap |
 | Disk capacity | Resize volume from console | Physical drive |
 | Scheduled jobs | `beat` service in the stack | Same — `beat` must be running; nothing else creates next year's access-log partition before the app restarts |
-| TLS certificates | Traefik + Let's Encrypt | No public DNS, so Let's Encrypt cannot validate — needs an internal CA or self-signed certificate |
+| TLS certificates | Traefik + Let's Encrypt (DNS-01) | No public DNS, so Let's Encrypt cannot validate — needs an internal CA or a certificate from the clinic's own CA (`docs/runbook.md` §4) |
 
 ## 9. Secrets Management: **`.env` + `pydantic-settings`**
 
 * **Decision:** Per-deployment `.env` file, mode `0600`, never committed. No Vault or cloud secret manager.
 * **Why:** Four values on a single-tenant box where anyone with root already controls the application. A secrets service would add an operational dependency — including for on-prem customers — without a matching threat-model gain.
 * **Refused at boot, not at first use.** `Settings` rejects the `change-me-…` placeholders that `.env.example` ships and requires a real `JWT_SECRET` (≥32 characters) and 64-hex-character `MFA_ENCRYPTION_KEY` and `DOCUMENT_MASTER_KEY`, naming `openssl rand -hex 32` in the error. Left as shipped, the first would let anyone who has read this repository mint an Administrator cookie, and the second would fail lazily at the owner's first MFA enrolment — which, with `mfa_required_for_admin` on by default, is a clean clone dead-ending at a 500 with no way forward. The third would wrap every client's document key under a key anyone can read, so it is refused as shipped and refused if it equals the MFA key, which would make one leak cost both.
-* **Critical:** The PDF encryption key — `DOCUMENT_MASTER_KEY`, which wraps each customer's data key in `customer_document_keys` — must be escrowed separately from the database backup. If a tenant restores a dump and the key is gone, ten years of consent records are permanently unreadable ciphertext — the backup appears healthy and is worthless. Key escrow is an explicit runbook step performed at install and on rotation.
+* **Critical:** The PDF encryption key — `DOCUMENT_MASTER_KEY`, which wraps each customer's data key in `customer_document_keys` — must be escrowed separately from the database backup. If a tenant restores a dump and the key is gone, ten years of consent records are permanently unreadable ciphertext — the backup appears healthy and is worthless. Key escrow is an explicit runbook step performed at install ([`docs/runbook.md`](runbook.md) §3 — there is no rotation lever for this key in v1).
 
 ## 10. Backup & Ransomware Resilience: **restic, nightly, offsite, object-locked**
+
+Bucket setup, the no-delete proof, the monthly prune, and the quarterly restore rehearsal are
+all runbook steps: [`docs/runbook.md`](runbook.md) §6–§8.
 
 * **Tool — restic.** Encrypts client-side and supports every backend worth using, so the destination is configuration rather than code: `BACKUP_TARGET=b2|s3|sftp|local`. On-prem customers point it at a NAS over SFTP plus an offsite copy; DigitalOcean tenants point it straight at Backblaze B2.
 * **Schedule:** nightly `pg_dump` (includes document `bytea`), 24-hour RPO accepted.
@@ -130,7 +135,7 @@ Cancelled invoices are retained rather than deleted: CRA requires business recor
 
 | Attack | Mitigation |
 |---|---|
-| Ransomware encrypts the server | Offsite repository unaffected; rebuild via runbook and restore |
+| Ransomware encrypts the server | Offsite repository unaffected; rebuild via [`docs/runbook.md`](runbook.md) §1 and restore |
 | Stolen credentials used to delete backups | No-delete key plus Object Lock window |
 | Backups overwritten with garbage | Object Lock blocks overwrite; prior versions retained |
 | Backup repository exfiltrated | restic client-side encryption; PDFs additionally encrypted with a key absent from the repo |
@@ -268,7 +273,7 @@ PHIPA requires health information custodians to produce an electronic audit log 
 
 ### Breach notification
 
-PIPEDA requires reporting to the Privacy Commissioner and affected individuals on "real risk of significant harm", plus records of **all** breaches retained 24 months. These are obligations on the *business*, not functions the software must implement: the breach register and notification timelines live in the runbook with a template, rather than as a half-built incident module nobody maintains. Individual notification uses the existing notification engine.
+PIPEDA requires reporting to the Privacy Commissioner and affected individuals on "real risk of significant harm", plus records of **all** breaches retained 24 months. These are obligations on the *business*, not functions the software must implement: the breach register and notification timelines live in the runbook with a template ([`docs/runbook.md`](runbook.md) §11 — the CSV register and both notification letters), rather than as a half-built incident module nobody maintains. Individual notification uses the existing notification engine.
 
 ## 17. First-Run Bootstrap: **token-gated setup wizard**
 
