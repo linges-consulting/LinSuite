@@ -64,6 +64,16 @@ Phase 9 (#9, migration 0031): `session_notes.customer_id` also references the ke
 
 **9. A restore brings shredded keys back.** Backups taken before a purge still contain the wrapped keys it destroyed. After any restore, run `customers.tasks.purge_expired` before the system is used again; it is idempotent, re-shreds every key whose hold has passed, and finishes every unheld erasure request (`docs/tech-stack.md` §10).
 
+## Amendment — 2026-09-29 (M5, #84): the financial PDF purge
+
+Business-keyed documents (ADR-0003) carry their own CRA-clock `retain_until`, not a customer's clinical hold, so this rule needed its own branch rather than reuse of rule 4's trigger predicate as written.
+
+**10. `public.customer_record_guard()` (0026, migration 0068) permits `linsuite_purge` to `DELETE` a business-keyed `documents` row only when all of: `retain_until` has passed, and either the row has no `linked_customer_id` or that customer is not held** — `retention_expires_at` null or past, `'infinity'` counts as held, the same predicate rule 4 already uses. The customer-keyed branch is unchanged. Retention takes the later date by construction: an invoice linked to a still-held client is refused regardless of its own CRA clock having passed.
+
+**11. The nightly `purge_expired` gains a third step**, after finishing erasure requests and shredding expired keys: select business-keyed documents whose `retain_until` has passed and whose linked customer (if any) is not held, and delete each on the purge connection in its own transaction — a `document.purged` audit row (`{authority, kind, document_id}`, no content, no names) first, then the `DELETE`. A guard refusal reads as "held, try another night", the same distinction rule 4's shred already makes from a real fault. Idempotent: nothing is written when a row is already gone.
+
+Nothing here is crypto-shredded — the business key never shreds (ADR-0003 §5) — so row deletion by this guard branch *is* the erasure.
+
 ## Consequences
 
 **Positive**

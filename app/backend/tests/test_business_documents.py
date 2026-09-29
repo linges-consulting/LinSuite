@@ -10,6 +10,10 @@ trips independently of the customer's clinical hold.
 S5: who may change or remove the business key — nobody but the table owner, ever (there is no
 purge-eligible branch, unlike `customer_document_keys`); the database's own CHECK constraints
 on `documents`, not just this module's validation.
+S5/purge task (#84; ADR-0001 amendment): the guard's business-keyed branch — refused before
+`retain_until`, refused while a linked client is held (dated or `'infinity'`), permitted once
+both clear, always refused to the app role — and `customers.tasks._purge_expired`'s third
+step, which audits and deletes eligible rows, idempotently.
 """
 
 import asyncio
@@ -420,3 +424,153 @@ async def test_two_first_uses_at_once_make_one_business_key(client):
     async with session_scope() as db:
         count = await db.scalar(text("SELECT count(*) FROM business_document_keys"))
     assert count == 1
+
+
+# --- S5: the financial purge guard (#84; ADR-0001 amendment) ---------------------------------
+
+PAST = datetime(2001, 1, 1, tzinfo=UTC)
+FUTURE = datetime(2999, 1, 1, tzinfo=UTC)
+
+
+async def purge_delete_document(document_id: uuid.UUID) -> int:
+    async with get_purge_engine().begin() as purge:
+        result = await purge.execute(
+            text("DELETE FROM documents WHERE id = :id"), {"id": document_id}
+        )
+    return result.rowcount
+
+
+async def test_the_purge_role_is_refused_a_business_document_before_retain_until(client):
+    document_id = await store_business(retain_until=FUTURE)
+
+    with pytest.raises(DBAPIError) as refused:
+        await purge_delete_document(document_id)
+
+    assert sqlstate(refused.value) == "42501"
+    assert "documents: DELETE is not permitted" in str(refused.value)
+    assert (await stored(document_id))["id"] == document_id
+
+
+@pytest.mark.parametrize(
+    "hold", ["2999-01-01T00:00:00Z", "infinity"], ids=["held_until", "held_indefinitely"]
+)
+async def test_the_purge_role_is_refused_a_business_document_whose_linked_client_is_held(
+    client, hold
+):
+    customer_id = await keyed_customer(hold)
+    document_id = await store_business(linked_customer_id=customer_id, retain_until=PAST)
+
+    with pytest.raises(DBAPIError) as refused:
+        await purge_delete_document(document_id)
+
+    assert sqlstate(refused.value) == "42501"
+    assert "documents: DELETE is not permitted" in str(refused.value)
+    assert (await stored(document_id))["id"] == document_id
+
+
+async def test_the_purge_role_may_delete_an_expired_business_document_with_no_linked_client(
+    client,
+):
+    document_id = await store_business(retain_until=PAST)
+
+    assert await purge_delete_document(document_id) == 1
+
+
+@pytest.mark.parametrize("hold", [None, "2001-01-01T00:00:00Z"], ids=["not_held", "expired"])
+async def test_the_purge_role_may_delete_an_expired_business_document_with_an_unheld_client(
+    client, hold
+):
+    customer_id = await keyed_customer(hold)
+    document_id = await store_business(linked_customer_id=customer_id, retain_until=PAST)
+
+    assert await purge_delete_document(document_id) == 1
+
+
+async def test_the_app_role_is_always_refused_an_expired_business_document(client):
+    document_id = await store_business(retain_until=PAST)
+
+    async with session_scope() as db:
+        with pytest.raises(DBAPIError) as refused:
+            await db.execute(text("DELETE FROM documents WHERE id = :id"), {"id": document_id})
+        await db.rollback()
+
+    assert sqlstate(refused.value) == "42501"
+    assert (await stored(document_id))["id"] == document_id
+
+
+# --- purge task: financial documents (#84) ----------------------------------------------------
+
+
+async def purged_document_events(document_id: uuid.UUID) -> list[dict]:
+    async with get_purge_engine().connect() as purge:
+        rows = await purge.execute(
+            text(
+                "SELECT target_id, metadata FROM audit_events "
+                "WHERE event_type = 'document.purged' AND target_id = :d ORDER BY id"
+            ),
+            {"d": str(document_id)},
+        )
+        return [dict(r._mapping) for r in rows]
+
+
+async def document_exists(document_id: uuid.UUID) -> bool:
+    async with session_scope() as db:
+        return bool(
+            await db.scalar(
+                text("SELECT count(*) FROM documents WHERE id = :id"), {"id": document_id}
+            )
+        )
+
+
+async def test_the_nightly_purge_deletes_an_expired_anonymous_document_and_audits_once(client):
+    document_id = await store_business(retain_until=PAST)
+
+    counts = await tasks._purge_expired()
+
+    assert counts["financial_documents_purged"] == 1
+    assert counts["failed"] == 0
+    assert await document_exists(document_id) is False
+    events = await purged_document_events(document_id)
+    assert len(events) == 1
+    assert events[0]["target_id"] == str(document_id)
+    # No content, no names: exactly the three identifiers the ticket calls for.
+    assert set(events[0]["metadata"]) == {"authority", "kind", "document_id"}
+    assert events[0]["metadata"] == {
+        "authority": "linsuite_purge",
+        "kind": "invoice",
+        "document_id": str(document_id),
+    }
+
+
+async def test_the_nightly_purge_leaves_a_held_clients_expired_document_untouched(client):
+    customer_id = await keyed_customer("2999-01-01T00:00:00Z")
+    document_id = await store_business(linked_customer_id=customer_id, retain_until=PAST)
+
+    counts = await tasks._purge_expired()
+
+    assert counts["financial_documents_purged"] == 0
+    assert counts["failed"] == 0
+    assert await document_exists(document_id) is True
+    assert await purged_document_events(document_id) == []
+
+
+async def test_a_second_purge_run_deletes_nothing_and_audits_nothing_new(client):
+    document_id = await store_business(retain_until=PAST)
+    first = await tasks._purge_expired()
+    assert first["financial_documents_purged"] == 1
+
+    second = await tasks._purge_expired()
+
+    assert second["financial_documents_purged"] == 0
+    assert second["failed"] == 0
+    assert len(await purged_document_events(document_id)) == 1
+
+
+async def test_customer_keyed_purging_is_unaffected_by_the_financial_purge_step(client):
+    """The pre-existing key shred still runs, and counts its own key, not a document."""
+    await keyed_customer(PAST.isoformat())  # keyed_customer already keys it
+
+    counts = await tasks._purge_expired()
+
+    assert counts["keys_destroyed"] == 1
+    assert counts["financial_documents_purged"] == 0
