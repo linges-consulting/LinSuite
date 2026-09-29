@@ -3002,6 +3002,9 @@ export type RetailInvoiceLine = {
   discounts: InvoiceLineDiscount[]
   taxes: InvoiceLineTax[]
   staff_id: string
+  /** #105: units already brought back by a return (restocked or not) — `quantity -
+   *  returned_quantity` is what the Returns dialog may still select. */
+  returned_quantity: number
 }
 
 /** `GET /api/retail-invoices/{id}` — the retail counterpart of `Invoice`, same balance and
@@ -3185,6 +3188,45 @@ export async function recordBalanceException(
 ): Promise<BalanceException> {
   const res = await send('POST', `${invoiceBase(kind, invoiceId)}/balance-exceptions`, body)
   if (!res.ok) throw await failure(res, 'Could not record this balance exception')
+  return res.json()
+}
+
+// --- retail returns (#105, spec #95 story 50) -------------------------------------------------
+
+export type RetailReturnLineIn = {
+  retail_invoice_line_id: string
+  quantity: number
+  /** False for an opened/damaged item: it counts as returned, but never goes back on the shelf. */
+  restock: boolean
+}
+
+export type RetailReturnIn = {
+  reason: string
+  lines: RetailReturnLineIn[]
+  /** Omitted = no money back. Never derived from the lines — the refund is its own decision
+   *  (`billing/retail_sales.py::RetailReturnIn`'s own docstring). */
+  refund_cents?: number
+}
+
+export type RetailReturnOut = {
+  id: string
+  retail_invoice_id: string
+  reason: string
+  refund_id: string | null
+  refund_cents: number | null
+  returned_by: string
+  returned_at: string
+  lines: { id: string; retail_invoice_line_id: string; quantity: number; restocked: boolean }[]
+}
+
+/** `POST /api/retail-invoices/{id}/returns` (`billing.manage`, Admin Mode): restock and refund
+ *  are two independent choices, both recorded in the one return the server makes atomically. */
+export async function returnRetailItems(
+  invoiceId: string,
+  payload: RetailReturnIn,
+): Promise<RetailReturnOut> {
+  const res = await send('POST', `/api/retail-invoices/${encodeURIComponent(invoiceId)}/returns`, payload)
+  if (!res.ok) throw await failure(res, 'Could not record this return')
   return res.json()
 }
 
