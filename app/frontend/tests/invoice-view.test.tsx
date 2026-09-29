@@ -1,4 +1,4 @@
-import { screen } from '@testing-library/react'
+import { screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, test, vi } from 'vitest'
 import { renderApp, stubApi } from './harness'
@@ -207,7 +207,10 @@ test('a service invoice shows its lines, discount, per-line tax, the override an
   renderApp('/bills/invoices/inv1')
 
   expect(await screen.findByRole('heading', { name: 'Invoice #42' })).toBeInTheDocument()
-  expect(screen.getByText('Swedish Massage')).toBeInTheDocument()
+  // Scoped to the lines table: #104's own documents panel also names each service, on its
+  // treatment-receipt row, so an unscoped query is ambiguous once that panel is real.
+  const linesTable = within(screen.getByRole('table', { name: 'Invoice lines' }))
+  expect(linesTable.getByText('Swedish Massage')).toBeInTheDocument()
   expect(screen.getByText('Ana Rossi')).toBeInTheDocument()
   expect(screen.getByText('Autumn 10%')).toBeInTheDocument()
   expect(screen.getByText('-$12.00')).toBeInTheDocument() // discount

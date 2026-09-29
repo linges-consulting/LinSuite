@@ -3230,6 +3230,83 @@ export async function returnRetailItems(
   return res.json()
 }
 
+// --- print, email and treatment receipts (#104) ---------------------------------------------
+
+const enc = encodeURIComponent
+
+export const invoicePdfUrl = (customerId: string, invoiceId: string) =>
+  `/api/customers/${enc(customerId)}/invoices/${enc(invoiceId)}/pdf`
+export const receiptPdfUrl = (customerId: string, invoiceId: string, lineId: string) =>
+  `/api/customers/${enc(customerId)}/invoices/${enc(invoiceId)}/receipts/${enc(lineId)}/pdf`
+/** `customerId` null is the anonymous walk-in path (`billing/invoices.py::
+ *  anonymous_retail_invoice_pdf`), never the client-linked one — the server refuses a linked
+ *  document opened at the wrong path (M4 review T4). */
+export const retailInvoicePdfUrl = (invoiceId: string, customerId: string | null) =>
+  customerId
+    ? `/api/customers/${enc(customerId)}/retail-invoices/${enc(invoiceId)}/pdf`
+    : `/api/retail-invoices/${enc(invoiceId)}/pdf`
+
+/** One poll of a print route: 200 is the rendered PDF, as a `Blob` the caller turns into an
+ *  object URL; 202 ("rendering") is a value, not a failure, since the render is still queued
+ *  behind the worker — the caller decides whether to retry. Any other status is a real
+ *  failure (`billing/invoices.py::_pdf`'s only other paths are 200 and 202). */
+export type DocumentPoll = { ready: true; blob: Blob } | { ready: false }
+
+export async function pollDocument(url: string): Promise<DocumentPoll> {
+  const res = await fetch(url, { cache: 'no-store' })
+  if (res.status === 202) return { ready: false }
+  if (!res.ok) throw await failure(res, 'Could not open the document')
+  return { ready: true, blob: await res.blob() }
+}
+
+export type EmailedOut = { status: string; to: string }
+
+/** `to` omitted uses the client's address on file (422 `This client has no email address on
+ *  file.` when there is none — the frontend's cue to ask for one instead); anonymous retail
+ *  refuses that same way when nobody typed one in (`billing/invoices.py::
+ *  email_anonymous_retail_invoice`). */
+export async function emailInvoice(
+  customerId: string,
+  invoiceId: string,
+  to?: string,
+): Promise<EmailedOut> {
+  const res = await send(
+    'POST',
+    `/api/customers/${enc(customerId)}/invoices/${enc(invoiceId)}/email`,
+    to ? { to } : {},
+  )
+  if (!res.ok) throw await failure(res, 'Could not email the invoice')
+  return res.json()
+}
+
+export async function emailTreatmentReceipt(
+  customerId: string,
+  invoiceId: string,
+  lineId: string,
+  to?: string,
+): Promise<EmailedOut> {
+  const res = await send(
+    'POST',
+    `/api/customers/${enc(customerId)}/invoices/${enc(invoiceId)}/receipts/${enc(lineId)}/email`,
+    to ? { to } : {},
+  )
+  if (!res.ok) throw await failure(res, 'Could not email the receipt')
+  return res.json()
+}
+
+export async function emailRetailInvoice(
+  invoiceId: string,
+  customerId: string | null,
+  to?: string,
+): Promise<EmailedOut> {
+  const url = customerId
+    ? `/api/customers/${enc(customerId)}/retail-invoices/${enc(invoiceId)}/email`
+    : `/api/retail-invoices/${enc(invoiceId)}/email`
+  const res = await send('POST', url, to ? { to } : {})
+  if (!res.ok) throw await failure(res, 'Could not email the invoice')
+  return res.json()
+}
+
 // --- CTI: phone lookup, demo mode, the simulated call (Phase 14, #16) -----------------------
 
 /** A previous provider (`scheduling/cti.py`'s own shape): the most recent visit with each
