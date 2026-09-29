@@ -71,6 +71,9 @@ type Sale = {
   discount_ids: string[]
   lines: RawLine[]
   created_at: string
+  /** #107: set on the replacement draft a retail cancel opens — the "Replaces #N" banner's
+   *  own id, null for every ordinary sale these fixtures seed. */
+  replaces_retail_invoice_id?: string | null
 }
 
 function priceLine(line: RawLine, discounted: boolean) {
@@ -104,7 +107,7 @@ function saleOut(sale: Sale) {
     customer_id: sale.customer_id,
     sold_by_staff_id: 'st1',
     payment_collector_staff_id: null,
-    replaces_retail_invoice_id: null,
+    replaces_retail_invoice_id: sale.replaces_retail_invoice_id ?? null,
     lines,
     eligible_discounts: sale.lines.length > 0 ? [{ ...DISCOUNT, applied: discounted }] : [],
     discount_ids: sale.discount_ids,
@@ -123,9 +126,13 @@ function sellStub(
     capabilities?: string[]
     seed?: Sale[]
     issueResponse?: { status: number; body: unknown }
+    /** #107: the cancelled retail invoice a seeded draft's own `replaces_retail_invoice_id`
+     *  points at — the "Replaces #N" banner's fallback read (`GET /api/retail-invoices/{id}`)
+     *  when there is no router state. */
+    replacesInvoice?: { id: string; invoice_number: number; cancel_reason: string }
   } = {},
 ) {
-  const { capabilities = ['billing.view'], issueResponse } = opts
+  const { capabilities = ['billing.view'], issueResponse, replacesInvoice } = opts
   const sales = new Map<string, Sale>((opts.seed ?? []).map((s) => [s.id, s]))
   let saleSeq = sales.size
   let lineSeq = 0
@@ -136,6 +143,9 @@ function sellStub(
     respond: (url: string, body: any) => {
       if (url === '/api/auth/me') return Response.json(ACCOUNT(capabilities))
       if (url === '/api/catalog/products') return Response.json({ products: CATALOG })
+      if (replacesInvoice && url === `/api/retail-invoices/${replacesInvoice.id}`) {
+        return Response.json(replacesInvoice)
+      }
       if (url.startsWith('/api/customers?')) {
         const q = new URL(url, 'http://test').searchParams.get('q') ?? ''
         const customers =
@@ -405,6 +415,52 @@ test('a draft is resumed by its own URL after a reload', async () => {
 
   const row = (await screen.findByText('500ml')).closest('tr')!
   expect(within(row).getByText('$25.00')).toBeInTheDocument()
+})
+
+test('a draft opened directly (no router state) fetches the cancelled original for its Replaces banner', async () => {
+  // #107: `RetailSale.replaces_retail_invoice_id` was already on the wire before this ticket
+  // — the fallback read is `GET /api/retail-invoices/{id}` for the number and reason.
+  sellStub({
+    seed: [
+      {
+        id: 's1',
+        status: 'draft',
+        customer_id: null,
+        customer_name: null,
+        discount_ids: [],
+        lines: [],
+        created_at: '2026-09-27T14:00:00Z',
+        replaces_retail_invoice_id: 'rinv1',
+      },
+    ],
+    replacesInvoice: { id: 'rinv1', invoice_number: 7, cancel_reason: 'Rang up the wrong item' },
+  })
+
+  renderApp('/sell?sale=s1')
+
+  expect(await screen.findByText('Replaces #7')).toBeInTheDocument()
+  expect(screen.getByText('Rang up the wrong item')).toBeInTheDocument()
+})
+
+test('an ordinary draft sale shows no Replaces banner', async () => {
+  sellStub({
+    seed: [
+      {
+        id: 's1',
+        status: 'draft',
+        customer_id: null,
+        customer_name: null,
+        discount_ids: [],
+        lines: [],
+        created_at: '2026-09-27T14:00:00Z',
+      },
+    ],
+  })
+
+  renderApp('/sell?sale=s1')
+
+  await screen.findByText('Draft sale')
+  expect(screen.queryByText(/^Replaces #/)).not.toBeInTheDocument()
 })
 
 // --- searching and adding a product; price, tax and stock -------------------------------------

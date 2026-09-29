@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { EmptyState } from '@/components/empty-state'
 import { Field, Form, FormError } from '@/components/form'
+import { ReplacesInvoiceBanner } from '@/components/replaces-invoice-banner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -171,6 +172,8 @@ export function BillReviewPage() {
         <h1 className="text-lg font-semibold">{data.customer.name}</h1>
         <p className="text-sm text-muted-foreground">{new Date(data.created_at).toLocaleString()}</p>
       </div>
+
+      <ReplacesInvoiceBanner replacesInvoiceId={data.replaces_invoice_id} kind="service" />
 
       <div className="rounded-xl border bg-card">
         <Table>

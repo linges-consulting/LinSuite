@@ -4,6 +4,7 @@ import { useDeferredValue, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router'
 import { EmptyState } from '@/components/empty-state'
 import { FormError } from '@/components/form'
+import { ReplacesInvoiceBanner } from '@/components/replaces-invoice-banner'
 import { ClientFilter } from '@/routes/invoices'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -256,6 +257,8 @@ function SaleCart({
         <h1 className="text-lg font-semibold">{clientLabel}</h1>
         <p className="text-sm text-muted-foreground">Draft sale</p>
       </div>
+
+      <ReplacesInvoiceBanner replacesInvoiceId={data.replaces_retail_invoice_id} kind="retail" />
 
       <Card>
         <CardHeader>
