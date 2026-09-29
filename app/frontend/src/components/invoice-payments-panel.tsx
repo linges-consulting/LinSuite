@@ -32,6 +32,7 @@ import {
   type RefundEntry,
   type RetailInvoice,
 } from '@/lib/api'
+import { unsettledPendingInsurerIds } from '@/lib/payments'
 import { useCan } from '@/lib/capability-gate'
 import { centsToDollars, dollarsToCents } from '@/lib/money'
 import { INVOICE_BALANCE_EXCEPTIONS, INVOICE_PAYMENTS, INVOICE_REFUNDS } from '@/lib/query-keys'
@@ -104,13 +105,6 @@ export function InvoicePaymentsPanel({ invoice, kind, onRefetch }: InvoicePaymen
     onRefetch()
   }
 
-  // ponytail: the ledger settles a pending insurer row with a plain new `received` row rather
-  // than a correlated one (`billing/payments.py`'s own docstring — "without editing it"), so
-  // there is no server-side id linking the two. Tracking which pending rows this session has
-  // already matched is local and resets on reload; upgrade path if that becomes a problem is a
-  // `settles_payment_id` column on the receiving row.
-  const [markedReceivedIds, setMarkedReceivedIds] = useState<Set<string>>(new Set())
-
   const markReceived = useMutation({
     mutationFn: (payment: PaymentEntry) =>
       recordPayment(kind, invoice.id, {
@@ -120,9 +114,8 @@ export function InvoicePaymentsPanel({ invoice, kind, onRefetch }: InvoicePaymen
         amount_cents: payment.amount_cents,
         reference: payment.reference,
       }),
-    onSuccess: (_result, payment) => {
+    onSuccess: () => {
       toast.success('Marked received')
-      setMarkedReceivedIds((ids) => new Set(ids).add(payment.id))
       refresh()
     },
     onError: (error) => toast.error(error.message),
@@ -133,6 +126,7 @@ export function InvoicePaymentsPanel({ invoice, kind, onRefetch }: InvoicePaymen
     payments.map((p) => p.corrects_payment_id).filter((id): id is string => id !== null),
   )
   const correctionFor = (paymentId: string) => payments.find((p) => p.corrects_payment_id === paymentId)
+  const awaitingInsurer = unsettledPendingInsurerIds(payments, supersededIds)
 
   return (
     <Card>
@@ -223,7 +217,7 @@ export function InvoicePaymentsPanel({ invoice, kind, onRefetch }: InvoicePaymen
                           <div className="flex gap-2">
                             {payment.payer_type === 'insurer' &&
                               payment.status === 'pending' &&
-                              !markedReceivedIds.has(payment.id) && (
+                              awaitingInsurer.has(payment.id) && (
                               <Button
                                 size="sm"
                                 variant="outline"
