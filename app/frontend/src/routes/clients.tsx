@@ -21,6 +21,7 @@ import { Link, useNavigate, useParams } from 'react-router'
 import { toast } from 'sonner'
 import { ClassificationBadge } from '@/components/classification-badge'
 import { ClientFormsCard, type ClientFormsCardHandle } from '@/components/client-forms'
+import { ExportControl } from '@/components/export-control'
 import { SessionNotesCard } from '@/components/session-notes'
 import { EmptyState } from '@/components/empty-state'
 import { Field as FormField, Form, FormError } from '@/components/form'
@@ -49,11 +50,14 @@ import { Textarea } from '@/components/ui/textarea'
 import {
   ApiError,
   createCustomer,
+  downloadAccessLogExport,
   fetchAccessLog,
+  fetchAccessLogExportStatus,
   fetchCustomerCompliance,
   fetchCustomerProfile,
   fetchCustomers,
   fieldErrors,
+  requestAccessLogExport,
   requestErasure,
   updateCustomer,
   type AccessEntry,
@@ -986,6 +990,14 @@ function AccessHistory({ customerId, adminMode }: { customerId: string; adminMod
                 onChange={(e) => choose({ to: e.target.value })}
               />
             </div>
+            <ExportControl
+              label="Export CSV"
+              requestExport={() =>
+                requestAccessLogExport(customerId, { from: from || undefined, to: to || undefined })
+              }
+              pollExport={(exportId) => fetchAccessLogExportStatus(customerId, exportId)}
+              downloadExport={(exportId) => downloadAccessLogExport(customerId, exportId)}
+            />
           </div>
         )}
       </CardHeader>
