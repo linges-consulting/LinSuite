@@ -95,6 +95,12 @@ function fakeServer() {
         }
       }
 
+      if (url.endsWith('/receive') && method === 'POST') {
+        const { product, variant } = findVariant(url)
+        variant.quantity_on_hand = (variant.quantity_on_hand ?? 0) + body.quantity
+        return Response.json(product)
+      }
+
       if (url.includes('/variants')) {
         if (method === 'POST' && !url.endsWith('/deactivate') && !url.endsWith('/reactivate')) {
           const product = findProduct(url)
@@ -114,6 +120,7 @@ function fakeServer() {
             active: true,
             sort_order: 0,
             tax_component_keys: [],
+            quantity_on_hand: 0,
             ...body,
           }
           product.variants.push(created)
@@ -236,7 +243,7 @@ describe('creating a product', () => {
 // --- creating a variant ------------------------------------------------------------------
 
 describe('creating a variant', () => {
-  it('sends the price in cents and the stock as a whole number', async () => {
+  it('sends the price in cents, then the opening stock as a receipt', async () => {
     const server = fakeServer()
     const user = userEvent.setup()
     renderSettings()
@@ -248,18 +255,24 @@ describe('creating a variant', () => {
     await user.type(screen.getByLabelText('SKU'), 'SHMP-1000')
     await user.clear(screen.getByLabelText('Price'))
     await user.type(screen.getByLabelText('Price'), '39.99')
-    await user.clear(screen.getByLabelText('Stock'))
-    await user.type(screen.getByLabelText('Stock'), '12')
+    await user.clear(screen.getByLabelText('Opening stock'))
+    await user.type(screen.getByLabelText('Opening stock'), '12')
     await user.click(submit('Add variant'))
 
     await waitFor(() => {
-      const post = server.calls.find((c) => c.url === '/api/admin/products/p1/variants')
-      expect(post?.body).toMatchObject({
-        name: '1L',
-        sku: 'SHMP-1000',
-        price_cents: 3999,
-        quantity_on_hand: 12,
+      const receive = server.calls.find((c) => c.url.endsWith('/receive'))
+      expect(receive).toMatchObject({
+        url: '/api/admin/products/p1/variants/v2/receive',
+        body: { quantity: 12, reason: 'Opening stock' },
       })
+    })
+    const post = server.calls.find((c) => c.url === '/api/admin/products/p1/variants')
+    expect(post?.body).toEqual({
+      name: '1L',
+      sku: 'SHMP-1000',
+      barcode: null,
+      price_cents: 3999,
+      low_stock_threshold: 0,
     })
     expect(await screen.findByText('1L')).toBeInTheDocument()
   })
@@ -274,8 +287,8 @@ describe('creating a variant', () => {
     await user.click(await screen.findByRole('menuitem', { name: 'Add variant' }))
     await user.type(screen.getByLabelText('Name'), '1L')
     await user.type(screen.getByLabelText('SKU'), 'SHMP-1000')
-    await user.clear(screen.getByLabelText('Stock'))
-    await user.type(screen.getByLabelText('Stock'), '-1')
+    await user.clear(screen.getByLabelText('Opening stock'))
+    await user.type(screen.getByLabelText('Opening stock'), '-1')
 
     expect(submit('Add variant')).toBeDisabled()
     expect(server.calls.some((c) => c.url === '/api/admin/products/p1/variants')).toBe(false)
@@ -300,7 +313,7 @@ describe('creating a variant', () => {
 // --- editing and deactivating ------------------------------------------------------------
 
 describe('editing a variant', () => {
-  it('changes the stock count', async () => {
+  it('never sends a stock count — stock only moves through receive/adjust', async () => {
     const server = fakeServer()
     const user = userEvent.setup()
     renderSettings()
@@ -308,13 +321,15 @@ describe('editing a variant', () => {
 
     await openActions(user, '500ml')
     await user.click(await screen.findByRole('menuitem', { name: 'Edit' }))
-    await user.clear(screen.getByLabelText('Stock'))
-    await user.type(screen.getByLabelText('Stock'), '7')
+    expect(screen.queryByLabelText(/^(opening )?stock$/i)).not.toBeInTheDocument()
+    await user.clear(screen.getByLabelText('Price'))
+    await user.type(screen.getByLabelText('Price'), '19.99')
     await user.click(submit('Save variant'))
 
     await waitFor(() => {
       const patch = server.calls.find((c) => c.method === 'PATCH')
-      expect(patch?.body).toMatchObject({ quantity_on_hand: 7 })
+      expect(patch?.body).toMatchObject({ price_cents: 1999 })
+      expect(patch?.body).not.toHaveProperty('quantity_on_hand')
     })
   })
 })

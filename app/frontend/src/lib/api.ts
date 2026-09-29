@@ -1191,7 +1191,6 @@ export type ProductVariantDraft = {
   sku: string
   barcode: string | null
   price_cents: number
-  quantity_on_hand: number
   low_stock_threshold: number
 }
 
@@ -1230,6 +1229,21 @@ export async function reactivateProduct(id: string): Promise<ProductRow> {
 
 /** Every variant endpoint returns the whole product — the same shape the table reads — so a
  *  screen that just created or edited one variant never has to refetch separately. */
+/** A delivery arriving (`inventory.receive`): the only way stock goes up outside a return. */
+export async function receiveStock(
+  productId: string,
+  variantId: string,
+  quantity: number,
+  reason: string | null,
+): Promise<ProductRow> {
+  const res = await send('POST', `/api/admin/products/${productId}/variants/${variantId}/receive`, {
+    quantity,
+    reason,
+  })
+  if (!res.ok) throw await failure(res, 'Could not receive the stock')
+  return res.json()
+}
+
 export async function createVariant(
   productId: string,
   draft: ProductVariantDraft,
@@ -1920,10 +1934,33 @@ export async function fetchAppointments(query: {
  * that is not `confirmed` any more; a no-show attempted before `starts_at` is 422
  * `not_yet_started`.
  */
-export async function completeAppointment(id: string): Promise<Appointment> {
-  const res = await send('POST', `/api/appointments/${id}/complete`, {})
+export async function completeAppointment(
+  id: string,
+  packagePurchaseId: string | null = null,
+): Promise<Appointment> {
+  const res = await send('POST', `/api/appointments/${id}/complete`, {
+    package_purchase_id: packagePurchaseId,
+  })
   if (!res.ok) throw await failure(res, 'Could not complete the appointment')
   return res.json()
+}
+
+/** One paid, unexpired, unrefunded package of this client's that still covers the
+ *  appointment's service (#72). `value_cents` is what the next session would be worth. */
+export type PackageCredit = {
+  package_purchase_id: string
+  name: string
+  purchased_at: string
+  expires_at: string | null
+  credits_total: number
+  credits_remaining: number
+  value_cents: number
+}
+
+export async function fetchPackageCredits(appointmentId: string): Promise<PackageCredit[]> {
+  const res = await fetch(`/api/appointments/${appointmentId}/package-credits`)
+  if (!res.ok) throw await failure(res, 'Could not load the client’s packages')
+  return (await res.json()).credits
 }
 
 export async function cancelAppointment(id: string, reason?: string | null): Promise<Appointment> {
@@ -2410,6 +2447,8 @@ export type BillLine = {
   service: BillRef
   staff: BillRef
   price_cents: number
+  /** Non-zero when a package credit paid for this session (#72) — its frozen value. */
+  prepaid_cents: number
   applied_discount_ids: string[]
   discounted_cents: number
   tax: LineTax

@@ -30,7 +30,7 @@ from auth.capabilities import Requires
 from auth.models import User
 from core.audit import record_event
 from core.db import SessionDep
-from inventory.routes import ProductOut, _load_product, _load_variant, _product_out
+from inventory.routes import ProductOut, load_product, load_variant, product_out
 from inventory.stock import InsufficientStock, VariantNotFound, record_movement
 from notifications.triggers import notify_low_stock
 
@@ -86,7 +86,7 @@ async def receive_stock(
     admin: InventoryReceiver,
     db: SessionDep,
 ) -> ProductOut:
-    await _load_variant(db, product_id, variant_id)  # 404 before anything is written
+    await load_variant(db, product_id, variant_id)  # 404 before anything is written
 
     try:
         movement = await record_movement(
@@ -111,7 +111,7 @@ async def receive_stock(
     await db.commit()
     if movement.low_stock_alert_armed:
         await notify_low_stock(db, variant_id)
-    return _product_out(await _load_product(db, product_id))
+    return product_out(await load_product(db, product_id))
 
 
 @router.post("/{product_id}/variants/{variant_id}/adjust")
@@ -122,7 +122,7 @@ async def adjust_stock(
     admin: InventoryAdjuster,
     db: SessionDep,
 ) -> ProductOut:
-    await _load_variant(db, product_id, variant_id)  # 404 before anything is written
+    await load_variant(db, product_id, variant_id)  # 404 before anything is written
 
     try:
         movement = await record_movement(
@@ -151,4 +151,4 @@ async def adjust_stock(
     await db.commit()
     if movement.low_stock_alert_armed:
         await notify_low_stock(db, variant_id)
-    return _product_out(await _load_product(db, product_id))
+    return product_out(await load_product(db, product_id))

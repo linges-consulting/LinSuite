@@ -152,7 +152,11 @@ async def purchase_package(
         row.id: row.price_cents
         for row in await db.scalars(select(Service).where(Service.id.in_(service_ids)))
     }
-    regular_prices = [prices_by_id[sid] for sid in service_ids]
+    # Weight = regular price × credits (spec §152): a credit row's allocation covers all its
+    # sessions, so assessment 120 ×1 + follow-up 60 ×2 at 200 -> 100 / 100 (100 + 50 + 50 per
+    # session, split by `redemption.py`). Pricing by price alone would value the two follow-ups
+    # at the same total as the one assessment.
+    regular_prices = [prices_by_id[row.service_id] * row.credits for row in definition_services]
     # `allocate_bundle_price` called exactly once — the whole point of freezing it onto
     # `PackagePurchaseCredit.allocated_price_cents` rather than recomputing it on every read.
     allocated = allocate_bundle_price(regular_prices, definition.price_cents)

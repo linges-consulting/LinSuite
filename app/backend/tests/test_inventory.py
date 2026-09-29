@@ -84,7 +84,6 @@ def variant_draft(**overrides) -> dict:
         "sku": "SHMP-500",
         "barcode": "0123456789012",
         "price_cents": 2499,
-        "quantity_on_hand": 40,
         "low_stock_threshold": 5,
     }
     body.update(overrides)
@@ -98,9 +97,26 @@ async def make_product(client, **overrides) -> dict:
 
 
 async def make_variant(client, product_id: str, **overrides) -> dict:
+    """Create a variant, then seed its opening stock (default 40) straight into the row.
+
+    The API no longer takes a stock count (R16: every change is a movement), and seeding via
+    the receive route would put a receipt row into every test's movement history — tests that
+    assert on the history want it to start empty, as if the stock predated the ledger."""
+    quantity = overrides.pop("quantity_on_hand", 40)
     resp = await client.post(f"{PRODUCTS}/{product_id}/variants", json=variant_draft(**overrides))
     assert resp.status_code == 201, resp.text
-    return resp.json()
+    body = resp.json()
+    created = next(v for v in body["variants"] if v["sku"] == variant_draft(**overrides)["sku"])
+    if quantity:
+        async with session_scope() as db:
+            await db.execute(
+                text("UPDATE product_variants SET quantity_on_hand = :q WHERE id = :id"),
+                {"q": quantity, "id": created["id"]},
+            )
+            await db.commit()
+        created["quantity_on_hand"] = quantity
+        created["is_low_stock"] = quantity < created["low_stock_threshold"]
+    return body
 
 
 async def events() -> list[str]:
@@ -175,9 +191,8 @@ async def test_a_product_may_have_more_than_one_variant_each_with_its_own_thresh
     "field,value",
     [
         ("price_cents", -1),
-        ("quantity_on_hand", -1),
         ("low_stock_threshold", -1),
-        ("quantity_on_hand", 1.5),
+        ("low_stock_threshold", 1.5),
     ],
 )
 async def test_stock_and_money_are_refused_when_nonsense(client, field, value):
@@ -262,18 +277,16 @@ async def test_editing_a_variant_records_only_the_fields_that_changed(client):
 
     resp = await client.patch(
         f"{PRODUCTS}/{variant['product_id']}/variants/{variant['id']}",
-        json={"quantity_on_hand": 12},
+        json={"price_cents": 2999},
     )
 
     assert resp.status_code == 200, resp.text
-    assert resp.json()["variants"][0]["quantity_on_hand"] == 12
+    assert resp.json()["variants"][0]["price_cents"] == 2999
     updated = [row for row in await events() if row == "product_variant.updated"]
     assert len(updated) == 1
 
 
-@pytest.mark.parametrize(
-    "field", ["name", "sku", "price_cents", "quantity_on_hand", "low_stock_threshold"]
-)
+@pytest.mark.parametrize("field", ["name", "sku", "price_cents", "low_stock_threshold"])
 async def test_emptying_a_required_variant_field_is_refused_rather_than_a_five_hundred(
     client, field
 ):

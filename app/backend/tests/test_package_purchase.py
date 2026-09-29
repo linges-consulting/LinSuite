@@ -306,13 +306,38 @@ async def test_purchasing_a_nonexistent_package_is_refused(client):
 # --- purchasing: a multi-service bundle (allocation math) ------------------------------------
 
 
-async def test_purchasing_a_bundle_allocates_price_across_services(client):
-    """The worked example from `billing/allocation.py`'s own docstring (#60's acceptance
-    criteria): regular prices 120/60/60, purchase price 200 -> 100/50/50."""
+async def test_purchasing_a_bundle_weights_allocation_by_price_times_credits(client):
+    """Spec §152: assessment 120 ×1 + follow-up 60 ×2, bundle 200. Weights 120 : 60×2, so the
+    assessment row holds 100 and the follow-up row 100 (50 per session)."""
     await as_admin(client)
-    a = await make_service(client, name="Service A", price_cents=12000)
-    b = await make_service(client, name="Service B", price_cents=6000)
-    c = await make_service(client, name="Service C", price_cents=6000)
+    a = await make_service(client, name="Assessment", price_cents=12000)
+    b = await make_service(client, name="Follow-up", price_cents=6000)
+    package = await make_package(
+        client,
+        [{"service_id": a["id"], "credits": 1}, {"service_id": b["id"], "credits": 2}],
+        name="Assessment Bundle",
+        price_cents=20000,
+    )
+    customer_id = await make_customer(client)
+
+    body = await purchase(client, package["id"], customer_id)
+
+    by_service = {row["service_id"]: row for row in body["credits"]}
+    assert (by_service[a["id"]]["allocated_price_cents"], by_service[a["id"]]["credits_total"]) == (
+        10000,
+        1,
+    )
+    assert (by_service[b["id"]]["allocated_price_cents"], by_service[b["id"]]["credits_total"]) == (
+        10000,
+        2,
+    )
+
+
+async def test_a_bundle_with_remainders_still_sums_to_the_cent(client):
+    await as_admin(client)
+    a = await make_service(client, name="Service A", price_cents=10000)
+    b = await make_service(client, name="Service B", price_cents=7000)
+    c = await make_service(client, name="Service C", price_cents=3300)
     package = await make_package(
         client,
         [
@@ -321,24 +346,16 @@ async def test_purchasing_a_bundle_allocates_price_across_services(client):
             {"service_id": c["id"], "credits": 3},
         ],
         name="Mixed Bundle",
-        price_cents=20000,
+        price_cents=20001,
     )
     customer_id = await make_customer(client)
 
     body = await purchase(client, package["id"], customer_id)
 
-    expected = allocate_bundle_price([12000, 6000, 6000], 20000)
-    assert expected == [10000, 5000, 5000]
-    by_service = {row["service_id"]: row for row in body["credits"]}
-    assert by_service[a["id"]]["allocated_price_cents"] == expected[0]
-    assert by_service[a["id"]]["credits_total"] == 1
-    assert by_service[b["id"]]["allocated_price_cents"] == expected[1]
-    assert by_service[b["id"]]["credits_total"] == 2
-    assert by_service[c["id"]]["allocated_price_cents"] == expected[2]
-    assert by_service[c["id"]]["credits_total"] == 3
-    # The allocated shares always sum exactly to the price paid — the one property #60's own
-    # module docstring guarantees.
-    assert sum(row["allocated_price_cents"] for row in body["credits"]) == body["price_cents"]
+    expected = allocate_bundle_price([10000, 14000, 9900], 20001)
+    by_service = {row["service_id"]: row["allocated_price_cents"] for row in body["credits"]}
+    assert [by_service[s["id"]] for s in (a, b, c)] == expected
+    assert sum(expected) == 20001
 
 
 # --- expiry, frozen ------------------------------------------------------------------------
