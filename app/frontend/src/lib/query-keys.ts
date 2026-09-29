@@ -128,3 +128,7 @@ export const RETAIL_SALE = ['retail-sale'] as const
 export const CLIENT_PACKAGE_PURCHASES = ['client-package-purchases'] as const
 /** The *Sell package* dialog's own read (#108): active packages, `billing.view`, Staff Mode. */
 export const SELLABLE_PACKAGES = ['sellable-packages'] as const
+/** One package purchase's frozen shape (#109/#102 gap fix): `GET /api/packages/purchases/{id}`,
+ *  id after — the refund dialog's own pre-selection read and the package invoice view's own
+ *  read, kept separate from `CLIENT_PACKAGE_PURCHASES` (a client's whole list). */
+export const PACKAGE_PURCHASE = ['package-purchase'] as const

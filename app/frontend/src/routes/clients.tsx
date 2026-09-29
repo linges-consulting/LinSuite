@@ -597,7 +597,9 @@ export function ClientPage() {
           )}
           {canViewNotes && <SessionNotesCard customerId={id} timezone={profile.data.timezone} suppressed={profile.data.customer.suppressed} canWrite={canWriteNotes} />}
           {canViewBilling && <ClientInvoicesCard customerId={id} />}
-          {canViewBilling && <ClientPackagesCard customerId={id} />}
+          {canViewBilling && (
+            <ClientPackagesCard customerId={id} purchaserName={fullName(profile.data.customer)} />
+          )}
 
           {editing && (
             <ClientEditDialog customer={profile.data.customer} onClose={() => setEditing(false)} />

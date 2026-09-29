@@ -13,7 +13,9 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import {
   ApiError,
+  fetchCatalog,
   fetchInvoice,
+  fetchPackagePurchase,
   fetchRetailInvoice,
   type Invoice,
   type InvoiceLine,
@@ -23,7 +25,7 @@ import {
   type RetailInvoiceLine,
 } from '@/lib/api'
 import { centsToDollars } from '@/lib/money'
-import { INVOICE, RETAIL_INVOICE } from '@/lib/query-keys'
+import { CATALOG, INVOICE, PACKAGE_PURCHASE, RETAIL_INVOICE } from '@/lib/query-keys'
 
 const money = (cents: number) => `$${centsToDollars(cents)}`
 
@@ -61,7 +63,13 @@ function ServiceInvoiceScreen({ id }: { id: string }) {
       invoice={invoice}
       kind="service"
       onRefetch={() => query.refetch()}
-      lines={<ServiceLinesTable lines={invoice.lines} />}
+      lines={
+        invoice.package_purchase_id ? (
+          <PackagePurchaseLines packagePurchaseId={invoice.package_purchase_id} />
+        ) : (
+          <ServiceLinesTable lines={invoice.lines} />
+        )
+      }
       extra={
         invoice.override_applied_cents !== null && (
           <OverrideCard
@@ -255,6 +263,62 @@ function OverrideCard({ appliedCents, reason }: { appliedCents: number; reason: 
         {reason && <p className="text-muted-foreground">{reason}</p>}
       </CardContent>
     </Card>
+  )
+}
+
+/** A package-purchase invoice's own `lines` is always `[]` — its frozen shape lives on
+ *  `GET /packages/purchases/{id}` instead, deliberately kept off `InvoiceOut` so it does not
+ *  duplicate that module's response shape (`billing/invoices.py::InvoiceOut`'s own docstring).
+ *  Reads it in place of the empty lines table, so the invoice view still shows what was bought
+ *  (#109 gap fix). Service names come from the catalog (`CurrentUser`, no extra capability —
+ *  the same read the booking screen and queue already share), since the frozen shape itself
+ *  only carries `service_id`; a service deactivated since purchase simply reads "—", the same
+ *  fallback `billing/package_purchase.py` uses server-side for the identical join. */
+function PackagePurchaseLines({ packagePurchaseId }: { packagePurchaseId: string }) {
+  const purchaseQuery = useQuery({
+    queryKey: [...PACKAGE_PURCHASE, packagePurchaseId],
+    queryFn: () => fetchPackagePurchase(packagePurchaseId),
+  })
+  const catalogQuery = useQuery({ queryKey: CATALOG, queryFn: fetchCatalog })
+
+  if (purchaseQuery.isPending) return <Skeleton className="h-32 w-full" />
+  if (purchaseQuery.isError) {
+    return (
+      <p role="alert" className="text-destructive">
+        {purchaseQuery.error.message}
+      </p>
+    )
+  }
+
+  const purchase = purchaseQuery.data
+  const names = new Map((catalogQuery.data ?? []).map((s) => [s.id, s.name]))
+
+  return (
+    <div className="rounded-xl border bg-card">
+      <div className="border-b px-4 py-3">
+        <p className="text-sm font-medium">{purchase.name}</p>
+      </div>
+      <Table aria-label="Invoice lines">
+        <TableHeader>
+          <TableRow>
+            <TableHead className="pl-4">Service</TableHead>
+            <TableHead className="text-right">Credits</TableHead>
+            <TableHead className="pr-4 text-right">Value</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {purchase.credits.map((c) => (
+            <TableRow key={c.service_id} className="h-12">
+              <TableCell className="pl-4">{names.get(c.service_id) ?? '—'}</TableCell>
+              <TableCell className="text-right tabular-nums">{c.credits_total}</TableCell>
+              <TableCell className="pr-4 text-right tabular-nums">
+                {money(c.allocated_price_cents)}
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </div>
   )
 }
 
