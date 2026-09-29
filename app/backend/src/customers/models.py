@@ -34,6 +34,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.db import Base
+from customers.phone import NORMALIZED_PHONE_SQL
 
 # What an erasure request removes whether or not the chart is held (pre-flight D5b): how to
 # reach the client, both contacts, and the front-desk notes. Names and DOB go too only when
@@ -72,14 +73,11 @@ class Customer(Base):
         # The purge job's scan: `retention_expires_at < now()`.
         Index("ix_customers_retention_expires_at", "retention_expires_at"),
         # Phone lookup (Phase 14, #16): the NANP-normalised value, not a second denormalised
-        # column — see `customers/phone.py` and migration 0071's own docstring for why the
-        # `CASE` here has to stay byte-for-byte what that module compiles.
+        # column — see `customers/phone.py` for the one expression both this index and the
+        # lookup's query are built from.
         Index(
             "ix_customers_phone_normalized",
-            text(
-                "CASE WHEN length(phone) = 11 AND left(phone, 1) = '1' "
-                "THEN substr(phone, 2) ELSE phone END"
-            ),
+            text(NORMALIZED_PHONE_SQL),
             postgresql_where=text("phone IS NOT NULL"),
         ),
     )

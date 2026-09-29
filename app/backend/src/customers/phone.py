@@ -21,10 +21,10 @@ from sqlalchemy.sql.elements import ColumnElement
 # lookup rather than a fishing expedition (decision #2 in the ticket).
 MIN_PARTIAL_DIGITS = 4
 
-# Kept in sync with `alembic/versions/0071_cti_demo_mode.py::_PHONE_CASE_SQL` and
-# `customers/models.py`'s own copy of the same expression — all three have to compile to the
-# same SQL for the functional index to actually cover the query.
-_PHONE_CASE_SQL = (
+# The functional index's expression: `customers/models.py` builds its `Index` from this
+# constant, and migration 0071 froze a copy of it (migrations never import app code). Both
+# have to compile to what `normalized_phone_column` emits, or the index stops covering it.
+NORMALIZED_PHONE_SQL = (
     "CASE WHEN length(phone) = 11 AND left(phone, 1) = '1' THEN substr(phone, 2) ELSE phone END"
 )
 
@@ -40,7 +40,7 @@ def normalize_phone(raw: str | None) -> str:
 
 def normalized_phone_column(column: ColumnElement[str]) -> ColumnElement[str]:
     """`normalize_phone`, as a SQL expression over a `phone` column — must stay the exact
-    expression `_PHONE_CASE_SQL` names, or Postgres will not match it to the functional index
+    expression `NORMALIZED_PHONE_SQL` names, or Postgres will not match it to the functional index
     (still correct, just an unindexed scan)."""
     return case(
         (and_(func.length(column) == 11, func.left(column, 1) == "1"), func.substr(column, 2)),

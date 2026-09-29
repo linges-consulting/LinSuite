@@ -47,6 +47,7 @@ from customers import keys, retention
 from customers.classification import Classification, classify
 from customers.erasure import ErasureOut, erasure_out, is_held
 from customers.models import Customer, ErasureRequest
+from customers.phone import normalize_phone, normalized_phone_column
 from notifications.models import NotificationFailure
 from scheduling.models import Appointment
 
@@ -320,7 +321,14 @@ async def find_customers(
             func.lower(Customer.email).startswith(term, autoescape=True),
         ]
         if digits:
+            # Raw prefix as before, and the NANP-normalised one the phone lookup uses, so a
+            # number stored with or without its leading `1` is found either way.
             matches.append(Customer.phone.startswith(digits, autoescape=True))
+            matches.append(
+                normalized_phone_column(Customer.phone).startswith(
+                    normalize_phone(digits), autoescape=True
+                )
+            )
         query = query.where(or_(*matches))
     total = await db.scalar(select(func.count()).select_from(query.subquery()))
     rows = list(

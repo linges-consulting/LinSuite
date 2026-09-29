@@ -182,6 +182,27 @@ async def test_search_matches_name_phone_and_email_prefixes(client):
     assert everyone.json()["total"] == 3
 
 
+async def test_search_ignores_the_nanp_country_code_on_either_side(client):
+    """Same rule as the phone lookup (`customers/phone.py`): a number stored with its leading
+    `1` is found by the ten digits, and one stored without it by the eleven."""
+    await sign_in(client)
+    for first, phone in (("Eleven", "+1 416 555 0199"), ("Ten", "647-555-0100")):
+        made = await client.post(
+            CUSTOMERS, json={"first_name": first, "last_name": "Caller", "phone": phone}
+        )
+        assert made.status_code == 201, made.text
+
+    async def firsts(q):
+        resp = await client.get(CUSTOMERS, params={"q": q})
+        assert resp.status_code == 200, resp.text
+        return [c["first_name"] for c in resp.json()["customers"]]
+
+    assert await firsts("416-555-0199") == ["Eleven"]
+    assert await firsts("1 416 555 0199") == ["Eleven"]
+    assert await firsts("+1 647 555 0100") == ["Ten"]
+    assert await firsts("647-555") == ["Ten"]
+
+
 async def test_the_list_is_paginated_and_reports_the_total(client):
     await sign_in(client)
     for last in ("Bravo", "alpha", "Charlie", "Delta", "Echo"):
