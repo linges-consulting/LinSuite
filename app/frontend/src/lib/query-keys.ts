@@ -35,6 +35,8 @@ export const BRANDING = ['business-branding'] as const
 export const SERVICES = ['services'] as const
 /** The retail catalog: products and their variants (M4 #56). */
 export const PRODUCTS = ['products'] as const
+/** Package definitions behind Settings → Packages (#101). */
+export const PACKAGE_DEFINITIONS = ['package-definitions'] as const
 /** The schedule's column roster (`/api/staff`), and the appointments on a day. The list key
  *  takes the date as a second element, so booking invalidates every day the tab has seen. */
 export const ROSTER = ['roster'] as const
