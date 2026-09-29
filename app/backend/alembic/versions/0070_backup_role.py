@@ -1,7 +1,7 @@
 """New `linsuite_backup` role: SELECT only, everywhere, present and future (M5, #89/#82).
 
 Revision ID: 0070
-Revises: 0066
+Revises: 0069
 Create Date: 2026-09-29
 
 `linsuite_backup` is a login role that can read every table and sequence and nothing else —

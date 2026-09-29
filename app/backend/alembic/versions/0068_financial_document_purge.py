@@ -1,7 +1,7 @@
 """Purge financial PDFs once their CRA retention has passed (#84; ADR-0001 amendment).
 
 Revision ID: 0068
-Revises: 0066
+Revises: 0067
 Create Date: 2026-09-29
 
 `public.customer_record_guard()` (0026) gains a second DELETE branch for business-keyed rows
