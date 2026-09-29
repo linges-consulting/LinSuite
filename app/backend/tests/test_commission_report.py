@@ -1,10 +1,12 @@
 """S1: the admin-only commission report (#69) — `GET /api/admin/reports/commission` (JSON) and
-the queued CSV export (`/exports`, R29), `commission.view`, Administrator-only, Admin
-Mode. `tests/test_commission_leakage.py` proves the flip side (no staff-facing payload leaks
-this data); this file proves the report itself: the access gate, the date-range/staff filters,
-and the totals.
+the queued CSV export (`/exports`, R29, through the shared mechanism of #86),
+`commission.view`, Administrator-only, Admin Mode. `tests/test_commission_leakage.py` proves
+the flip side (no staff-facing payload leaks this data); this file proves the report itself:
+the access gate, the date-range/staff filters, the totals, and — since commission is the one
+kind this repo ships — the shared export mechanism's expiry, audit event and cleanup.
 """
 
+import asyncio
 import csv
 import io
 
@@ -51,7 +53,7 @@ async def claimed_instance(client):
         await wipe_document_keys()
         async with session_scope() as db:
             for table in (
-                "commission_exports",  # R29
+                "report_exports",  # R29, generalised by #86
                 "retail_sale_lines",
                 "retail_sales",
                 "product_variants",
@@ -446,7 +448,7 @@ async def test_the_request_only_enqueues_the_export(client, monkeypatch):
     from billing import commission_report
 
     queued_ids: list[str] = []
-    monkeypatch.setattr(commission_report.build_commission_export, "delay", queued_ids.append)
+    monkeypatch.setattr(commission_report.build_report_export, "delay", queued_ids.append)
     await as_admin(client)
 
     queued = await client.post(EXPORTS, json={})
@@ -475,6 +477,119 @@ async def test_the_export_routes_require_commission_view_and_admin_mode(client):
     assert (await client.post(EXPORTS, json={})).status_code in (401, 403)
     assert (await client.get(f"{EXPORTS}/{uuid.uuid4()}")).status_code in (401, 403)
     assert (await client.get(f"{EXPORTS}/{uuid.uuid4()}/csv")).status_code in (401, 403)
+
+
+# --- #86: the shared export mechanism — audit, expiry, cleanup, and a kind this repo never
+# built ------------------------------------------------------------------------------------
+
+
+async def test_the_export_request_writes_one_audit_event_with_kind_and_params_no_content(client):
+    await as_admin(client)
+    await _issue_one(client, rate_bp=1000, price_cents=10000)
+
+    queued = await client.post(EXPORTS, json={})
+    assert queued.status_code == 202, queued.text
+
+    async with session_scope() as db:
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT actor_user_id, target_id, metadata FROM audit_events "
+                    "WHERE event_type = 'report.export_requested'"
+                )
+            )
+        ).all()
+    assert len(rows) == 1
+    _actor_user_id, target_id, metadata = rows[0]
+    assert target_id == queued.json()["id"]
+    assert metadata == {
+        "kind": "commission",
+        "params": {
+            "from_date": queued.json()["from"],
+            "to_date": queued.json()["to"],
+            "staff_id": None,
+        },
+    }
+    assert "content" not in metadata
+
+
+async def test_downloading_an_expired_export_is_refused_with_410(client):
+    await as_admin(client)
+    await _issue_one(client, rate_bp=1000, price_cents=10000)
+    queued = await client.post(EXPORTS, json={})
+    export_id = queued.json()["id"]
+
+    async with session_scope() as db:
+        await db.execute(
+            text(
+                "UPDATE report_exports SET expires_at = now() - interval '1 second' WHERE id = :id"
+            ),
+            {"id": export_id},
+        )
+        await db.commit()
+
+    refused = await client.get(f"{EXPORTS}/{export_id}/csv")
+    assert refused.status_code == 410, refused.text
+
+
+async def test_the_nightly_cleanup_removes_only_expired_export_rows(client):
+    from core.tasks import cleanup_expired_exports
+
+    await as_admin(client)
+    await _issue_one(client, rate_bp=1000, price_cents=10000)
+    keep = await client.post(EXPORTS, json={})
+    gone = await client.post(EXPORTS, json={})
+    async with session_scope() as db:
+        await db.execute(
+            text(
+                "UPDATE report_exports SET expires_at = now() - interval '1 second' WHERE id = :id"
+            ),
+            {"id": gone.json()["id"]},
+        )
+        await db.commit()
+
+    # The task owns its own event loop (`asyncio.run`), as `test_partitions.py` runs
+    # `maintain_partitions` the same way.
+    result = await asyncio.to_thread(cleanup_expired_exports.delay)
+    assert result.get() == 1
+
+    async with session_scope() as db:
+        ids = list(await db.scalars(text("SELECT id FROM report_exports")))
+    assert [str(i) for i in ids] == [keep.json()["id"]]
+
+
+async def test_a_kind_this_repo_never_shipped_still_works_through_the_one_shared_task(client):
+    """The acceptance criterion, proven directly: registering a builder is the entire
+    integration surface. Nothing about the table, the task or the expiry rule changes for a
+    `kind` `core/exports.py` has never heard of until this test registers one."""
+    from core.exports import _builders, build_report_export, request_export
+    from core.exports import register_builder as register
+    from core.models import ReportExport
+
+    await as_admin(client)
+    async with session_scope() as db:
+        actor_id = await db.scalar(text("SELECT id FROM users WHERE email = :e"), {"e": EMAIL})
+
+    async def build(_db, params):
+        return f"hello,{params['who']}\n"
+
+    register("a_kind_this_test_made_up", build)
+    try:
+        async with session_scope() as db:
+            export = await request_export(
+                db, kind="a_kind_this_test_made_up", params={"who": "world"}, requested_by=actor_id
+            )
+            export_id = export.id
+            await db.commit()
+
+        result = await asyncio.to_thread(build_report_export.delay, str(export_id))
+        result.get()
+
+        async with session_scope() as db:
+            built = await db.get(ReportExport, export_id)
+            assert (built.status, built.content) == ("ready", "hello,world\n")
+    finally:
+        _builders.pop("a_kind_this_test_made_up", None)
 
 
 # --- S2: the received share -------------------------------------------------------------------

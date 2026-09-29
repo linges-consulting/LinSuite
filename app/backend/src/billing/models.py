@@ -2066,26 +2066,6 @@ class RetailInvoiceLineTax(Base):
     amount_cents: Mapped[int] = mapped_column(Integer)
 
 
-class CommissionExport(Base):
-    """One queued CSV export of the commission report (R29). `billing/commission_report.py`
-    inserts it `pending`; the Celery task fills `content` and flips it to `ready` (or
-    `failed`). The window is resolved at request time, so the file matches what was asked."""
-
-    __tablename__ = "commission_exports"
-    __table_args__ = (
-        CheckConstraint(
-            "status IN ('pending', 'ready', 'failed')", name="ck_commission_exports_status"
-        ),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        primary_key=True, server_default=text("gen_random_uuid()")
-    )
-    requested_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
-    from_date: Mapped[Date] = mapped_column(DateColumn)
-    to_date: Mapped[Date] = mapped_column(DateColumn)
-    staff_id: Mapped[uuid.UUID | None] = mapped_column()
-    status: Mapped[str] = mapped_column(String(16), server_default=text("'pending'"))
-    content: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+# `CommissionExport` (R29) moved to `core.models.ReportExport` (#86): the export mechanism
+# is not billing-specific, and `core/` is the only non-domain module. See
+# `docs/adr/0001-retention-expiry-and-purge-authority.md`'s export-lifetime amendment.

@@ -34,6 +34,7 @@ celery_app = Celery(
     include=[
         "billing.commission_report",
         "billing.documents",
+        "core.exports",
         "core.tasks",
         "customers.tasks",
         "forms.tasks",
@@ -61,6 +62,12 @@ celery_app.conf.beat_schedule = {
     "maintain-partitions": {
         "task": "core.tasks.maintain_partitions",
         "schedule": crontab(hour=3, minute=15),
+    },
+    # Nightly at 03:20 UTC (#86): delete `report_exports` rows past their 7-day expiry.
+    # Idempotent — an already-deleted row just isn't matched next time.
+    "cleanup-expired-exports": {
+        "task": "core.tasks.cleanup_expired_exports",
+        "schedule": crontab(hour=3, minute=20),
     },
     # Nightly at 03:30 UTC (late evening across North America): finish erasure requests
     # whose hold has passed, and shred the keys of every client whose hold has expired.

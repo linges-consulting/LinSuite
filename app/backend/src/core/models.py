@@ -409,3 +409,48 @@ class Document(Base):
     digest: Mapped[bytes] = mapped_column(LargeBinary)
     size_bytes: Mapped[int] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReportExport(Base):
+    """One queued CSV export of any report kind (#86, M5 spec #82) — generalises what was
+    `commission_exports` (R29) so `access_log` and `package_liability` (#87/#88) share the
+    same table, the same Celery task and the same 7-day lifetime instead of each growing its
+    own.
+
+    A domain registers a builder for its `kind` at import time (`core/exports.py`), which is
+    also what dispatches the shared Celery task and what an endpoint calls to insert a row
+    and its `report.export_requested` audit event together. Nothing here validates `kind`
+    against a fixed list: the acceptance criterion for adding one is "a builder plus its
+    registration," and a CHECK on `kind` would mean a migration on top of that for every new
+    kind — `core/exports.py::is_registered` is where an unrecognised kind is refused instead,
+    before any row is written.
+
+    `params` is that kind's own filter shape (a date range and staff id for `commission`; a
+    customer id and date range for `access_log`; whatever `package_liability` needs) —
+    opaque here, read only by the registered builder. `expires_at = created_at + 7 days`
+    (ADR-0001's export-lifetime amendment): a download past it is a 410, and the nightly
+    `core.tasks.cleanup_expired_exports` deletes the row. `linsuite_app` may DELETE this
+    table under the baseline (0001) default grant, unlike an immutable table — an export is
+    a working copy, never a record under retention.
+    """
+
+    __tablename__ = "report_exports"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'ready', 'failed')", name="ck_report_exports_status"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    kind: Mapped[str] = mapped_column(Text)
+    params: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    requested_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    status: Mapped[str] = mapped_column(String(16), server_default=text("'pending'"))
+    content: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now() + interval '7 days'")
+    )

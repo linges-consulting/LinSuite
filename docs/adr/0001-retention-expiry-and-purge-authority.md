@@ -64,6 +64,34 @@ Phase 9 (#9, migration 0031): `session_notes.customer_id` also references the ke
 
 **9. A restore brings shredded keys back.** Backups taken before a purge still contain the wrapped keys it destroyed. After any restore, run `customers.tasks.purge_expired` before the system is used again; it is idempotent, re-shreds every key whose hold has passed, and finishes every unheld erasure request (`docs/tech-stack.md` §10).
 
+## Amendment — 2026-09-29 (M5, #86): export lifetime
+
+The commission CSV export queue (R29) generalised into `report_exports`, the mechanism
+every report export (commission now; access-log and package-liability from #87/#88) uses:
+`kind` names which report, `params` is that report's own filter shape, and one Celery task
+dispatches on `kind` to a builder the owning domain registers at import time.
+
+**10. Every export expires seven days after it is requested** (`expires_at = created_at + 7
+days`). A download attempted after `expires_at` is refused with 410. This is a retention
+rule of its own, distinct from rules 2–3 above: an export is a working copy of a report, not
+the record itself, so its lifetime is fixed and short rather than computed from the client's
+hold — the underlying data's own retention is untouched by an export expiring or being
+deleted.
+
+**11. The application role deletes exports directly.** `report_exports` gets no special
+grant beyond the baseline (rule in migration 0001: `linsuite_app` holds SELECT, INSERT,
+UPDATE, DELETE on every table by default) and no purge-role involvement — expired rows are
+deleted by `linsuite_app` itself, nightly (`core.tasks.cleanup_expired_exports`), because a
+CSV sitting in this table is disposable in a way an immutable document or a ledger row is
+not.
+
+**12. An export naming a client is deleted when that client is erased.** An access-log or
+package-liability export filtered to a customer is not itself personal information held
+under a retention hold — it is a copy, and the same erasure request that suppresses the
+profile deletes that customer's exports in the same transaction. (The cascade itself belongs
+to #87/#88, which are what add a `kind` whose `params` names a customer; this ticket only
+records the rule the same way rule 10 was recorded before any export nightly job existed.)
+
 ## Consequences
 
 **Positive**

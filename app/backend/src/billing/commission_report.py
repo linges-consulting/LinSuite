@@ -18,16 +18,19 @@ settled fraction — `(received + prepaid package value) / grand total`, half-up
 its reversal on the same invoice split identically, so they still net to zero. A cancelled
 invoice bills nothing: its row status is `voided` and its money is what it still holds.
 
-**The CSV export is a Celery job (R29)**: `POST .../commission/exports` records the request and
-queues `build_commission_export` after commit; `GET .../exports/{id}` polls it and `GET
-.../exports/{id}/csv` downloads it once `ready`. Nothing is built inside the request.
+**The CSV export is a Celery job (R29), through the shared export mechanism (#86)**: `POST
+.../commission/exports` records the request and queues `core.exports.build_report_export`
+after commit; `GET .../exports/{id}` polls it and `GET .../exports/{id}/csv` downloads it
+once `ready` (410 past `expires_at`). Nothing is built inside the request. The export row
+itself is `core.models.ReportExport`, `kind="commission"` — `core/exports.py`'s docstring is
+the interface a new report kind registers against.
 """
 
 import csv
 import io
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Literal
 from zoneinfo import ZoneInfo
@@ -35,13 +38,11 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth.capabilities import Requires
 from auth.models import User
 from billing.models import (
-    CommissionExport,
     CommissionPosting,
     Invoice,
     InvoiceLine,
@@ -49,10 +50,10 @@ from billing.models import (
     RetailInvoiceLine,
 )
 from billing.payments import balances
-from core.celery_app import celery_app
-from core.config import get_settings
-from core.db import SessionDep, run_task
+from core.db import SessionDep
+from core.exports import build_report_export, is_expired, register_builder, request_export
 from core.forms import refuse
+from core.models import ReportExport
 from scheduling.clock import localize, today_in
 from scheduling.models import Staff
 from scheduling.time_off import business_zone
@@ -317,13 +318,13 @@ def _csv(rows: list[CommissionRowOut]) -> str:
     return buffer.getvalue()
 
 
-def _export_out(export: CommissionExport) -> CommissionExportOut:
+def _export_out(export: ReportExport) -> CommissionExportOut:
     return CommissionExportOut(
         id=str(export.id),
         status=export.status,
-        from_=export.from_date,
-        to=export.to_date,
-        staff_id=str(export.staff_id) if export.staff_id else None,
+        from_=date.fromisoformat(export.params["from_date"]),
+        to=date.fromisoformat(export.params["to_date"]),
+        staff_id=export.params["staff_id"],
         created_at=export.created_at,
         completed_at=export.completed_at,
         download_url=(
@@ -334,41 +335,23 @@ def _export_out(export: CommissionExport) -> CommissionExportOut:
     )
 
 
-@celery_app.task(name="billing.commission_report.build_commission_export")
-def build_commission_export(export_id: str) -> None:
-    """Queued once, after the request that created the export has committed."""
-    run_task(_build_export, uuid.UUID(export_id))
+async def _build_commission_csv(db: AsyncSession, params: dict) -> str:
+    """The registered builder for `kind="commission"` (`core/exports.py`'s one shared task
+    calls this): `params` is exactly what `request_commission_export` staged."""
+    zone = await business_zone(db)
+    from_ = date.fromisoformat(params["from_date"])
+    to = date.fromisoformat(params["to_date"])
+    staff_id = uuid.UUID(params["staff_id"]) if params["staff_id"] else None
+    report = await _report(db, from_, to, zone, staff_id)
+    return _csv(report.rows)
 
 
-async def _build_export(export_id: uuid.UUID) -> None:
-    # A fresh engine for this task's own event loop, application role only — the shape
-    # `billing/documents.py::_render_invoice_documents` uses.
-    engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
-    try:
-        async with AsyncSession(engine, expire_on_commit=False) as db:
-            export = await db.get(CommissionExport, export_id)
-            if export is None or export.status != "pending":
-                return
-            try:
-                zone = await business_zone(db)
-                report = await _report(db, export.from_date, export.to_date, zone, export.staff_id)
-                export.content, export.status = _csv(report.rows), "ready"
-            except Exception:
-                await db.rollback()
-                export = await db.get(CommissionExport, export_id)
-                assert export is not None
-                export.status = "failed"
-                raise
-            finally:
-                export.completed_at = datetime.now(UTC)
-                await db.commit()
-    finally:
-        await engine.dispose()
+register_builder("commission", _build_commission_csv)
 
 
-async def _load_export(db: SessionDep, export_id: uuid.UUID) -> CommissionExport:
-    export = await db.get(CommissionExport, export_id, populate_existing=True)
-    if export is None:
+async def _load_export(db: SessionDep, export_id: uuid.UUID) -> ReportExport:
+    export = await db.get(ReportExport, export_id, populate_existing=True)
+    if export is None or export.kind != "commission":
         raise HTTPException(status_code=404, detail="No such export.")
     return export
 
@@ -378,13 +361,15 @@ async def request_commission_export(
     payload: CommissionExportIn, actor: CommissionViewer, db: SessionDep
 ) -> CommissionExportOut:
     from_, to, _zone = await _window(db, payload.from_, payload.to)
-    export = CommissionExport(
-        requested_by=actor.id, from_date=from_, to_date=to, staff_id=payload.staff_id
-    )
-    db.add(export)
+    params = {
+        "from_date": from_.isoformat(),
+        "to_date": to.isoformat(),
+        "staff_id": str(payload.staff_id) if payload.staff_id else None,
+    }
+    export = await request_export(db, kind="commission", params=params, requested_by=actor.id)
     await db.commit()
     # After commit, never before — the worker must find the row it was handed.
-    build_commission_export.delay(str(export.id))
+    build_report_export.delay(str(export.id))
     return _export_out(await _load_export(db, export.id))
 
 
@@ -400,9 +385,11 @@ async def download_commission_export(
     export_id: uuid.UUID, _: CommissionViewer, db: SessionDep
 ) -> Response:
     export = await _load_export(db, export_id)
+    if is_expired(export):
+        raise HTTPException(status_code=410, detail="This export has expired.")
     if export.status != "ready" or export.content is None:
         raise HTTPException(status_code=409, detail=f"This export is {export.status}.")
-    filename = f"commission_{export.from_date.isoformat()}_{export.to_date.isoformat()}.csv"
+    filename = f"commission_{export.params['from_date']}_{export.params['to_date']}.csv"
     return Response(
         content=export.content,
         media_type="text/csv",
