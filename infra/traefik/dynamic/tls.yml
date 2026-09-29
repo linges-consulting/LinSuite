@@ -1,0 +1,16 @@
+# On-prem TLS default certificate (docs/runbook.md "On-prem TLS"). Traefik's file provider
+# (infra/compose.yaml, `--providers.file.directory=/etc/traefik/dynamic`) loads this on every
+# boot and on every change (`--providers.file.watch=true`).
+#
+# Harmless with nothing mounted at `certs/`: Traefik logs one provider error for this entry
+# ("no such file") and keeps serving `websecure` with its own generated self-signed
+# certificate — the stack still starts, exactly as it does on DigitalOcean, where TLS is
+# terminated by ACME/DNS-01 instead (see the runbook) and this file is never touched.
+#
+# Drop a real certificate and key into `certs/server.crt` and `certs/server.key` (repo root,
+# gitignored, bind-mounted read-only as /certs above) — an internal-CA leaf certificate, or
+# one the clinic's own CA issued — and Traefik picks it up without a restart.
+tls:
+  certificates:
+    - certFile: /certs/server.crt
+      keyFile: /certs/server.key

@@ -56,7 +56,13 @@ services:
       traefik.enable: "true"
       # Longer rule = higher default priority, so /api wins over the frontend's catch-all.
       traefik.http.routers.app.rule: Host(`${APP_HOST:-localhost}`) && PathPrefix(`/api`)
-      traefik.http.routers.app.entrypoints: web
+      # `websecure` (443) alongside `web` (80): on-prem TLS (docs/runbook.md "On-prem TLS")
+      # needs the same router reachable over HTTPS. No per-router `tls` label here — setting
+      # one turns a router TLS-only, which would also refuse it on `web` (plain HTTP, still
+      # how local dev and a not-yet-TLS on-prem box reach the app). TLS termination is instead
+      # a property of the `websecure` entrypoint itself (`--entrypoints.websecure.http.tls`,
+      # below), so one router serves both cleanly.
+      traefik.http.routers.app.entrypoints: web,websecure
       traefik.http.routers.app.middlewares: api-ratelimit@docker,api-bodylimit@docker
       traefik.http.services.app.loadbalancer.server.port: "8000"
 
@@ -97,7 +103,7 @@ services:
       # read, not a door onto a credential, so it falls to the general 300/minute bucket.
       traefik.http.routers.auth.rule: Host(`${APP_HOST:-localhost}`) && PathPrefix(`/api/auth`)
         && !Path(`/api/auth/me`)
-      traefik.http.routers.auth.entrypoints: web
+      traefik.http.routers.auth.entrypoints: web,websecure
       # Well above any rule length: the default priority *is* the rule's length, and a long
       # production FQDN in APP_HOST would push the `app` router past a smaller number here —
       # silently putting the credential endpoints back on the loose bucket.
@@ -109,7 +115,7 @@ services:
       # client opening a link a few times, not for walking a token space; `forms/public.py`
       # applies the same count per address in Redis wherever this edge is not in front.
       traefik.http.routers.public.rule: Host(`${APP_HOST:-localhost}`) && PathPrefix(`/api/public`)
-      traefik.http.routers.public.entrypoints: web
+      traefik.http.routers.public.entrypoints: web,websecure
       traefik.http.routers.public.priority: "1000"
       traefik.http.routers.public.service: app
       traefik.http.routers.public.middlewares: public-ratelimit@docker,api-bodylimit@docker
@@ -158,7 +164,7 @@ services:
     labels:
       traefik.enable: "true"
       traefik.http.routers.frontend.rule: Host(`${APP_HOST:-localhost}`)
-      traefik.http.routers.frontend.entrypoints: web
+      traefik.http.routers.frontend.entrypoints: web,websecure
       traefik.http.services.frontend.loadbalancer.server.port: "5173"
 
   traefik:
@@ -168,10 +174,29 @@ services:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --entrypoints.web.address=:80
+      # On-prem TLS (docs/runbook.md "On-prem TLS"). `websecure` always terminates TLS
+      # (`http.tls=true` at the entrypoint, not per-router — see the `app` router's label
+      # above), using whatever certificate the file provider supplies
+      # (infra/traefik/dynamic/tls.yml -> /certs/server.crt + /certs/server.key) or, with
+      # `certs/` empty — DigitalOcean's normal state, and any on-prem box before its TLS step
+      # — Traefik's own generated self-signed default. `web` (80) keeps working unchanged
+      # either way, which is what "the stack still starts with no certificate mounted" means
+      # in practice: local dev and a fresh on-prem box are never forced onto HTTPS before an
+      # operator has a certificate to serve.
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.tls=true
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
     ports:
       - "${TRAEFIK_HTTP_PORT:-80}:80"
+      - "${TRAEFIK_HTTPS_PORT:-443}:443"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      # Operator-supplied TLS material (docs/runbook.md). Empty/absent on DigitalOcean and on
+      # any on-prem box that has not yet run the TLS steps — Compose creates this directory on
+      # the host if it does not already exist, and an empty mount changes nothing at boot.
+      - ../certs:/certs:ro
     depends_on:
       - app
       - frontend
