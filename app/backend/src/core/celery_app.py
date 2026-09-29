@@ -36,6 +36,7 @@ celery_app = Celery(
         "billing.documents",
         "core.exports",
         "core.tasks",
+        "customers.access_report",
         "customers.tasks",
         "forms.tasks",
         "notifications.tasks",
