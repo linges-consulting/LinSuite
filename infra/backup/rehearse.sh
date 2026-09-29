@@ -43,6 +43,10 @@ fail() {
 
 cleanup() {
     status=$?
+    # The backup container writes the repo and the dump into the bind mounts as root. On a
+    # Linux host (CI) the invoking user cannot delete root-owned files, so empty the mounts
+    # from inside the container first; `rm` then fails only on the mount points themselves.
+    docker exec "$BACKUP_CONTAINER" rm -rf /restic-repo /restore >/dev/null 2>&1 || true
     docker rm -f "$BACKUP_CONTAINER" >/dev/null 2>&1 || true
     docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
     docker network rm "$NETWORK" >/dev/null 2>&1 || true
