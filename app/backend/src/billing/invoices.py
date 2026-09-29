@@ -80,6 +80,7 @@ from core.documents import fetch_document
 from core.models import Document
 from customers.models import Customer
 from notifications.providers import email_ready
+from scheduling.models import Service, Staff
 
 router = APIRouter(tags=["billing"])
 
@@ -117,7 +118,11 @@ class InvoiceLineOut(BaseModel):
     id: str
     appointment_id: str
     service_id: str
+    # Joined in for the invoice view (#102), the same "id plus a name to render" shape
+    # `bill_review.py::Ref` already gives the draft screen — never PHI, so no extra audit row.
+    service_name: str
     staff_id: str
+    staff_name: str
     price_cents: int
     discounted_cents: int
     pretax_cents: int
@@ -142,6 +147,9 @@ class InvoiceOut(BaseModel):
     service_bill_id: str | None
     package_purchase_id: str | None
     customer_id: str
+    # Joined in for the invoice view (#102) — never PHI (`core/access_log.py::PHI_FIELDS`),
+    # the same field `InvoiceSummaryOut` already carries for the Invoices list.
+    customer_name: str
     status: str
     computed_subtotal_cents: int
     computed_discount_total_cents: int
@@ -209,12 +217,18 @@ class InvoiceListOut(BaseModel):
     timezone: str
 
 
-def _line_out(line: InvoiceLine) -> InvoiceLineOut:
+def _line_out(
+    line: InvoiceLine, services: dict[uuid.UUID, Service], staff: dict[uuid.UUID, Staff]
+) -> InvoiceLineOut:
+    service = services.get(line.service_id)
+    member = staff.get(line.staff_id)
     return InvoiceLineOut(
         id=str(line.id),
         appointment_id=str(line.appointment_id),
         service_id=str(line.service_id),
+        service_name=service.name if service is not None else "—",
         staff_id=str(line.staff_id),
+        staff_name=member.display_name if member is not None else "—",
         price_cents=line.price_cents,
         discounted_cents=line.discounted_cents,
         pretax_cents=line.pretax_cents,
@@ -248,6 +262,19 @@ def _str_or_none(value: uuid.UUID | None) -> str | None:
 
 
 async def invoice_out(db: SessionDep, invoice: Invoice) -> InvoiceOut:
+    customer = await db.get(Customer, invoice.customer_id)
+    service_ids = {line.service_id for line in invoice.lines}
+    staff_ids = {line.staff_id for line in invoice.lines}
+    services = (
+        {s.id: s for s in await db.scalars(select(Service).where(Service.id.in_(service_ids)))}
+        if service_ids
+        else {}
+    )
+    staff = (
+        {s.id: s for s in await db.scalars(select(Staff).where(Staff.id.in_(staff_ids)))}
+        if staff_ids
+        else {}
+    )
     return InvoiceOut(
         id=str(invoice.id),
         business_id=invoice.business_id,
@@ -257,6 +284,9 @@ async def invoice_out(db: SessionDep, invoice: Invoice) -> InvoiceOut:
             str(invoice.package_purchase_id) if invoice.package_purchase_id else None
         ),
         customer_id=str(invoice.customer_id),
+        customer_name=(
+            f"{customer.first_name} {customer.last_name}" if customer is not None else "—"
+        ),
         status=invoice.status,
         computed_subtotal_cents=invoice.computed_subtotal_cents,
         computed_discount_total_cents=invoice.computed_discount_total_cents,
@@ -277,7 +307,7 @@ async def invoice_out(db: SessionDep, invoice: Invoice) -> InvoiceOut:
         ),
         cancelled_at=invoice.cancelled_at,
         cancel_reason=invoice.cancel_reason,
-        lines=[_line_out(line) for line in invoice.lines],
+        lines=[_line_out(line, services, staff) for line in invoice.lines],
         **asdict(await balance(db, invoice)),
     )
 

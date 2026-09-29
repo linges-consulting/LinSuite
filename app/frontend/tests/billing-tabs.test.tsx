@@ -6,9 +6,10 @@ import { renderApp, stubApi } from './harness'
 /**
  * Billing's tab shell (#97/#95): `To review` is the unchanged draft-bill list
  * (`routes/bills.tsx`'s own `BillsPage`, covered by `tests/bills.test.tsx`); `Invoices` is
- * now the real tab (#99, covered in depth by `tests/invoices-tab.test.tsx`) and the invoice
- * view stays an empty slot for #102. This file only covers the shell — that both tabs exist,
- * that switching between them works, and that the invoice-view route renders.
+ * the real tab (#99, covered in depth by `tests/invoices-tab.test.tsx`), and the invoice view
+ * (#102) is covered in depth by `tests/invoice-view.test.tsx`. This file only covers the
+ * shell — that both tabs exist, that switching between them works, and that the
+ * `bills/invoices/:id` route reaches the invoice view rather than the bill review route.
  */
 
 afterEach(() => vi.unstubAllGlobals())
@@ -49,6 +50,9 @@ function billingStub() {
           timezone: 'America/Toronto',
         })
       }
+      if (parsed.pathname === '/api/invoices/inv1') {
+        return Response.json({ detail: 'No such invoice.' }, { status: 404 })
+      }
       return undefined
     },
   })
@@ -74,9 +78,12 @@ test('switching to Invoices shows its empty state', async () => {
   expect(await screen.findByText('No invoices in this range')).toBeInTheDocument()
 })
 
-test('the invoice view route renders its empty state', async () => {
+test('the invoice view route reaches the invoice view, not the bill review route', async () => {
   billingStub()
   renderApp('/bills/invoices/inv1')
 
-  expect(await screen.findByText('The invoice view is not built yet')).toBeInTheDocument()
+  // A bare id under `bills/:id` would try to load a *bill* named "invoices" and 404 there
+  // instead — reaching this message (from `GET /api/invoices/inv1`) proves the more specific
+  // `bills/invoices/:id` route won, not `bills/:id`.
+  expect(await screen.findByRole('alert')).toHaveTextContent('No such invoice.')
 })

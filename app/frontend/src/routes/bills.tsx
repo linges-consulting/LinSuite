@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Receipt, ShieldCheck } from 'lucide-react'
 import { useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router'
+import { Link, useNavigate, useParams } from 'react-router'
 import { EmptyState } from '@/components/empty-state'
 import { Field, Form, FormError } from '@/components/form'
 import { Badge } from '@/components/ui/badge'
@@ -35,6 +35,7 @@ import {
   fetchDraftBills,
   fetchInlineAdminStatus,
   fetchOverrideRequests,
+  issueBill,
   releaseInlineAdmin,
   requestBillOverride,
 } from '@/lib/api'
@@ -110,6 +111,7 @@ export function BillsPage() {
  */
 export function BillReviewPage() {
   const { id = '' } = useParams()
+  const navigate = useNavigate()
   const queryClient = useQueryClient()
   const bill = useQuery({
     queryKey: [...BILL, id],
@@ -122,6 +124,16 @@ export function BillReviewPage() {
     onSuccess: (updated) => {
       queryClient.setQueryData([...BILL, id], updated)
       queryClient.invalidateQueries({ queryKey: DRAFT_BILLS })
+    },
+  })
+
+  // #102: issuing turns this reviewed draft into a real invoice and lands there — the one
+  // place a bill stops being reviewed and starts being billed.
+  const issue = useMutation({
+    mutationFn: () => issueBill(id),
+    onSuccess: (invoice) => {
+      queryClient.invalidateQueries({ queryKey: DRAFT_BILLS })
+      navigate(`/bills/invoices/${invoice.id}`)
     },
   })
 
@@ -252,6 +264,19 @@ export function BillReviewPage() {
 
       {(data.bill_override_requests_enabled || data.inline_admin_bill_edit_enabled) && (
         <BillAuthorityCard billId={id} bill={data} />
+      )}
+
+      {data.status === 'draft' && (
+        <div className="flex flex-col items-end gap-2">
+          {issue.isError && (
+            <FormError>
+              {issue.error instanceof Error ? issue.error.message : 'Could not issue this invoice'}
+            </FormError>
+          )}
+          <Button onClick={() => issue.mutate()} disabled={issue.isPending}>
+            Issue invoice
+          </Button>
+        </div>
       )}
     </div>
   )
