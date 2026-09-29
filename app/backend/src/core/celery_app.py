@@ -34,6 +34,7 @@ celery_app = Celery(
     include=[
         "billing.commission_report",
         "billing.documents",
+        "billing.package_liability",
         "core.exports",
         "core.tasks",
         "customers.tasks",

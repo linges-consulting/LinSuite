@@ -15,7 +15,13 @@ anything calls `build_report_export`.
 
 and an endpoint that calls `request_export(db, kind="my_kind", params=..., requested_by=...)`
 then, after `db.commit()`, `build_report_export.delay(str(export.id))` — see
-`billing/commission_report.py` for the shape a request/poll/download trio takes around it.
+`billing/commission_report.py` for the shape a request/poll/download trio takes around it,
+and `billing/package_liability.py` (#88) for a kind that filters by, and audits reads of, a
+customer.
+
+A kind whose `params` names a customer stores that id under `params["customer_id"]`
+(`delete_customer_exports` below matches on exactly that key) — ADR-0001 rule 14: the export
+is deleted the moment that customer's erasure is requested, in the same transaction.
 """
 
 import uuid
@@ -23,6 +29,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -75,6 +82,18 @@ async def request_export(
         metadata={"kind": kind, "params": params},
     )
     return export
+
+
+async def delete_customer_exports(db: AsyncSession, customer_id: uuid.UUID) -> None:
+    """ADR-0001 rule 14: an export whose `params` names a customer is deleted the moment
+    that customer's erasure is requested — a copy, not a record under retention. Every kind
+    that filters by one client stores that id under the same `params["customer_id"]` key (a
+    `package_liability` export, #88; an `access_log` export, #87) so this one helper matches
+    both without knowing either kind. Call inside the erasure request's own transaction —
+    the caller's `commit` is what makes the delete durable, same as everything else there."""
+    await db.execute(
+        delete(ReportExport).where(ReportExport.params["customer_id"].astext == str(customer_id))
+    )
 
 
 @celery_app.task(name="core.exports.build_report_export")
