@@ -1,7 +1,29 @@
+import { useMutation } from '@tanstack/react-query'
 import { Ban } from 'lucide-react'
+import { useState } from 'react'
+import { useNavigate } from 'react-router'
+import { Field, Form, FormError } from '@/components/form'
+import type { ReplacesInvoiceState } from '@/components/replaces-invoice-banner'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Textarea } from '@/components/ui/textarea'
+import {
+  cancelInvoice,
+  cancelRetailInvoice,
+  type CancelledInvoiceOut,
+  type CancelledRetailInvoiceOut,
+  type Invoice,
+  type RetailInvoice,
+} from '@/lib/api'
 import { useCan } from '@/lib/capability-gate'
-import type { Invoice, RetailInvoice } from '@/lib/api'
 
 export type InvoiceCancelPanelProps = {
   invoice: Invoice | RetailInvoice
@@ -23,8 +45,9 @@ export type InvoiceCancelPanelProps = {
  * This file is that ticket's own slot, kept out of `invoice-view.tsx` so #107 lands here
  * without touching the invoice view, the lineage cards, or any sibling action slot.
  */
-export function InvoiceCancelPanel({ invoice, kind: _kind, onRefetch: _onRefetch }: InvoiceCancelPanelProps) {
+export function InvoiceCancelPanel({ invoice, kind, onRefetch }: InvoiceCancelPanelProps) {
   const canCancel = useCan('billing.manage')
+  const [open, setOpen] = useState(false)
   if (!canCancel || invoice.status === 'cancelled') return null
 
   return (
@@ -36,8 +59,95 @@ export function InvoiceCancelPanel({ invoice, kind: _kind, onRefetch: _onRefetch
         </CardTitle>
       </CardHeader>
       <CardContent>
-        <p className="text-sm text-muted-foreground">Cancel and replace is not built yet.</p>
+        <p className="mb-3 text-sm text-muted-foreground">
+          Voids this invoice and reopens it as a draft to fix and reissue. The original is kept
+          on record, never deleted.
+        </p>
+        <Button variant="outline" onClick={() => setOpen(true)}>
+          Cancel
+        </Button>
       </CardContent>
+      {open && (
+        <CancelDialog
+          invoice={invoice}
+          kind={kind}
+          onClose={() => setOpen(false)}
+          onCancelled={onRefetch}
+        />
+      )}
     </Card>
+  )
+}
+
+function CancelDialog({
+  invoice,
+  kind,
+  onClose,
+  onCancelled,
+}: {
+  invoice: Invoice | RetailInvoice
+  kind: 'service' | 'retail'
+  onClose: () => void
+  onCancelled: () => void
+}) {
+  const navigate = useNavigate()
+  const [reason, setReason] = useState('')
+  const incomplete = reason.trim() === ''
+
+  const cancel = useMutation<CancelledInvoiceOut | CancelledRetailInvoiceOut, Error>({
+    mutationFn: (): Promise<CancelledInvoiceOut | CancelledRetailInvoiceOut> =>
+      kind === 'retail'
+        ? cancelRetailInvoice(invoice.id, reason.trim())
+        : cancelInvoice(invoice.id, reason.trim()),
+    onSuccess: (result) => {
+      onCancelled()
+      const replacesInvoice: ReplacesInvoiceState = {
+        number: invoice.invoice_number,
+        reason: reason.trim(),
+      }
+      if ('replacement_bill_id' in result) {
+        navigate(`/bills/${result.replacement_bill_id}`, { state: { replacesInvoice } })
+      } else {
+        navigate(`/sell?sale=${result.replacement_sale_id}`, { state: { replacesInvoice } })
+      }
+    },
+  })
+
+  return (
+    <Dialog open onOpenChange={(next) => !next && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Cancel &amp; replace invoice #{invoice.invoice_number}</DialogTitle>
+          <DialogDescription>
+            The original is kept on record, marked cancelled. A new draft opens with its lines
+            carried over so you can fix it and reissue.
+          </DialogDescription>
+        </DialogHeader>
+        <Form onSubmit={() => !incomplete && cancel.mutate()}>
+          <Field label="Reason" htmlFor="cancel-reason">
+            <Textarea
+              id="cancel-reason"
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              required
+              autoFocus
+            />
+          </Field>
+          {cancel.isError && (
+            <FormError>
+              {cancel.error instanceof Error ? cancel.error.message : 'Could not cancel this invoice'}
+            </FormError>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="ghost" onClick={onClose}>
+              Keep invoice
+            </Button>
+            <Button type="submit" variant="destructive" disabled={cancel.isPending || incomplete}>
+              {cancel.isPending ? 'Cancelling…' : 'Cancel & replace'}
+            </Button>
+          </DialogFooter>
+        </Form>
+      </DialogContent>
+    </Dialog>
   )
 }

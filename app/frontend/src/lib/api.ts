@@ -2771,6 +2771,10 @@ export type Bill = {
   override_reason: string | null
   bill_override_requests_enabled: boolean
   inline_admin_bill_edit_enabled: boolean
+  /** #107: set while this draft is a cancel & replace reopening of a still-unreissued
+   *  cancelled invoice — `fetchInvoice(replaces_invoice_id)` gets its number and reason for
+   *  the "Replaces #N" banner. */
+  replaces_invoice_id: string | null
 }
 
 export type BillSummary = {
@@ -3091,6 +3095,19 @@ export async function issueBill(billId: string): Promise<Invoice> {
   return res.json()
 }
 
+/** `POST /api/invoices/{id}/cancel` (`billing/invoices.py::CancelledOut`) — #107's cancel &
+ *  replace. `replacement_bill_id` is the original's own bill, reopened as a draft with its
+ *  lines, discounts and (if still valid) override carried over; `bill.replaces_invoice_id`
+ *  (once fetched) is how that draft finds its way back to `invoice.invoice_number`/
+ *  `cancel_reason` for the "Replaces #N" banner. */
+export type CancelledInvoiceOut = { invoice: Invoice; replacement_bill_id: string }
+
+export async function cancelInvoice(invoiceId: string, reason: string): Promise<CancelledInvoiceOut> {
+  const res = await send('POST', `/api/invoices/${encodeURIComponent(invoiceId)}/cancel`, { reason })
+  if (!res.ok) throw await failure(res, 'Could not cancel this invoice')
+  return res.json()
+}
+
 export type RetailInvoiceLine = {
   id: string
   variant_id: string
@@ -3138,6 +3155,23 @@ export type RetailInvoice = InvoiceListBalance & {
 export async function fetchRetailInvoice(id: string): Promise<RetailInvoice> {
   const res = await fetch(`/api/retail-invoices/${encodeURIComponent(id)}`, { cache: 'no-store' })
   if (!res.ok) throw await failure(res, 'Could not load this retail invoice')
+  return res.json()
+}
+
+/** `POST /api/retail-invoices/{id}/cancel` (`billing/retail_sales.py::CancelledRetailOut`) —
+ *  #107's retail cancel & replace. `replacement_sale_id` is a fresh draft sale carrying the
+ *  original's customer and unreturned lines; that draft's own `RetailSale.
+ *  replaces_retail_invoice_id` is how Sell finds its way back to this invoice's number/reason. */
+export type CancelledRetailInvoiceOut = { invoice: RetailInvoice; replacement_sale_id: string }
+
+export async function cancelRetailInvoice(
+  invoiceId: string,
+  reason: string,
+): Promise<CancelledRetailInvoiceOut> {
+  const res = await send('POST', `/api/retail-invoices/${encodeURIComponent(invoiceId)}/cancel`, {
+    reason,
+  })
+  if (!res.ok) throw await failure(res, 'Could not cancel this retail invoice')
   return res.json()
 }
 

@@ -28,8 +28,8 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import delete, select
-from sqlalchemy.orm import selectinload
+from sqlalchemy import delete, exists, select
+from sqlalchemy.orm import aliased, selectinload
 
 from auth.capabilities import Requires
 from auth.models import User
@@ -37,6 +37,7 @@ from billing.commission import CommissionDiscountInput
 from billing.discount_resolver import DiscountConflict, DiscountEligibility, is_eligible
 from billing.models import (
     Discount,
+    Invoice,
     ServiceBill,
     ServiceBillDiscount,
     ServiceBillLine,
@@ -177,6 +178,11 @@ class BillOut(BaseModel):
     # decide whether to offer either override path without a second request.
     bill_override_requests_enabled: bool
     inline_admin_bill_edit_enabled: bool
+    # #107: set while this draft is a cancel & replace reopening (`invoices.py::cancel_invoice`)
+    # of a still-unreissued cancelled invoice — the "Replaces #N" banner's own id to look the
+    # original up by (`GET /invoices/{id}` for its number and `cancel_reason`), the same
+    # not-yet-replaced lookup `issue_invoice` itself already does at issue time.
+    replaces_invoice_id: str | None
 
 
 class BillSummaryOut(BaseModel):
@@ -398,6 +404,21 @@ async def compute_bill(
     ]
     overridden = priced_bill.overridden
 
+    # #107: the same "not-yet-replaced cancelled invoice" lookup `invoices.py::issue_invoice`
+    # runs at issue time — here, live on every read, so a draft reopened by a cancel shows its
+    # "Replaces #N" banner before it is ever reissued. `None` for an ordinary draft that was
+    # never issued at all.
+    replaces_invoice_id: uuid.UUID | None = None
+    if bill.status == "draft":
+        successor = aliased(Invoice)
+        replaces_invoice_id = await db.scalar(
+            select(Invoice.id).where(
+                Invoice.service_bill_id == bill.id,
+                Invoice.status == "cancelled",
+                ~exists().where(successor.replaces_invoice_id == Invoice.id),
+            )
+        )
+
     return BillOut(
         id=str(bill.id),
         status=bill.status,
@@ -435,6 +456,7 @@ async def compute_bill(
         ),
         bill_override_requests_enabled=business.enable_bill_override_requests,
         inline_admin_bill_edit_enabled=business.enable_inline_admin_bill_edit,
+        replaces_invoice_id=str(replaces_invoice_id) if replaces_invoice_id else None,
     )
 
 
