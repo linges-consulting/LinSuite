@@ -215,6 +215,16 @@ function stub(opts: { capabilities?: string[]; mode?: 'staff' | 'admin'; invoice
     signedIn: true,
     respond: (url: string, body: any) => {
       if (url === '/api/auth/me') return Response.json(ACCOUNT(capabilities, mode))
+      // A package invoice's view reads the frozen purchase in place of lines (#109).
+      if (url.startsWith('/api/packages/purchases/')) {
+        return Response.json({
+          id: 'pp1', package_definition_id: 'pd1', customer_id: 'c1', name: 'Massage 5-pack',
+          price_cents: 50000, expires_after_days: null, expires_at: null,
+          purchased_at: '2026-09-01T00:00:00Z', credits_activated: true, activated_at: null,
+          credits_voided_at: null, credits: [],
+        })
+      }
+      if (url.startsWith('/api/catalog/services')) return Response.json({ services: [] })
       return server.respond(url, body)
     },
   })
@@ -360,6 +370,19 @@ test('refund and balance exception render for billing.manage in Admin Mode', asy
   await user.click(within(dialog).getByRole('button', { name: 'Record refund' }))
 
   await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+})
+
+test("a package's invoice offers no generic Refund — packages refund from the client's Packages tab", async () => {
+  stub({
+    capabilities: ['billing.view', 'billing.manage'],
+    mode: 'admin',
+    invoice: serviceInvoice({ package_purchase_id: 'pp1', lines: [] }),
+  })
+  renderApp('/bills/invoices/inv1')
+
+  await screen.findByRole('heading', { name: 'Invoice #42' })
+  expect(await screen.findByRole('button', { name: 'Balance exception' })).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Refund' })).not.toBeInTheDocument()
 })
 
 // --- the reusable dialog on its own (Sell/package purchase's own use, #106/#108) ---------------

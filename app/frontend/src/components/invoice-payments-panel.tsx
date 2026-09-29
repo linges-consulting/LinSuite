@@ -76,6 +76,7 @@ export function InvoicePaymentsPanel({ invoice, kind, onRefetch }: InvoicePaymen
   const [refunding, setRefunding] = useState(false)
   const [authorizingException, setAuthorizingException] = useState(false)
   const canManage = useCan('billing.manage')
+  const isPackageInvoice = 'package_purchase_id' in invoice && invoice.package_purchase_id !== null
 
   const paymentsQuery = useQuery({
     queryKey: [...INVOICE_PAYMENTS, kind, invoice.id],
@@ -142,9 +143,13 @@ export function InvoicePaymentsPanel({ invoice, kind, onRefetch }: InvoicePaymen
             </Button>
             {canManage && (
               <>
-                <Button size="sm" variant="outline" onClick={() => setRefunding(true)}>
-                  Refund
-                </Button>
+                {/* A package's money comes back through its own refund (client Packages tab),
+                    which voids the credits too; this route refuses package invoices. */}
+                {!isPackageInvoice && (
+                  <Button size="sm" variant="outline" onClick={() => setRefunding(true)}>
+                    Refund
+                  </Button>
+                )}
                 <Button size="sm" variant="outline" onClick={() => setAuthorizingException(true)}>
                   Balance exception
                 </Button>
