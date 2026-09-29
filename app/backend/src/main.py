@@ -42,7 +42,7 @@ from core.errors import (
     is_retryable,
 )
 from core.logging import configure_logging
-from core.partitions import ensure_on_boot
+from core.partitions import ensure_on_boot, partition_health
 from core.redis import get_redis
 from customers.access_report import router as access_report_router
 from customers.erasure import router as erasure_router
@@ -241,7 +241,11 @@ async def health(session: SessionDep) -> JSONResponse:
         # Any DB failure is "degraded" to the caller; the cause goes to the log, never the body.
         log.exception("health: database unreachable")
         return JSONResponse({"status": "degraded", "database": "unreachable"}, status_code=503)
-    return JSONResponse({"status": "ok", "database": "ok"})
+    # Next year's access-log partition: a lenient signal (#85). A missing one never changes
+    # the status code — a stopped scheduler is not a down app — only boot (`ensure_on_boot`)
+    # is strict, and only about the current year.
+    partitions = await partition_health(session)
+    return JSONResponse({"status": "ok", "database": "ok", "partitions": partitions})
 
 
 api.include_router(auth_router)

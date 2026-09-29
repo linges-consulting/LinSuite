@@ -121,6 +121,14 @@ class Settings(BaseSettings):
     # completes. In compose this path is a volume, so it survives a container replacement.
     setup_token_file: str = "/var/lib/linsuite/setup-token"
 
+    # --- Dead-man monitoring (tech-stack §3, `core/healthcheck.py`, #85) ------------------
+    # A healthcheck-ping URL (e.g. Healthchecks.io/Cronitor) the nightly `maintain_partitions`
+    # and `purge_expired` tasks GET after they succeed. Optional: unset means neither task
+    # makes a request, and a deployment without external monitoring still runs fine. A failed
+    # ping is logged and never fails the task — the maintenance job's own result is what
+    # matters, not whether the monitor heard about it.
+    healthcheck_url_maintenance: str | None = None
+
     @field_validator("database_url_purge", mode="before")
     @classmethod
     def _blank_purge_dsn_is_absent(cls, value: object) -> object:
