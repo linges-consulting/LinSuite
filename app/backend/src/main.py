@@ -59,6 +59,7 @@ from inventory.stock_routes import router as stock_router
 from notes.routes import router as notes_router
 from scheduling.appointments import router as appointments_router
 from scheduling.closures import router as closures_router
+from scheduling.cti import router as cti_router
 from scheduling.hours import router as hours_router
 from scheduling.public import router as public_booking_router
 from scheduling.queue import router as queue_router
@@ -276,6 +277,7 @@ api.include_router(appointments_router)
 api.include_router(queue_router)
 api.include_router(customers_router)
 api.include_router(erasure_router)
+api.include_router(cti_router)
 # Who opened a client's record: administration, not the chart, so under `/admin` and unlogged.
 api.include_router(access_report_router)
 api.include_router(roster_router)

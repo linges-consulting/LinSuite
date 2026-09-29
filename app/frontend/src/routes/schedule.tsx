@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { CalendarDays, ChevronLeft, ChevronRight, Plus } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router'
 import { toast } from 'sonner'
 import { CancelConfirm } from '@/components/calendar/cancel-confirm'
 import { Grid } from '@/components/calendar/grid'
@@ -103,10 +104,24 @@ export function SchedulePage() {
   const { user } = useSession()
   const canManage = user?.capabilities?.includes('schedule.manage') ?? false
   const queryClient = useQueryClient()
+  const location = useLocation()
+  const navigate = useNavigate()
   const [chosen, setChosen] = useState<string | null>(null)
   const [view, setView] = useState<'day' | 'week'>('day')
   const [staffFilter, setStaffFilter] = useState<string>(EVERYONE)
   const [booking, setBooking] = useState<Prefill | 'blank' | null>(null)
+  // The phone lookup's and the screen-pop panel's quick-book shortcut (Phase 14, #16): a
+  // customer handed over via router state, not a query param — it is already the full
+  // `Customer` shape the lookup returned, so opening the dialog costs no second fetch.
+  // Consumed once: cleared from history immediately, so back/reload never reopens it.
+  const [quickBookCustomer, setQuickBookCustomer] = useState<Customer | null>(null)
+  useEffect(() => {
+    const state = location.state as { quickBookCustomer?: Customer } | null
+    if (!state?.quickBookCustomer || !canManage) return
+    setQuickBookCustomer(state.quickBookCustomer)
+    setBooking('blank')
+    navigate(location.pathname, { replace: true, state: null })
+  }, [location.state, canManage, location.pathname, navigate])
   const [override, setOverride] = useState<PendingMove | null>(null)
   const [showCancelled, setShowCancelled] = useState(false)
   const [cancelling, setCancelling] = useState<CancelTarget | null>(null)
@@ -356,7 +371,11 @@ export function SchedulePage() {
           schedule={data}
           roster={roster.data ?? []}
           ownStaffId={ownStaffId}
-          onClose={() => setBooking(null)}
+          initialCustomer={quickBookCustomer}
+          onClose={() => {
+            setBooking(null)
+            setQuickBookCustomer(null)
+          }}
         />
       )}
 
@@ -521,6 +540,10 @@ function BookingDialog(props: {
   schedule: Schedule
   roster: RosterEntry[]
   ownStaffId: string | null
+  /** A customer handed in already resolved — the phone lookup's or the screen-pop panel's
+   *  quick-book shortcut (Phase 14, #16). Seeds the picker exactly as if it had just been
+   *  chosen from the search below, so there is nothing left to do but pick a time. */
+  initialCustomer?: Customer | null
   onClose: () => void
 }) {
   const queryClient = useQueryClient()
@@ -532,7 +555,7 @@ function BookingDialog(props: {
   const [wanted, setWanted] = useState(props.prefill?.startsAt ?? null)
   const [existing, setExisting] = useState(true)
   const [search, setSearch] = useState('')
-  const [customer, setCustomer] = useState<Customer | null>(null)
+  const [customer, setCustomer] = useState<Customer | null>(props.initialCustomer ?? null)
   const [draft, setDraft] = useState({ first_name: '', last_name: '', email: '', phone: '' })
   const [notes, setNotes] = useState('')
   const [override, setOverride] = useState<OverrideRule[] | null>(null)

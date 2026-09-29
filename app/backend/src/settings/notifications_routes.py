@@ -246,6 +246,12 @@ class NotificationSettingsOut(BaseModel):
     # --- low-stock alert opt-in (#62) -----------------------------------------------------
     low_stock_alert_email_enabled: bool
 
+    # --- CTI demo mode (Phase 14, #16) -----------------------------------------------------
+    # Off by default, `enable_walk_in_queue`'s exact shape: with it off, the screen-pop
+    # panel's "simulate incoming call" control is unreachable anywhere (`scheduling/cti.py`'s
+    # own 404 is the real enforcement; this is only the toggle).
+    demo_mode: bool
+
 
 class NotificationSettingsChange(BaseModel):
     """A field left out (or sent `null`) is left alone — the Security panel's own rule, applied
@@ -284,6 +290,9 @@ class NotificationSettingsChange(BaseModel):
 
     # --- low-stock alert opt-in (#62) -----------------------------------------------------
     low_stock_alert_email_enabled: bool | None = None
+
+    # --- CTI demo mode (Phase 14, #16) -----------------------------------------------------
+    demo_mode: bool | None = None
 
 
 class TestEmailRequest(BaseModel):
@@ -360,6 +369,7 @@ def _settings_out(
         enable_bill_override_requests=business.enable_bill_override_requests,
         enable_inline_admin_bill_edit=business.enable_inline_admin_bill_edit,
         low_stock_alert_email_enabled=business.low_stock_alert_email_enabled,
+        demo_mode=business.demo_mode,
     )
 
 
@@ -422,6 +432,8 @@ async def update_notification_settings(
         candidates["enable_inline_admin_bill_edit"] = payload.enable_inline_admin_bill_edit
     if payload.low_stock_alert_email_enabled is not None:
         candidates["low_stock_alert_email_enabled"] = payload.low_stock_alert_email_enabled
+    if payload.demo_mode is not None:
+        candidates["demo_mode"] = payload.demo_mode
 
     changed = [field for field, value in candidates.items() if getattr(business, field) != value]
     for field in changed:

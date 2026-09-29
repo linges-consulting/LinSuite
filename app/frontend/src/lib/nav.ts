@@ -2,6 +2,7 @@ import {
   CalendarDays,
   ListOrdered,
   Package,
+  Phone,
   Receipt,
   Settings,
   Users,
@@ -43,6 +44,9 @@ const ADMINISTRATIVE = ['admin', 'roles.manage', 'users.manage', 'catalog.manage
 export const NAV: NavItem[] = [
   { to: '/schedule', label: 'Schedule', icon: CalendarDays },
   { to: '/clients', label: 'Clients', icon: Users },
+  // Phase 14 (#16): a real feature on its own — no telephony required, "simply search" by
+  // phone number instead of name. Same capability the Clients search already sits behind.
+  { to: '/phone-lookup', label: 'Phone Lookup', icon: Phone, anyOf: ['customers.view'] },
   {
     to: '/queue',
     label: 'Queue',

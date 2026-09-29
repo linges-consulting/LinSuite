@@ -57,6 +57,9 @@ type Draft = {
   /** Walk-in queue (Phase 7 Task 1, #12) — "take a number", not the always-on "fit me in"
    *  search shortcut (CLAUDE.md). Its own small section below, same form. */
   enable_walk_in_queue: boolean
+  /** CTI demo mode (Phase 14, #16) — off by default. Its own small section below, same
+   *  shape `enable_walk_in_queue` already established. */
+  demo_mode: boolean
 }
 
 function draftFrom(data: NotificationSettings): Draft {
@@ -80,6 +83,7 @@ function draftFrom(data: NotificationSettings): Draft {
     booking_daily_cap_per_ip: String(data.booking_daily_cap_per_ip),
     booking_daily_cap_per_email: String(data.booking_daily_cap_per_email),
     enable_walk_in_queue: data.enable_walk_in_queue,
+    demo_mode: data.demo_mode,
   }
 }
 
@@ -107,6 +111,7 @@ function toChange(draft: Draft): NotificationSettingsChange {
     booking_daily_cap_per_ip: Number(draft.booking_daily_cap_per_ip),
     booking_daily_cap_per_email: Number(draft.booking_daily_cap_per_email),
     enable_walk_in_queue: draft.enable_walk_in_queue,
+    demo_mode: draft.demo_mode,
   }
   if (draft.resend_api_key) change.resend_api_key = draft.resend_api_key
   if (draft.smtp_password) change.smtp_password = draft.smtp_password
@@ -178,6 +183,7 @@ export function NotificationsPanel() {
         <ReminderSection form={form} set={set} error={errors.reminder_intervals_hours} />
         <BookingPolicySection form={form} set={set} errors={errors} />
         <WalkInQueueSection form={form} set={set} />
+        <DemoModeSection form={form} set={set} />
 
         <div className="flex gap-2 border-t pt-6">
           <Button type="submit" disabled={save.isPending || draft === null}>
@@ -644,6 +650,37 @@ function WalkInQueueSection(props: { form: Draft; set: (patch: Partial<Draft>) =
             For a business where service starts as soon as a chair frees, not at a booked
             time. Off by default. Separate from finding the next available appointment slot,
             which is always available in the booking flow regardless of this setting.
+          </p>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+/**
+ * CTI demo mode (Phase 14, #16). Off by default, the walk-in queue toggle's exact shape:
+ * with it off, the "simulate incoming call" control on Phone Lookup is unreachable anywhere
+ * (`routes/phone-lookup.tsx` only renders it once `GET /api/cti/demo-mode` says it is on) —
+ * the real feature, phone lookup itself, needs none of this and is always available.
+ */
+function DemoModeSection(props: { form: Draft; set: (patch: Partial<Draft>) => void }) {
+  const { form, set } = props
+  return (
+    <section className="flex flex-col gap-4 border-t pt-6">
+      <h2 className="text-base font-medium">CTI demo mode</h2>
+      <div className="flex gap-3">
+        <Checkbox
+          id="demo-mode"
+          className="mt-0.5"
+          checked={form.demo_mode}
+          onCheckedChange={(checked) => set({ demo_mode: checked === true })}
+        />
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="demo-mode">Enable the simulated incoming call</Label>
+          <p className="text-xs text-muted-foreground">
+            Turns on a "simulate incoming call" control on Phone Lookup, for demonstrating
+            call-handling without a real phone system. Off by default, so a working clinic
+            never sees it.
           </p>
         </div>
       </div>
