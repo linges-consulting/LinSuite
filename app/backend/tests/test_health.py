@@ -2,17 +2,43 @@
 
 import logging
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from core.config import get_settings
 from core.db import get_session
 from main import app
+from tests.test_partitions import FUNCTION, NEXT
 
 
 async def test_health_reports_ok_when_database_reachable(client):
     resp = await client.get("/api/health")
 
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok", "database": "ok"}
+    assert resp.json() == {"status": "ok", "database": "ok", "partitions": "ok"}
+
+
+async def test_health_reports_next_year_missing_but_still_200(client):
+    # Boot itself ensures both partitions exist, so a lenient next-year check needs one
+    # deliberately detached — the strict, boot-time check stays out of scope here (#85).
+    owner = create_async_engine(get_settings().database_url_migrate)
+    try:
+        async with owner.begin() as conn:
+            await conn.execute(text(f"DROP TABLE {NEXT}"))
+
+        resp = await client.get("/api/health")
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "status": "ok",
+            "database": "ok",
+            "partitions": "next_year_missing",
+        }
+    finally:
+        # Leave the stack with both partitions again, whatever the assertion above found.
+        async with owner.begin() as conn:
+            await conn.execute(text(f"SELECT {FUNCTION}"))
+        await owner.dispose()
 
 
 async def test_health_reports_degraded_and_logs_when_database_unreachable(client, caplog):

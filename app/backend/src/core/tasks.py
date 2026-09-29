@@ -5,6 +5,7 @@ from sqlalchemy.pool import NullPool
 
 from core.celery_app import celery_app
 from core.config import get_settings
+from core.healthcheck import ping_maintenance
 from core.partitions import ensure_access_log_partitions
 
 
@@ -26,6 +27,8 @@ async def _maintain_partitions() -> list[str]:
     engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
     try:
         async with engine.begin() as conn:
-            return await ensure_access_log_partitions(conn)
+            created = await ensure_access_log_partitions(conn)
     finally:
         await engine.dispose()
+    await ping_maintenance()
+    return created

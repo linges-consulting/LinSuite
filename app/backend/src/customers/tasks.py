@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from core.celery_app import celery_app
 from core.db import get_task_engines, run_task
+from core.healthcheck import ping_maintenance
 from customers.models import ALWAYS_ERASED, ERASED_NAMES
 
 log = logging.getLogger(__name__)
@@ -224,6 +225,7 @@ async def _purge_expired() -> dict[str, int]:
         await app.dispose()
         await purge.dispose()
     log.info("purge_expired", extra=counts)
+    await ping_maintenance()  # #85: dead-man ping, after the counts are final
     return counts
 
 
