@@ -36,6 +36,7 @@ from auth.models import User
 from billing.bill_review import (
     INVOICE_LIST_MAX_PAGE_SIZE,
     INVOICE_LIST_PAGE_SIZE,
+    DiscountChoiceOut,
     LineTaxOut,
     applicable_components,
     business_or_404,
@@ -47,7 +48,7 @@ from billing.bill_review import (
 )
 from billing.commission import commission_amount_cents
 from billing.commission_ledger import reverse_commission
-from billing.discount_resolver import DiscountConflict
+from billing.discount_resolver import DiscountConflict, DiscountEligibility, is_eligible
 from billing.documents import render_retail_invoice_document
 from billing.invoice_numbering import allocate_invoice_number
 from billing.models import (
@@ -90,6 +91,9 @@ router = APIRouter(tags=["billing"])
 
 RetailSeller = Annotated[User, Depends(Requires("billing.view"))]
 
+# #106: a till that never closes a draft should still load fast — newest first, capped.
+OPEN_DRAFT_SALES_LIMIT = 20
+
 
 # --- what goes over the wire -----------------------------------------------------------------
 
@@ -129,6 +133,21 @@ class RetailSaleLineOut(BaseModel):
     line_total_cents: int
 
 
+class RetailSaleSummaryOut(BaseModel):
+    """The Sell screen's resume list (#106, spec #95 story 43): enough to recognize a draft at
+    a glance, none of the live pricing `RetailSaleOut` recomputes on a full read — a sale
+    interrupted by a phone call or a refresh is found by who it is for and when it was
+    started, not by its running total."""
+
+    id: str
+    customer_id: str | None
+    customer_name: str | None
+    sold_by_staff_id: str
+    line_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
 class RetailSaleOut(BaseModel):
     id: str
     status: str
@@ -138,6 +157,11 @@ class RetailSaleOut(BaseModel):
     # R15: set on the replacement draft a retail cancel opened.
     replaces_retail_invoice_id: str | None = None
     lines: list[RetailSaleLineOut]
+    # Sell's discount picker (#106), the same shape `bill_review.py::BillOut.eligible_discounts`
+    # already gives the service side: every enabled discount eligible for *any* line's product,
+    # each carrying whether it is in the current selection — `PUT .../discounts` replaces that
+    # selection whole, the same as a bill's own discount toggle.
+    eligible_discounts: list[DiscountChoiceOut]
     # The applied selection; `subtotal - discount_total + tax_total == grand_total`.
     discount_ids: list[str]
     subtotal_cents: int
@@ -260,6 +284,7 @@ class RetailInvoiceListOut(BaseModel):
 @dataclass
 class _PricedRetailLine:
     line: RetailSaleLine
+    product_id: uuid.UUID
     discounts: list[Discount]
     components: list[ComponentRate]
     priced: PricedLine
@@ -306,8 +331,17 @@ async def _price_sale(
             )
         except DiscountConflict as error:
             raise HTTPException(status_code=422, detail=f"{variant.name}: {error}") from error
-        priced_lines.append(_PricedRetailLine(line, applied, components, priced))
+        priced_lines.append(
+            _PricedRetailLine(line, variant.product_id, applied, components, priced)
+        )
     return priced_lines, pool
+
+
+def _discount_eligibility(discount: Discount) -> DiscountEligibility:
+    return DiscountEligibility(
+        applies_to_all=discount.eligibility_scope == "all",
+        eligible_items=frozenset((i.item_type, i.item_id) for i in discount.eligible_items),
+    )
 
 
 async def _sale_out(db: SessionDep, sale: RetailSale) -> RetailSaleOut:
@@ -317,6 +351,15 @@ async def _sale_out(db: SessionDep, sale: RetailSale) -> RetailSaleOut:
     tax_total = sum(tax_totals.values())
     grand_total = sum(p.priced.tax.total_cents for p in priced_lines)
     discount_total = sum(sum(p.priced.discount_amounts.values()) for p in priced_lines)
+    # Every enabled discount eligible for *any* line's product (`bill_review.py::BillOut.
+    # eligible_discounts`'s own shape) — the picker's full offer, not just what is selected.
+    enabled = list(await db.scalars(select(Discount).where(Discount.enabled)))
+    product_ids = {p.product_id for p in priced_lines}
+    eligible_any = [
+        d
+        for d in enabled
+        if any(is_eligible(_discount_eligibility(d), "product", pid) for pid in product_ids)
+    ]
     return RetailSaleOut(
         id=str(sale.id),
         status=sale.status,
@@ -340,6 +383,18 @@ async def _sale_out(db: SessionDep, sale: RetailSale) -> RetailSaleOut:
                 line_total_cents=p.priced.tax.total_cents,
             )
             for p in priced_lines
+        ],
+        eligible_discounts=[
+            DiscountChoiceOut(
+                id=str(d.id),
+                name=d.name,
+                kind=d.kind,
+                percentage_bp=d.percentage_bp,
+                amount_cents=d.amount_cents,
+                stackable=d.stackable,
+                applied=d.id in selected,
+            )
+            for d in eligible_any
         ],
         discount_ids=sorted(str(i) for i in selected),
         subtotal_cents=grand_total - tax_total + discount_total,
@@ -522,6 +577,45 @@ async def start_retail_sale(
 @router.get("/retail-sales/{sale_id}")
 async def get_retail_sale(sale_id: uuid.UUID, _: RetailSeller, db: SessionDep) -> RetailSaleOut:
     return await _sale_out(db, await _load_sale(db, sale_id))
+
+
+@router.get("/retail-sales")
+async def list_open_retail_sales(
+    _: RetailSeller, db: SessionDep
+) -> dict[str, list[RetailSaleSummaryOut]]:
+    """Open drafts (#106, spec #95 story 43): a sale interrupted by a phone call or a page
+    refresh is not lost. Newest first, capped at `OPEN_DRAFT_SALES_LIMIT`."""
+    sales = list(
+        await db.scalars(
+            select(RetailSale)
+            .where(RetailSale.status == "draft")
+            .order_by(RetailSale.created_at.desc())
+            .limit(OPEN_DRAFT_SALES_LIMIT)
+        )
+    )
+    customer_ids = {s.customer_id for s in sales if s.customer_id is not None}
+    names = (
+        {
+            c.id: f"{c.first_name} {c.last_name}"
+            for c in await db.scalars(select(Customer).where(Customer.id.in_(customer_ids)))
+        }
+        if customer_ids
+        else {}
+    )
+    return {
+        "retail_sales": [
+            RetailSaleSummaryOut(
+                id=str(s.id),
+                customer_id=str(s.customer_id) if s.customer_id is not None else None,
+                customer_name=names.get(s.customer_id) if s.customer_id is not None else None,
+                sold_by_staff_id=str(s.sold_by_staff_id),
+                line_count=len(s.lines),
+                created_at=s.created_at,
+                updated_at=s.updated_at,
+            )
+            for s in sales
+        ]
+    }
 
 
 @router.patch("/retail-sales/{sale_id}")
