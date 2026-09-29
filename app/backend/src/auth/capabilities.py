@@ -232,3 +232,41 @@ def Requires(key: str) -> Callable:  # noqa: N802 — a dependency factory, name
             return check(user)
 
     return dependency
+
+
+def RequiresAny(*keys: str) -> Callable:  # noqa: N802 — see `Requires`
+    """The guard for a route that several capabilities each independently unlock, any one of
+    them enough: `dependencies=[Depends(RequiresAny("catalog.manage", "inventory.receive"))]`.
+
+    Same rules as `Requires`: every key is validated at import, and a refusal carries the same
+    `capability_required` code. The keys must agree on `requires_admin_mode` — a route cannot
+    sit behind the Admin Mode window for one of its capabilities but not another, so mixing
+    them is asserted at import, a startup failure rather than a route whose behaviour depends
+    on which capability happened to grant access.
+    """
+    capabilities = [BY_KEY[key] for key in keys]  # a typo is a startup failure, as in `Requires`
+    modes = {c.requires_admin_mode for c in capabilities}
+    assert len(modes) == 1, (
+        f"RequiresAny({', '.join(keys)}) mixes admin-mode and non-admin-mode capabilities"
+    )
+    requires_admin_mode = modes.pop()
+    description = " or ".join(c.description for c in capabilities)
+
+    def check(user: User) -> User:
+        if not any(key in user.capabilities for key in keys):
+            raise Forbidden(
+                CAPABILITY_REQUIRED,
+                f"Your role does not allow this: {description}",
+            )
+        return user
+
+    if requires_admin_mode:
+
+        async def dependency(user: AdminUser) -> User:
+            return check(user)
+    else:
+
+        async def dependency(user: CurrentUser) -> User:
+            return check(user)
+
+    return dependency

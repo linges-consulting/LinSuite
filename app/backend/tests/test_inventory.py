@@ -393,6 +393,62 @@ async def test_the_catalog_read_endpoint_refuses_a_stranger(client):
     assert resp.status_code == 401, resp.text
 
 
+# --- the admin roster: also open to a receive- or adjust-only lead (#95) -----------------------
+
+
+async def deputy_with(client, capabilities: list[str]) -> tuple[str, str]:
+    """A second admin-mode-capable account holding `admin` plus `capabilities`. Returns
+    `(email, password)`; the caller still has to sign in as them."""
+    from core.security import hash_password
+    from tests.conftest import add_account
+
+    role = await client.post(
+        "/api/admin/roles",
+        json={"name": "Deputy", "description": "Nearly.", "capabilities": ["admin", *capabilities]},
+    )
+    assert role.status_code == 201, role.text
+    password = "correct horse battery 2"
+    await add_account("deputy@cedar.example", await hash_password(password), role=role.json()["id"])
+    return "deputy@cedar.example", password
+
+
+async def test_a_receive_only_account_may_list_products(client):
+    await as_admin(client)
+    await make_variant(client, (await make_product(client))["id"])
+    email, password = await deputy_with(client, ["inventory.receive"])
+    client.cookies.clear()
+    await as_admin(client, email, password)
+
+    resp = await client.get(PRODUCTS)
+
+    assert resp.status_code == 200, resp.text
+    assert [p["name"] for p in resp.json()["products"]] == ["Shampoo"]
+
+
+async def test_an_adjust_only_account_may_list_products(client):
+    await as_admin(client)
+    await make_variant(client, (await make_product(client))["id"])
+    email, password = await deputy_with(client, ["inventory.adjust"])
+    client.cookies.clear()
+    await as_admin(client, email, password)
+
+    resp = await client.get(PRODUCTS)
+
+    assert resp.status_code == 200, resp.text
+
+
+async def test_an_account_with_none_of_the_three_capabilities_may_not_list_products(client):
+    await as_admin(client)
+    email, password = await deputy_with(client, [])
+    client.cookies.clear()
+    await as_admin(client, email, password)
+
+    resp = await client.get(PRODUCTS)
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["code"] == "capability_required"
+
+
 # --- who may do any of this ---------------------------------------------------------------------
 
 

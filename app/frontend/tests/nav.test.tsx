@@ -34,3 +34,42 @@ test('an account with no administrative capability is not offered Settings', asy
     expect(screen.queryByRole('link', { name: 'Settings' })).not.toBeInTheDocument(),
   )
 })
+
+// #95: a receive- or adjust-only lead, or a packages-only holder, needs the same door — each
+// opens a real Settings sub-screen (Products, Products, Packages respectively) without
+// `catalog.manage`.
+test.each(['billing.manage', 'inventory.receive', 'inventory.adjust'])(
+  'an account holding only %s is still offered Settings',
+  async (capability) => {
+    stubApi({
+      signedIn: true,
+      dualRole: false,
+      respond: (url) =>
+        url === '/api/auth/me'
+          ? Response.json({
+              id: 'u1',
+              email: 'owner@cedar.example',
+              role: 'Staff',
+              capabilities: ['schedule.view', capability],
+              mode: 'staff',
+              can_switch_modes: true,
+              admin_grant_expires_at: null,
+              admin_hard_limit_at: null,
+              must_change_password: false,
+              mfa: {
+                enrolled: false,
+                method: null,
+                pending: false,
+                enrolment_required: false,
+                verified_at: null,
+                email_otp_allowed: false,
+              },
+            })
+          : undefined,
+    })
+
+    renderApp('/')
+
+    expect(await screen.findByRole('link', { name: 'Settings' })).toBeInTheDocument()
+  },
+)

@@ -74,6 +74,9 @@ import { PRODUCTS } from '@/lib/query-keys'
  * historical reference is never orphaned; only new sales stop offering it.
  */
 export function ProductsPanel() {
+  // #95: every catalog write (add/edit/deactivate a product or variant) needs `catalog.manage`
+  // — a receive- or adjust-only lead reads this table to pick a variant, but never these.
+  const canManageCatalog = useCan('catalog.manage')
   const [includeInactive, setIncludeInactive] = useState(false)
   const products = useQuery({
     queryKey: [...PRODUCTS, includeInactive],
@@ -120,7 +123,7 @@ export function ProductsPanel() {
               Show inactive
             </Label>
           </div>
-          {products.data?.length !== 0 && (
+          {products.data?.length !== 0 && canManageCatalog && (
             <Button onClick={() => setCreating(true)}>
               <Plus aria-hidden />
               Add product
@@ -135,10 +138,12 @@ export function ProductsPanel() {
           title="No products yet"
           description="Add what the business sells at the counter."
           action={
-            <Button onClick={() => setCreating(true)}>
-              <Plus aria-hidden />
-              Add product
-            </Button>
+            canManageCatalog ? (
+              <Button onClick={() => setCreating(true)}>
+                <Plus aria-hidden />
+                Add product
+              </Button>
+            ) : undefined
           }
         />
       ) : (
@@ -211,6 +216,7 @@ function ProductLines(props: {
   const { product } = props
   const queryClient = useQueryClient()
   const refresh = () => queryClient.invalidateQueries({ queryKey: PRODUCTS })
+  const canManageCatalog = useCan('catalog.manage')
   const canReceive = useCan('inventory.receive')
   const canAdjust = useCan('inventory.adjust')
 
@@ -261,48 +267,50 @@ function ProductLines(props: {
           )}
         </TableCell>
         <TableCell className="text-right">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="sm" aria-label={`Actions for ${product.name}`}>
-                <MoreHorizontal aria-hidden />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="min-w-40">
-              <DropdownMenuItem onSelect={props.onEditProduct}>
-                <Pencil aria-hidden />
-                Edit
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={props.onAddVariant}>
-                <Plus aria-hidden />
-                Add variant
-              </DropdownMenuItem>
-              {product.active ? (
-                <DropdownMenuItem
-                  variant="destructive"
-                  disabled={setProductActive.isPending}
-                  onSelect={() => {
-                    if (
-                      confirm(
-                        `Deactivate ${product.name}?\n\nIt drops off checkout until you restore it. Its variants keep whatever status they already have.`,
+          {canManageCatalog && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" aria-label={`Actions for ${product.name}`}>
+                  <MoreHorizontal aria-hidden />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-40">
+                <DropdownMenuItem onSelect={props.onEditProduct}>
+                  <Pencil aria-hidden />
+                  Edit
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={props.onAddVariant}>
+                  <Plus aria-hidden />
+                  Add variant
+                </DropdownMenuItem>
+                {product.active ? (
+                  <DropdownMenuItem
+                    variant="destructive"
+                    disabled={setProductActive.isPending}
+                    onSelect={() => {
+                      if (
+                        confirm(
+                          `Deactivate ${product.name}?\n\nIt drops off checkout until you restore it. Its variants keep whatever status they already have.`,
+                        )
                       )
-                    )
-                      setProductActive.mutate(false)
-                  }}
-                >
-                  <PowerOff aria-hidden />
-                  Deactivate
-                </DropdownMenuItem>
-              ) : (
-                <DropdownMenuItem
-                  disabled={setProductActive.isPending}
-                  onSelect={() => setProductActive.mutate(true)}
-                >
-                  <Power aria-hidden />
-                  Reactivate
-                </DropdownMenuItem>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
+                        setProductActive.mutate(false)
+                    }}
+                  >
+                    <PowerOff aria-hidden />
+                    Deactivate
+                  </DropdownMenuItem>
+                ) : (
+                  <DropdownMenuItem
+                    disabled={setProductActive.isPending}
+                    onSelect={() => setProductActive.mutate(true)}
+                  >
+                    <Power aria-hidden />
+                    Reactivate
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </TableCell>
       </TableRow>
       {product.variants.length === 0 ? (
@@ -345,10 +353,12 @@ function ProductLines(props: {
                   </Button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="end" className="min-w-40">
-                  <DropdownMenuItem onSelect={() => props.onEditVariant(variant)}>
-                    <Pencil aria-hidden />
-                    Edit
-                  </DropdownMenuItem>
+                  {canManageCatalog && (
+                    <DropdownMenuItem onSelect={() => props.onEditVariant(variant)}>
+                      <Pencil aria-hidden />
+                      Edit
+                    </DropdownMenuItem>
+                  )}
                   {canReceive && (
                     <DropdownMenuItem onSelect={() => props.onReceive(variant)}>
                       <PackagePlus aria-hidden />
@@ -361,28 +371,29 @@ function ProductLines(props: {
                       Adjust stock
                     </DropdownMenuItem>
                   )}
-                  {variant.active ? (
-                    <DropdownMenuItem
-                      variant="destructive"
-                      disabled={setVariantActive.isPending}
-                      onSelect={() =>
-                        setVariantActive.mutate({ variantId: variant.id, active: false })
-                      }
-                    >
-                      <PowerOff aria-hidden />
-                      Deactivate
-                    </DropdownMenuItem>
-                  ) : (
-                    <DropdownMenuItem
-                      disabled={setVariantActive.isPending}
-                      onSelect={() =>
-                        setVariantActive.mutate({ variantId: variant.id, active: true })
-                      }
-                    >
-                      <Power aria-hidden />
-                      Reactivate
-                    </DropdownMenuItem>
-                  )}
+                  {canManageCatalog &&
+                    (variant.active ? (
+                      <DropdownMenuItem
+                        variant="destructive"
+                        disabled={setVariantActive.isPending}
+                        onSelect={() =>
+                          setVariantActive.mutate({ variantId: variant.id, active: false })
+                        }
+                      >
+                        <PowerOff aria-hidden />
+                        Deactivate
+                      </DropdownMenuItem>
+                    ) : (
+                      <DropdownMenuItem
+                        disabled={setVariantActive.isPending}
+                        onSelect={() =>
+                          setVariantActive.mutate({ variantId: variant.id, active: true })
+                        }
+                      >
+                        <Power aria-hidden />
+                        Reactivate
+                      </DropdownMenuItem>
+                    ))}
                 </DropdownMenuContent>
               </DropdownMenu>
             </TableCell>

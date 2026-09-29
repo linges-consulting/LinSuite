@@ -171,6 +171,29 @@ describe('capability and mode gating', () => {
     expect(screen.getByRole('menuitem', { name: 'Receive stock' })).toBeInTheDocument()
     expect(screen.queryByRole('menuitem', { name: 'Adjust stock' })).not.toBeInTheDocument()
   })
+
+  // #95: a receive-only lead can list and receive against products without `catalog.manage`
+  // — the server now allows `GET /api/admin/products` for any of the three capabilities
+  // (`RequiresAny`), and the panel must not offer catalog writes the server would refuse.
+  it('offers a receive-only account the product and Receive, but no catalog writes', async () => {
+    fakeServer({ capabilities: ['inventory.receive'] })
+    const user = userEvent.setup()
+    renderApp('/settings')
+    await openProducts(user)
+
+    expect(await screen.findByText('Shampoo')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Add product' })).not.toBeInTheDocument()
+    // The product row's own actions (Edit, Add variant, Deactivate) are all `catalog.manage`
+    // — nothing there for this account, so the trigger itself is withheld.
+    expect(screen.queryByRole('button', { name: 'Actions for Shampoo' })).not.toBeInTheDocument()
+
+    await openActions(user, '500ml')
+
+    expect(screen.getByRole('menuitem', { name: 'Receive stock' })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'Edit' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'Deactivate' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('menuitem', { name: 'Adjust stock' })).not.toBeInTheDocument()
+  })
 })
 
 describe('receiving stock', () => {
