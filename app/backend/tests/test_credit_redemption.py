@@ -590,8 +590,9 @@ async def test_the_treatment_receipt_shows_the_prepaid_value_and_service_date(cl
     import uuid
     from zoneinfo import ZoneInfo
 
-    from billing.documents import render_receipt_html
+    from billing.documents import receipt_status, render_receipt_html
     from billing.models import Invoice
+    from billing.payments import balance
     from core.models import Business
     from scheduling.models import Appointment
 
@@ -599,8 +600,17 @@ async def test_the_treatment_receipt_shows_the_prepaid_value_and_service_date(cl
         loaded = await db.get(Invoice, uuid.UUID(invoice["id"]))
         appointment = await db.get(Appointment, uuid.UUID(appointment_id))
         business = await db.get(Business, 1)
-        html = render_receipt_html(loaded, loaded.lines[0], appointment, business, 1)
+        status = receipt_status(loaded, loaded.lines[0], await balance(db, loaded))
+        html = render_receipt_html(
+            loaded, loaded.lines[0], appointment, business, 1, payment_status=status
+        )
+        # Fully prepaid means checkout is complete at issue: the receipt is already stored.
+        stored = await db.scalar(
+            text("SELECT kind FROM documents WHERE source_id = :l"), {"l": loaded.lines[0].id}
+        )
         service_date = appointment.starts_at.astimezone(ZoneInfo(business.timezone)).date()
+
+    assert stored == "treatment_receipt:prepaid"
 
     assert "$96.00" in html
     assert "Prepaid (package credit)" in html

@@ -50,6 +50,11 @@ celery_app.conf.beat_schedule = {
         "task": "forms.tasks.reconcile_archives",
         "schedule": 300.0,
     },
+    # Issued invoices / checkout-complete treatment receipts whose render never landed.
+    "reconcile-invoice-documents": {
+        "task": "billing.documents.reconcile_renders",
+        "schedule": 300.0,
+    },
     # Nightly at 03:15 UTC. Idempotent and a no-op on all but one night a year, so the
     # hour does not matter.
     "maintain-partitions": {

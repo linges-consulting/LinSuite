@@ -42,6 +42,7 @@ from billing.bill_review import (
     tax_out,
 )
 from billing.discount_resolver import DiscountConflict
+from billing.documents import render_retail_invoice_document
 from billing.invoice_numbering import allocate_invoice_number
 from billing.models import (
     Discount,
@@ -759,6 +760,8 @@ async def issue_retail_sale(
         },
     )
     await db.commit()
+    # R22: the retail invoice PDF renders in the worker, queued after commit.
+    render_retail_invoice_document.delay(str(invoice.id))
 
     # Queued after commit, never before — the same requirement `inventory/stock_routes.py`'s
     # own routes already honour for the same reason (#62; CLAUDE.md: Celery workers, never

@@ -676,6 +676,59 @@ async def test_billing_view_is_reachable_in_staff_mode_with_no_admin_window(clie
 # --- immutability: append-only / voidable, by grant and trigger -------------------------------
 
 
+# --- documents (M4 review R22): retail invoices render, print and email -----------------------
+
+
+async def test_an_anonymous_retail_invoice_prints_and_emails_to_a_typed_in_recipient(
+    client, sent_emails
+):
+    from tests.test_invoice_documents import _make_email_ready
+
+    await as_admin(client)
+    variant = await new_variant(client, quantity_on_hand=5)
+    sale = await start_sale(client)
+    await add_line(client, sale["id"], variant["id"], quantity=2)
+    invoice = (await issue(client, sale["id"])).json()
+
+    pdf = await client.get(f"{RETAIL_INVOICES}/{invoice['id']}/pdf")
+    assert pdf.status_code == 200, pdf.text
+    assert pdf.content.startswith(b"%PDF")
+    assert f"retail-invoice-{invoice['invoice_number']}.pdf" in pdf.headers["content-disposition"]
+
+    await _make_email_ready()
+    email_url = f"{RETAIL_INVOICES}/{invoice['id']}/email"
+    assert (await client.post(email_url, json={})).status_code == 422  # nobody to send to
+    resp = await client.post(email_url, json={"to": "walkin@example.com"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"status": "queued", "to": "walkin@example.com"}
+    [sent] = sent_emails
+    assert sent.to == "walkin@example.com"
+    assert sent.attachments[0].content == pdf.content
+
+
+async def test_a_linked_retail_invoice_opens_only_under_its_client_and_is_audited(client):
+    await as_admin(client)
+    customer_id = await make_customer(client)
+    variant = await new_variant(client, quantity_on_hand=5)
+    sale = await start_sale(client, customer_id=customer_id)
+    await add_line(client, sale["id"], variant["id"])
+    invoice = (await issue(client, sale["id"])).json()
+
+    assert (await client.get(f"{RETAIL_INVOICES}/{invoice['id']}/pdf")).status_code == 404
+    pdf = await client.get(f"/api/customers/{customer_id}/retail-invoices/{invoice['id']}/pdf")
+    assert pdf.status_code == 200, pdf.text
+    assert pdf.content.startswith(b"%PDF")
+
+    async with session_scope() as db:
+        logged = await db.scalar(
+            text(
+                "SELECT count(*) FROM audit_access_log "
+                "WHERE resource_type = 'retail_invoice_document' AND resource_id = :i"
+            ),
+            {"i": invoice["id"]},
+        )
+    assert logged == 1
+
 async def _issue_one(client) -> dict:
     await as_admin(client)
     variant = await new_variant(client, quantity_on_hand=10)

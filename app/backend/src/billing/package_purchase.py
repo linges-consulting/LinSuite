@@ -243,6 +243,10 @@ async def purchase_package(
         },
     )
     await db.commit()
+    # R22: the package invoice PDF renders in the worker, queued after commit.
+    from billing.documents import render_invoice_documents  # documents -> payments -> here
+
+    render_invoice_documents.delay(str(invoice.id))
 
     purchase = await db.get(PackagePurchase, purchase.id, populate_existing=True)
     invoice = await db.get(Invoice, invoice.id, populate_existing=True)

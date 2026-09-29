@@ -1,82 +1,82 @@
-"""Invoice & treatment-receipt PDF rendering, delivery and audited reads (#70).
+"""Invoice & treatment-receipt PDF rendering, delivery and reconciliation (#70, M4 review T4).
 
-Two related but distinct documents render from the same frozen #65 snapshot:
+Three stored document kinds, all sealed under the business key (#55/ADR-0003, `key_owner=
+"business"`, `linked_customer_id` = the client, NULL for an anonymous retail sale, `retain_until`
+= issue + six years for CRA):
 
-- **Invoice** — one per issued `Invoice` (`kind="invoice"`, `source_id=invoice.id`): the whole
-  bill, every line, the computed/override totals — CLAUDE.md's *voidable* document class.
-- **Treatment receipt** — one per `InvoiceLine`, i.e. one per completed, checked-out
-  appointment (`kind="treatment_receipt"`, `source_id=invoice_line.id`) — never one per
-  invoice: a grouped visit's invoice can cover several appointments, and CLAUDE.md's own "why
-  separate document types" paragraph is explicit that each needs its own claimable date of
-  service. `InvoiceLine.appointment_id` is unique (inherited from `ServiceBillLine`'s own
-  uniqueness), so "one line" and "one appointment" are the same count.
+- **`invoice`** — one per issued `Invoice`, service *or* package purchase (`source_id=invoice.id`).
+- **`retail_invoice`** — one per issued `RetailInvoice` (M4 review R22).
+- **`treatment_receipt:<status>`** — one per `InvoiceLine` (one appointment) *per payment
+  status* (`source_id=line.id`). A receipt is released only once the invoice is issued and
+  checkout is complete (`billing.payments` `Balance.checkout_complete`, review R20), and its
+  label is derived from the ledger: Prepaid (package credit) / Pending insurer / Paid / an
+  authorized outstanding balance — never "Paid" for money not yet received. `documents` rows
+  are immutable (0026), so a label-changing event (payment, correction, refund, balance
+  exception) never rewrites a stored receipt: the status is part of the document's identity,
+  a new status is a new row, and the earlier one stays as history. `store_document`'s
+  `ON CONFLICT DO NOTHING` on `(kind, source_id)` keeps every render and retry idempotent.
 
-**"Checkout complete" approximation (M4 Wave 5 dependency gap, tracked for #66).** The
-acceptance criterion is "released only after its bill has been reviewed and checkout
-completed" — but #66 (the payment ledger, which will define what "checkout complete" actually
-means: full settlement, or an admin-authorized exception) is a sibling ticket running in
-parallel, not merged, and not in this ticket's own dependency graph (only #65/#55 are).
-Rendering is instead triggered by `Invoice.status == "issued"` (#65, already merged): issuing
-already requires the bill to be fully reviewed with no pending/stale override
-(`billing/invoices.py::issue_invoice`'s own refusal conditions), and for a plain service sale
-(no packages/insurer billing yet — #71/#72 are unbuilt this milestone) "issued" is the closest
-available proxy for "paid enough to receipt". `payment_status_label` below is the one function
-to change once #66 lands: swap its constant `"Paid"` for a read of
-`billing.is_checkout_complete(invoice)` (the predicate #66 is expected to define) and let a
-still-outstanding balance render "pending" instead of "paid" — never the reverse.
+**Rendered in Celery, never inline** (CLAUDE.md). Issue and every ledger write queue
+`render_invoice_documents`/`render_retail_invoice_document` *after* their own commit, so a
+render failure never unwinds a committed checkout. `reconcile_renders` (beat, every 5 min —
+the `forms/tasks.py::reconcile_archives` precedent) repairs a lost enqueue: issued invoices with
+no stored document, and checkout-complete receipts whose current-status document never landed.
 
-**Rendered in a Celery task, never inline** (CLAUDE.md: PDF generation is a worker job, never
-the request path). `render_invoice_documents` is queued from
-`billing/invoices.py::issue_invoice` *after* that transaction's own `db.commit()` — the same
-"commit, then queue" order `scheduling/public.py` already uses for `notify_booking_confirmed`
-— so a rendering or delivery failure can never unwind the invoice/bill-issue transaction that
-already landed. `store_document`'s own `ON CONFLICT DO NOTHING` on `(kind, source_id)` is what
-makes both this task and a resend idempotent: a retry, a duplicate enqueue, or a second
-`.../pdf`/`.../email` call all resolve to the same stored bytes — never a second render, and
-never a second touch of `invoices`/`service_bills`/commission/stock data.
+**Email carries identifiers, not bytes** (review R21, spec §169): `email_document` takes a
+document id and fetches/decrypts inside the worker.
 
-**Business-owned document tier** (#55/ADR-0003): both documents seal under
-`billing.keys.business_key`, `key_owner="business"`, `linked_customer_id=invoice.customer_id`
-— a financial document must outlive any one customer's crypto-shred (CRA's six-year rule),
-exactly the tier #55 built for this. `retain_until` is `issued_at` plus six years
-(`_plus_years` — the same "later reading is safer" leap-day tie-break
-`customers/retention.py::_years_after` already uses for its own, DOB-specific purpose;
-duplicated in miniature here rather than imported, since that helper is private to that
-module and reads a customer's date of birth, which has nothing to do with a financial
-document's own CRA clock).
-
-**Display-only joins, never a money source.** `InvoiceLine` carries `appointment_id`/
-`service_id`/`staff_id` "for display only... never read back into a money calculation"
-(`billing/models.py`'s own docstring) — this module is exactly that display reader: it loads
-each line's `Appointment` (already `lazy="joined"` onto its own `service`/`staff`/`customer`)
-for the service name, the provider's name/designation/licence, and the service date, while
-every dollar figure rendered comes only from the frozen `InvoiceLine`/`InvoiceLineTax` columns
-`billing/invoices.py::issue_invoice` already froze.
+**Display-only joins, never a money source.** Appointment/service/staff/product rows supply
+names and dates only; every figure comes from the frozen invoice/line/tax columns.
 """
 
 import base64
 import uuid
-from collections.abc import Callable
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from jinja2 import Environment
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from billing.keys import business_key
-from billing.models import Invoice, InvoiceLine
+from billing.models import (
+    Invoice,
+    InvoiceBalanceAuthorization,
+    InvoiceLine,
+    InvoicePayment,
+    InvoicePaymentTransfer,
+    InvoiceRefund,
+    RetailInvoice,
+)
+from billing.payments import Balance, balance, balances
 from core.celery_app import celery_app
 from core.config import get_settings
 from core.db import run_task
-from core.documents import store_document
-from core.models import Business
+from core.documents import fetch_document, store_document
+from core.models import Business, Document
 from customers.models import Customer
 from forms.render import html_to_pdf
+from inventory.models import Product, ProductVariant
+from notifications.providers import EmailAttachment
+from notifications.tasks import deliver_email
 from scheduling.models import Appointment
 from settings.models import LOGO, BrandingAsset
 
 REGULATED_HEALTH = "regulated_health"
+
+# Receipt payment statuses (R20) and the document kind each is stored under.
+PAID = "Paid"
+PREPAID = "Prepaid (package credit)"
+PENDING_INSURER = "Pending insurer"
+AUTHORIZED_BALANCE = "Balance outstanding (authorized)"
+_RECEIPT_KIND = {
+    PAID: "treatment_receipt:paid",
+    PREPAID: "treatment_receipt:prepaid",
+    PENDING_INSURER: "treatment_receipt:pending_insurer",
+    AUTHORIZED_BALANCE: "treatment_receipt:authorized_balance",
+}
+RECEIPT_KINDS = tuple(_RECEIPT_KIND.values())
 
 _ENV = Environment(autoescape=True)
 
@@ -99,7 +99,7 @@ footer { margin-top: 30px; font-size: 9pt; border-top: 1px solid #ccc; padding-t
 _INVOICE_TEMPLATE = _ENV.from_string(
     """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>Invoice {{ invoice.invoice_number }}</title>
+<title>{{ title }}</title>
 <style>"""
     + _STYLE
     + """</style></head><body>
@@ -109,33 +109,26 @@ _INVOICE_TEMPLATE = _ENV.from_string(
 {% if business.gst_hst_number %}GST/HST {{ business.gst_hst_number }} {% endif %}
 {% if business.pst_qst_number %}PST/QST {{ business.pst_qst_number }}{% endif %}</p>
 </header>
-<h1>Invoice #{{ invoice.invoice_number }}</h1>
-<p>Billed to: {{ customer.first_name }} {{ customer.last_name }}<br>
-Issued: {{ issued_local }} ({{ business.timezone }})
-&middot; Status: {{ invoice.status }}</p>
-<table><thead><tr><th>Service</th><th>Provider</th><th class="right">Price</th>
+<h1>{{ title }}</h1>
+<p>Billed to: {{ billed_to }}<br>
+Issued: {{ issued_local }} ({{ business.timezone }})</p>
+<table><thead><tr><th>Item</th><th></th><th class="right">Price</th>
 <th class="right">Discount</th><th class="right">Tax</th><th class="right">Total</th></tr></thead>
 <tbody>{% for row in rows %}
-<tr><td>{{ row.service_name }}</td><td>{{ row.staff_name }}</td>
+<tr><td>{{ row.description }}</td><td>{{ row.detail }}</td>
 <td class="right">{{ money(row.price_cents) }}</td>
-<td class="right">{{ money(row.discounted_cents) }}</td>
+<td class="right">{{ money(-row.discount_cents) if row.discount_cents else "" }}</td>
 <td class="right">{{ money(row.tax_cents) }}</td>
-<td class="right">{{ money(row.line_total_cents) }}</td></tr>
+<td class="right">{{ money(row.total_cents) }}</td></tr>
 {% endfor %}</tbody></table>
 <table class="totals">
-<tr><td>Subtotal</td><td class="right">{{ money(invoice.computed_subtotal_cents) }}</td></tr>
-<tr><td>Discounts</td>
-<td class="right">-{{ money(invoice.computed_discount_total_cents) }}</td></tr>
-<tr><td>Tax</td><td class="right">{{ money(invoice.computed_tax_total_cents) }}</td></tr>
-{% if invoice.override_applied_cents is not none %}
-<tr><td>Admin/owner-authorized total ({{ invoice.override_reason }})</td>
-<td class="right">{{ money(invoice.override_applied_cents) }}</td></tr>
-{% endif %}
-<tr class="grand"><td>Total</td>
-<td class="right">{{ money(invoice.grand_total_cents) }}</td></tr>
+{% for label, cents in totals %}
+<tr><td>{{ label }}</td><td class="right">{{ money(cents) }}</td></tr>
+{% endfor %}
+<tr class="grand"><td>Total</td><td class="right">{{ money(grand_total_cents) }}</td></tr>
 </table>
 <footer>{% if business.receipt_footer %}<div>{{ business.receipt_footer }}</div>{% endif %}
-<div>Invoice #{{ invoice.invoice_number }} &middot; {{ business.name }}</div></footer>
+<div>{{ title }} &middot; {{ business.name }}</div></footer>
 </body></html>"""
 )
 
@@ -163,7 +156,7 @@ Date of service: {{ service_date }}</p>
 <table><thead><tr><th>Component</th><th class="right">Rate</th>
 <th class="right">Amount</th></tr></thead>
 <tbody>{% for tax in taxes %}
-<tr><td>{{ tax.code }}</td><td class="right">{{ "%.2f"|format(tax.rate_pct) }}%</td>
+<tr><td>{{ tax.code }}</td><td class="right">{{ tax.rate }}%</td>
 <td class="right">{{ money(tax.amount_cents) }}</td></tr>
 {% endfor %}</tbody></table>
 <table class="totals">
@@ -179,9 +172,6 @@ Date of service: {{ service_date }}</p>
 
 
 def _address_lines(business: Business) -> list[str]:
-    """Precomputed in Python rather than a longer `{% if %}` chain in the template — the same
-    non-null parts `Business.address_line1`/`address_line2`/`city`/`province`/`postal_code`
-    join into one line, skipping whatever a business hasn't filled in."""
     city_line = " ".join(
         part for part in (business.city, business.province, business.postal_code) if part
     )
@@ -190,8 +180,7 @@ def _address_lines(business: Business) -> list[str]:
 
 def _plus_years(when: datetime, years: int) -> datetime:
     """A financial document's CRA retention hold, six years out from `issued_at`. 29 Feb has
-    no anniversary in a non-leap target year; the later reading is safer (the same tie-break
-    `customers/retention.py::_years_after` uses for its own purpose), so 1 Mar, never 28 Feb."""
+    no anniversary in a non-leap target year; the later reading is safer, so 1 Mar."""
     try:
         return when.replace(year=when.year + years)
     except ValueError:
@@ -199,35 +188,70 @@ def _plus_years(when: datetime, years: int) -> datetime:
 
 
 def _money(cents: int, symbol: str) -> str:
-    sign = "-" if cents < 0 else ""
-    return f"{sign}{symbol}{abs(cents) / 100:.2f}"
+    """Integer cents only, never through a float (CLAUDE.md: money is integer cents)."""
+    dollars, rem = divmod(abs(cents), 100)
+    return f"{'-' if cents < 0 else ''}{symbol}{dollars:,}.{rem:02d}"
+
+
+def _rate(bp: int) -> str:
+    return f"{bp // 100}.{bp % 100:02d}"
 
 
 def show_clinical_fields(business: Business) -> bool:
-    """#70 acceptance criterion: a practitioner's designation/licence snapshot belongs only on
-    a `regulated_health` business's receipts — a `general_business` tenant (a salon, a retail
-    shop) is never forced to carry a field that means nothing to it. The same `retention_
-    profile` column CLAUDE.md's retention rules already branch on (`customers/retention.py`)."""
+    """A practitioner's designation/licence belongs only on a `regulated_health` business's
+    receipts — a salon or retail shop is never forced to carry it (#70)."""
     return business.retention_profile == REGULATED_HEALTH
 
 
-def payment_status_label(invoice: Invoice) -> str:  # noqa: ARG001 — kept for the swap #66 makes
-    """The "checkout complete" approximation, isolated to this one function (module docstring).
-    Always "Paid": every receipt this ticket can produce is a plain, fully-issued service sale
-    — #71/#72 package credits and #66 insurer billing are unbuilt this milestone, so "prepaid"
-    and "pending" never arise yet. Once #66 exists, read `billing.is_checkout_complete(invoice)`
-    (or its per-line equivalent) here instead, and never show a still-pending insurer amount
-    as paid."""
-    return "Paid"
+def receipt_status(invoice: Invoice, line: InvoiceLine, bal: Balance) -> str | None:
+    """The payment status a treatment receipt shows, or None while it is not yet released
+    (R20): not issued (cancelled — its replacement carries the visit) or checkout incomplete.
+    A fully prepaid visit is Prepaid; otherwise any approved-but-unarrived insurer money makes
+    it Pending insurer; an admin-excepted unpaid balance says so; only a settled invoice is
+    Paid."""
+    if invoice.status != "issued" or not bal.checkout_complete:
+        return None
+    if line.prepaid_cents and line.prepaid_cents >= line.line_total_cents:
+        return PREPAID
+    if bal.pending_insurer_cents > 0:
+        return PENDING_INSURER
+    if bal.outstanding_cents > 0:
+        return AUTHORIZED_BALANCE
+    return PAID
+
+
+def receipt_kind(status: str) -> str:
+    return _RECEIPT_KIND[status]
 
 
 def receipt_number(invoice: Invoice, ordinal: int) -> str:
-    """A treatment receipt's document identity — the ticket's own allowance is "a simple unique
-    id or sequential-per-business number", not gapless/audited the way `Invoice.invoice_number`
-    is. Derived from the invoice's own already-gapless number plus this line's 1-based position
-    on it, so no second counter table is needed: "1-1", "1-2" for the first invoice's first and
-    second lines."""
+    """The invoice's gapless number plus the line's 1-based position: "1-1", "1-2"."""
     return f"{invoice.invoice_number}-{ordinal}"
+
+
+def _render_page(
+    business: Business,
+    *,
+    title: str,
+    billed_to: str,
+    issued_at: datetime,
+    rows: list[dict],
+    totals: list[tuple[str, int]],
+    grand_total_cents: int,
+    logo_uri: str | None,
+) -> str:
+    return _INVOICE_TEMPLATE.render(
+        business=business,
+        title=title,
+        billed_to=billed_to,
+        issued_local=issued_at.astimezone(ZoneInfo(business.timezone)).strftime("%Y-%m-%d %H:%M"),
+        rows=rows,
+        totals=totals,
+        grand_total_cents=grand_total_cents,
+        logo_uri=logo_uri,
+        address_lines=_address_lines(business),
+        money=lambda cents: _money(cents, business.currency_symbol),
+    )
 
 
 def render_invoice_html(
@@ -238,31 +262,97 @@ def render_invoice_html(
     *,
     logo_uri: str | None = None,
 ) -> str:
-    zone = ZoneInfo(business.timezone)
+    """A service invoice (one row per appointment line) or a package-purchase invoice (#71:
+    one row, the package). Tax is the *billed* tax (`tax_totals_by_component`, review R1) —
+    under an admin override that is the distributed per-line tax, so the totals match the
+    lines; the override's own adjustment gets its own row."""
     lines = sorted(invoice.lines, key=lambda line: line.created_at)
-    money: Callable[[int], str] = lambda cents: _money(cents, business.currency_symbol)  # noqa: E731
+    billed_tax = sum(invoice.tax_totals_by_component.values())
+    if invoice.package_purchase is not None:
+        purchase = invoice.package_purchase
+        rows = [
+            {
+                "description": purchase.name,
+                "detail": "Package",
+                "price_cents": purchase.price_cents,
+                "discount_cents": 0,
+                "tax_cents": billed_tax,
+                "total_cents": invoice.grand_total_cents,
+            }
+        ]
+    else:
+        rows = []
+        for line in lines:
+            appointment = appointments.get(line.id)
+            rows.append(
+                {
+                    "description": appointment.service.name if appointment else "",
+                    "detail": appointment.staff.display_name if appointment else "",
+                    "price_cents": line.price_cents,
+                    "discount_cents": (
+                        line.price_cents + line.override_adjustment_cents - line.discounted_cents
+                    ),
+                    "tax_cents": line.tax_cents,
+                    "total_cents": line.line_total_cents,
+                }
+            )
+    totals = [
+        ("Subtotal", invoice.computed_subtotal_cents),
+        ("Discounts", -invoice.computed_discount_total_cents),
+    ]
+    adjustment = sum(line.override_adjustment_cents for line in lines)
+    if invoice.override_applied_cents is not None and adjustment:
+        totals.append(
+            (f"Admin/owner-authorized adjustment ({invoice.override_reason})", adjustment)
+        )
+    totals += [
+        (f"Tax {code}", cents) for code, cents in sorted(invoice.tax_totals_by_component.items())
+    ]
+    return _render_page(
+        business,
+        title=f"Invoice #{invoice.invoice_number}",
+        billed_to=f"{customer.first_name} {customer.last_name}",
+        issued_at=invoice.issued_at,
+        rows=rows,
+        totals=totals,
+        grand_total_cents=invoice.grand_total_cents,
+        logo_uri=logo_uri,
+    )
+
+
+def render_retail_invoice_html(
+    invoice: RetailInvoice,
+    business: Business,
+    customer: Customer | None,
+    names: dict[uuid.UUID, str],
+    *,
+    logo_uri: str | None = None,
+) -> str:
+    """A retail invoice (R22); `names` maps variant id -> "Product — Variant"."""
     rows = [
         {
-            "service_name": appointments[line.id].service.name if line.id in appointments else "",
-            "staff_name": (
-                appointments[line.id].staff.display_name if line.id in appointments else ""
-            ),
-            "price_cents": line.price_cents,
-            "discounted_cents": line.discounted_cents,
+            "description": names.get(line.variant_id, ""),
+            "detail": f"Qty {line.quantity}",
+            "price_cents": line.unit_price_cents * line.quantity,
+            "discount_cents": line.discount_cents,
             "tax_cents": line.tax_cents,
-            "line_total_cents": line.line_total_cents,
+            "total_cents": line.line_total_cents,
         }
-        for line in lines
+        for line in sorted(invoice.lines, key=lambda line: line.created_at)
     ]
-    return _INVOICE_TEMPLATE.render(
-        business=business,
-        invoice=invoice,
-        customer=customer,
+    totals = [("Subtotal", invoice.subtotal_cents), ("Discounts", -invoice.discount_total_cents)]
+    totals += [
+        (f"Tax {code}", cents) for code, cents in sorted(invoice.tax_totals_by_component.items())
+    ]
+    return _render_page(
+        business,
+        title=f"Retail invoice #{invoice.invoice_number}",
+        billed_to=f"{customer.first_name} {customer.last_name}" if customer else "Walk-in customer",
+        issued_at=invoice.issued_at,
         rows=rows,
+        totals=totals,
+        grand_total_cents=invoice.grand_total_cents,
         logo_uri=logo_uri,
-        address_lines=_address_lines(business),
-        issued_local=invoice.issued_at.astimezone(zone).strftime("%Y-%m-%d %H:%M"),
-        money=money,
     )
 
 
@@ -273,14 +363,10 @@ def render_receipt_html(
     business: Business,
     ordinal: int,
     *,
+    payment_status: str,
     logo_uri: str | None = None,
 ) -> str:
     zone = ZoneInfo(business.timezone)
-    money: Callable[[int], str] = lambda cents: _money(cents, business.currency_symbol)  # noqa: E731
-    taxes = [
-        {"code": t.component_code, "rate_pct": t.rate_bp / 100, "amount_cents": t.amount_cents}
-        for t in line.taxes
-    ]
     return _RECEIPT_TEMPLATE.render(
         business=business,
         invoice=invoice,
@@ -292,90 +378,277 @@ def render_receipt_html(
         address_lines=_address_lines(business),
         receipt_number=receipt_number(invoice, ordinal),
         service_date=appointment.starts_at.astimezone(zone).strftime("%Y-%m-%d"),
-        # #72: a redeemed visit was settled by its package credit, not a payment on this date.
-        payment_status=(
-            "Prepaid (package credit)"
-            if (line.prepaid_cents or 0) > 0
-            else payment_status_label(invoice)
-        ),
+        payment_status=payment_status,
         show_clinical=show_clinical_fields(business),
-        taxes=taxes,
-        money=money,
+        taxes=[
+            {"code": t.component_code, "rate": _rate(t.rate_bp), "amount_cents": t.amount_cents}
+            for t in line.taxes
+        ],
+        money=lambda cents: _money(cents, business.currency_symbol),
     )
 
 
-@celery_app.task(
-    name="billing.documents.render_invoice_documents",
-    autoretry_for=(Exception,),
-    retry_backoff=True,
-    retry_jitter=True,
-    max_retries=5,
-)
+# --- worker tasks -------------------------------------------------------------------------------
+
+_RETRY = {
+    "autoretry_for": (Exception,),
+    "retry_backoff": True,
+    "retry_jitter": True,
+    "max_retries": 5,
+}
+
+
+async def _logo_uri(db: AsyncSession) -> str | None:
+    logo = await db.get(BrandingAsset, LOGO)
+    return "data:image/png;base64," + base64.b64encode(logo.data).decode() if logo else None
+
+
+async def _stored(db: AsyncSession, source_ids: list[uuid.UUID]) -> set[tuple[str, uuid.UUID]]:
+    rows = await db.execute(
+        select(Document.kind, Document.source_id).where(Document.source_id.in_(source_ids))
+    )
+    return {(kind, source_id) for kind, source_id in rows}
+
+
+def _task_engine():
+    # A fresh engine per task event loop, application role only (`forms/tasks.py`).
+    return create_async_engine(get_settings().database_url, poolclass=NullPool)
+
+
+@celery_app.task(name="billing.documents.render_invoice_documents", **_RETRY)
 def render_invoice_documents(invoice_id: str) -> None:
-    """Queued once, right after `issue_invoice`'s own commit (module docstring). `run_task`
-    (`core/db.py`) runs this under the worker's own event loop, or off a side thread when eager
-    Celery (the test suite) calls it from inside a request handler's already-running loop —
-    the same helper `notifications/tasks.py::_load_business` uses for the identical reason."""
+    """Queued after issue and after every ledger write on a service/package invoice. Renders
+    only what is missing, so a re-queue with nothing new is a couple of cheap reads."""
     run_task(_render_invoice_documents, uuid.UUID(invoice_id))
 
 
 async def _render_invoice_documents(invoice_id: uuid.UUID) -> None:
-    # A fresh engine for this task's event loop, application role only — the same shape
-    # `forms/tasks.py::_render_submission` already uses.
-    engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+    engine = _task_engine()
     try:
         async with AsyncSession(engine, expire_on_commit=False) as db, db.begin():
             invoice = await db.get(Invoice, invoice_id)
             if invoice is None:
                 return
+            lines = sorted(invoice.lines, key=lambda line: line.created_at)
+            have = await _stored(db, [invoice.id, *(line.id for line in lines)])
+            bal = await balance(db, invoice)
+            wanted = [
+                (ordinal, line, status)
+                for ordinal, line in enumerate(lines, start=1)
+                if (status := receipt_status(invoice, line, bal)) is not None
+                and (receipt_kind(status), line.id) not in have
+            ]
+            need_invoice = ("invoice", invoice.id) not in have
+            if not need_invoice and not wanted:
+                return
+
             business = await db.get(Business, 1)
             customer = await db.get(Customer, invoice.customer_id)
-            logo = await db.get(BrandingAsset, LOGO)
-            logo_uri = (
-                "data:image/png;base64," + base64.b64encode(logo.data).decode() if logo else None
-            )
+            logo_uri = await _logo_uri(db)
             key = await business_key(db)
-            retain_until = _plus_years(invoice.issued_at, 6)
-
-            lines = sorted(invoice.lines, key=lambda line: line.created_at)
             appointments: dict[uuid.UUID, Appointment] = {}
             for line in lines:
                 appointment = await db.get(Appointment, line.appointment_id)
                 if appointment is not None:
                     appointments[line.id] = appointment
-
-            invoice_html = render_invoice_html(
-                invoice, business, customer, appointments, logo_uri=logo_uri
-            )
-            await store_document(
-                db,
-                key=key,
-                key_owner="business",
-                linked_customer_id=invoice.customer_id,
-                retain_until=retain_until,
-                kind="invoice",
-                source_id=invoice.id,
-                content=html_to_pdf(invoice_html),
-                content_type="application/pdf",
-            )
-
-            for ordinal, line in enumerate(lines, start=1):
+            common = {
+                "key": key,
+                "key_owner": "business",
+                "linked_customer_id": invoice.customer_id,
+                "retain_until": _plus_years(invoice.issued_at, 6),
+                "content_type": "application/pdf",
+            }
+            if need_invoice:
+                html = render_invoice_html(
+                    invoice, business, customer, appointments, logo_uri=logo_uri
+                )
+                await store_document(
+                    db, kind="invoice", source_id=invoice.id, content=html_to_pdf(html), **common
+                )
+            for ordinal, line, status in wanted:
                 appointment = appointments.get(line.id)
                 if appointment is None:
                     continue
-                receipt_html = render_receipt_html(
-                    invoice, line, appointment, business, ordinal, logo_uri=logo_uri
+                html = render_receipt_html(
+                    invoice,
+                    line,
+                    appointment,
+                    business,
+                    ordinal,
+                    payment_status=status,
+                    logo_uri=logo_uri,
                 )
                 await store_document(
                     db,
-                    key=key,
-                    key_owner="business",
-                    linked_customer_id=invoice.customer_id,
-                    retain_until=retain_until,
-                    kind="treatment_receipt",
+                    kind=receipt_kind(status),
                     source_id=line.id,
-                    content=html_to_pdf(receipt_html),
-                    content_type="application/pdf",
+                    content=html_to_pdf(html),
+                    **common,
                 )
     finally:
         await engine.dispose()
+
+
+@celery_app.task(name="billing.documents.render_retail_invoice_document", **_RETRY)
+def render_retail_invoice_document(invoice_id: str) -> None:
+    run_task(_render_retail_invoice_document, uuid.UUID(invoice_id))
+
+
+async def _render_retail_invoice_document(invoice_id: uuid.UUID) -> None:
+    engine = _task_engine()
+    try:
+        async with AsyncSession(engine, expire_on_commit=False) as db, db.begin():
+            invoice = await db.get(RetailInvoice, invoice_id)
+            if invoice is None or ("retail_invoice", invoice.id) in await _stored(db, [invoice.id]):
+                return
+            business = await db.get(Business, 1)
+            customer = await db.get(Customer, invoice.customer_id) if invoice.customer_id else None
+            rows = await db.execute(
+                select(ProductVariant.id, Product.name, ProductVariant.name)
+                .join(Product, Product.id == ProductVariant.product_id)
+                .where(ProductVariant.id.in_([line.variant_id for line in invoice.lines]))
+            )
+            names = {vid: f"{product} — {variant}" for vid, product, variant in rows}
+            html = render_retail_invoice_html(
+                invoice, business, customer, names, logo_uri=await _logo_uri(db)
+            )
+            await store_document(
+                db,
+                key=await business_key(db),
+                key_owner="business",
+                linked_customer_id=invoice.customer_id,
+                retain_until=_plus_years(invoice.issued_at, 6),
+                kind="retail_invoice",
+                source_id=invoice.id,
+                content=html_to_pdf(html),
+                content_type="application/pdf",
+            )
+    finally:
+        await engine.dispose()
+
+
+_BATCH = 100
+
+
+def _missing(model: type[Invoice] | type[RetailInvoice], kind: str):
+    return (
+        select(model.id)
+        .where(~exists().where(Document.kind == kind, Document.source_id == model.id))
+        .order_by(model.issued_at)
+        .limit(_BATCH)
+    )
+
+
+def _last_ledger_event():
+    """When `invoices.id`'s receipt status last could have changed: issue, or its newest
+    payment, correction, exception, refund or incoming transfer. `greatest` skips NULLs."""
+
+    def newest(column, owner):
+        return select(func.max(column)).where(owner == Invoice.id).scalar_subquery()
+
+    return func.greatest(
+        Invoice.issued_at,
+        newest(InvoicePayment.recorded_at, InvoicePayment.invoice_id),
+        newest(InvoiceBalanceAuthorization.authorized_at, InvoiceBalanceAuthorization.invoice_id),
+        newest(InvoiceRefund.refunded_at, InvoiceRefund.invoice_id),
+        newest(InvoicePaymentTransfer.transferred_at, InvoicePaymentTransfer.to_invoice_id),
+    )
+
+
+async def _pending_renders() -> tuple[list[uuid.UUID], list[uuid.UUID]]:
+    """(service/package invoice ids, retail invoice ids) whose rendering never landed."""
+    engine = _task_engine()
+    try:
+        async with AsyncSession(engine) as db:
+            invoice_ids = set(await db.scalars(_missing(Invoice, "invoice")))
+            retail_ids = list(await db.scalars(_missing(RetailInvoice, "retail_invoice")))
+
+            # Receipts: issued service invoices with a line lacking any receipt rendered since
+            # the last ledger event, then narrowed in Python to those whose *current* status
+            # document is missing. ponytail: unpaid invoices re-qualify every run (no receipt
+            # yet); fine while the outstanding list is small — add a watermark if it isn't.
+            stale = await db.scalars(
+                select(Invoice).where(
+                    Invoice.status == "issued",
+                    Invoice.service_bill_id.is_not(None),
+                    exists().where(
+                        InvoiceLine.invoice_id == Invoice.id,
+                        ~exists().where(
+                            Document.source_id == InvoiceLine.id,
+                            Document.kind.in_(RECEIPT_KINDS),
+                            Document.created_at >= _last_ledger_event(),
+                        ),
+                    ),
+                )
+            )
+            candidates = list(stale)
+            bals = await balances(db, candidates)
+            have = await _stored(db, [line.id for i in candidates for line in i.lines])
+            for invoice in candidates:
+                if len(invoice_ids) >= _BATCH:
+                    break
+                if any(
+                    (status := receipt_status(invoice, line, bals[invoice.id])) is not None
+                    and (receipt_kind(status), line.id) not in have
+                    for line in invoice.lines
+                ):
+                    invoice_ids.add(invoice.id)
+            return list(invoice_ids), retail_ids
+    finally:
+        await engine.dispose()
+
+
+@celery_app.task(name="billing.documents.reconcile_renders", **_RETRY)
+def reconcile_renders() -> None:
+    """Beat repairs the commit/enqueue gap (`forms/tasks.py::reconcile_archives`). Bounded
+    batches and the renderers' idempotence keep overlapping runs harmless."""
+    invoice_ids, retail_ids = run_task(_pending_renders)
+    for invoice_id in invoice_ids:
+        render_invoice_documents.delay(str(invoice_id))
+    for invoice_id in retail_ids:
+        render_retail_invoice_document.delay(str(invoice_id))
+
+
+# --- email (R21: identifiers in the queue, bytes fetched here) ---------------------------------
+
+
+async def _fetch_business_document(document_id: uuid.UUID) -> bytes:
+    engine = _task_engine()
+    try:
+        async with AsyncSession(engine) as db, db.begin():
+            content, _ = await fetch_document(
+                db, key=await business_key(db), key_owner="business", document_id=document_id
+            )
+            return content
+    finally:
+        await engine.dispose()
+
+
+@celery_app.task(name="billing.documents.email_document", **_RETRY)
+def email_document(
+    document_id: str,
+    to: str,
+    subject: str,
+    text: str,
+    filename: str,
+    *,
+    customer_id: str | None = None,
+    notification_type: str | None = None,
+) -> None:
+    content = run_task(_fetch_business_document, uuid.UUID(document_id))
+    deliver_email(
+        to,
+        subject,
+        text,
+        attachments=[EmailAttachment(filename=filename, content=content)],
+        customer_id=customer_id,
+        notification_type=notification_type,
+    )
+
+
+def queue_invoice_render(invoice: Invoice | RetailInvoice) -> None:
+    """Call after the commit that issued the invoice or changed its ledger."""
+    if isinstance(invoice, RetailInvoice):
+        render_retail_invoice_document.delay(str(invoice.id))
+    else:
+        render_invoice_documents.delay(str(invoice.id))
