@@ -63,15 +63,21 @@ test('home shows a degraded database as unreachable', async () => {
   expect(screen.getByText('Online')).toBeInTheDocument()
 })
 
-test('shell exposes the four primary destinations', async () => {
+test('shell exposes the primary destinations this account holds', async () => {
   stubApi(Response.json({ status: 'ok', database: 'ok' }))
 
   renderApp('/clients')
 
-  // Nothing renders until the setup-status check resolves, hence the await.
+  // Nothing renders until the setup-status check resolves, hence the await. This account
+  // holds none of Sell/Billing/Reports' capabilities (`billing.view`, `commission.view`,
+  // `billing.manage`) — Catalog is gone outright (#97), replaced by Sell for whoever holds
+  // `billing.view`.
   const nav = await screen.findByRole('navigation', { name: 'Primary' })
-  for (const label of ['Schedule', 'Clients', 'Catalog', 'Settings']) {
+  for (const label of ['Schedule', 'Clients', 'Settings']) {
     expect(nav).toHaveTextContent(label)
+  }
+  for (const label of ['Sell', 'Billing', 'Reports']) {
+    expect(nav).not.toHaveTextContent(label)
   }
   expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Clients')
 })

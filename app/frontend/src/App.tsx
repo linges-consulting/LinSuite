@@ -4,23 +4,26 @@ import { AppShell } from '@/components/app-shell'
 import { fetchSetupStatus } from '@/lib/api'
 import { useSession } from '@/lib/auth'
 import { useApplyBranding } from '@/lib/branding'
-import { BillReviewPage, BillsPage } from '@/routes/bills'
+import { BillReviewPage } from '@/routes/bills'
+import { BillingPage } from '@/routes/billing'
 import { BookingPage } from '@/routes/booking'
 import { ManageBookingPage } from '@/routes/booking-manage'
 import { ChangePasswordPage } from '@/routes/change-password'
 import { ClientPage, ClientsPage } from '@/routes/clients'
 import { ForgotPasswordPage } from '@/routes/forgot-password'
 import { HomePage } from '@/routes/home'
+import { InvoiceViewPage } from '@/routes/invoice-view'
 import { LoginPage } from '@/routes/login'
 import { MfaEnrolPage } from '@/routes/mfa-enrol'
 import { MfaVerifyPage } from '@/routes/mfa-verify'
 import { PhoneLookupPage } from '@/routes/phone-lookup'
-import { PlaceholderPage } from '@/routes/placeholder'
 import { PublicFormPage } from '@/routes/public-form'
 import { QueuePage } from '@/routes/queue'
+import { ReportsPage } from '@/routes/reports'
 import { ResetPasswordPage } from '@/routes/reset-password'
 import { SchedulePage } from '@/routes/schedule'
 import { SecurityPage } from '@/routes/security'
+import { SellPage } from '@/routes/sell'
 import { SettingsPage } from '@/routes/settings'
 import { SetupPage } from '@/routes/setup'
 
@@ -175,9 +178,13 @@ function AppRoutes() {
         <Route path="clients" element={<ClientsPage />} />
         <Route path="clients/:id" element={<ClientPage />} />
         <Route path="phone-lookup" element={<PhoneLookupPage />} />
-        <Route path="catalog" element={<PlaceholderPage title="Catalog" />} />
-        <Route path="bills" element={<BillsPage />} />
+        <Route path="sell" element={<SellPage />} />
+        <Route path="bills" element={<BillingPage />} />
+        {/* More specific than `bills/:id` below, so React Router ranks it first regardless of
+            declaration order — a literal `invoices` segment never matches `:id`. */}
+        <Route path="bills/invoices/:id" element={<InvoiceViewPage />} />
         <Route path="bills/:id" element={<BillReviewPage />} />
+        <Route path="reports" element={<ReportsPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="security" element={<SecurityPage />} />
       </Route>

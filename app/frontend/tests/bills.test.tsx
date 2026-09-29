@@ -238,19 +238,19 @@ function billsStub(
 
 // --- nav gating -----------------------------------------------------------------------------
 
-test('the Bills nav entry is offered when billing.view is held', async () => {
+test('the Billing nav entry is offered when billing.view is held', async () => {
   billsStub()
   renderApp('/')
 
-  expect(await screen.findByRole('link', { name: 'Bills' })).toBeInTheDocument()
+  expect(await screen.findByRole('link', { name: 'Billing' })).toBeInTheDocument()
 })
 
-test('without billing.view there is no Bills nav entry', async () => {
+test('without billing.view there is no Billing nav entry', async () => {
   billsStub({ capabilities: ['schedule.view'] })
   renderApp('/')
 
   await screen.findByRole('link', { name: 'Schedule' })
-  await waitFor(() => expect(screen.queryByRole('link', { name: 'Bills' })).not.toBeInTheDocument())
+  await waitFor(() => expect(screen.queryByRole('link', { name: 'Billing' })).not.toBeInTheDocument())
 })
 
 // --- the list and the detail screen ---------------------------------------------------------
