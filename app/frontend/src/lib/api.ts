@@ -3036,6 +3036,158 @@ export async function fetchRetailInvoice(id: string): Promise<RetailInvoice> {
   return res.json()
 }
 
+// --- payments, corrections, refunds and balance exceptions (#103) -----------------------------
+// The same ledger for both invoice kinds (`billing/payments.py`) — `invoiceBase` picks the one
+// URL prefix difference, and every call below reads identically for a service or a retail id.
+
+export type PaymentPayerType = 'client' | 'insurer'
+export type PaymentMethod = 'cash' | 'e_transfer' | 'card' | 'insurer'
+export type PaymentStatus = 'pending' | 'received'
+
+export type PaymentEntry = {
+  id: string
+  invoice_id: string | null
+  retail_invoice_id: string | null
+  payer_type: PaymentPayerType
+  method: PaymentMethod
+  status: PaymentStatus
+  amount_cents: number
+  reference: string | null
+  collected_by: string
+  recorded_at: string
+  /** Set on the *new* entry a correction creates — the id of the entry it supersedes. */
+  corrects_payment_id: string | null
+  correction_reason: string | null
+}
+
+export type PaymentTransfer = {
+  id: string
+  from_invoice_id: string
+  to_invoice_id: string
+  received_cents: number
+  received_insurer_cents: number
+  pending_insurer_cents: number
+  transferred_by: string
+  transferred_at: string
+}
+
+export type RefundEntry = {
+  id: string
+  invoice_id: string | null
+  retail_invoice_id: string | null
+  amount_cents: number
+  reason: string
+  approved_by: string
+  refunded_at: string
+}
+
+export type BalanceException = {
+  id: string
+  invoice_id: string | null
+  retail_invoice_id: string | null
+  authorized_by: string
+  reason: string
+  outstanding_cents_at_authorization: number
+  authorized_at: string
+}
+
+export type RecordPaymentBody = {
+  payer_type: PaymentPayerType
+  method: PaymentMethod
+  amount_cents: number
+  status?: PaymentStatus
+  reference?: string | null
+}
+
+/** Only the fields being changed; the rest carry over from the entry being corrected
+ *  (`billing/payments.py::CorrectPaymentIn`). */
+export type CorrectPaymentBody = {
+  reason: string
+  payer_type?: PaymentPayerType
+  method?: PaymentMethod
+  amount_cents?: number
+  reference?: string | null
+}
+
+function invoiceBase(kind: 'service' | 'retail', invoiceId: string): string {
+  const prefix = kind === 'retail' ? '/api/retail-invoices' : '/api/invoices'
+  return `${prefix}/${encodeURIComponent(invoiceId)}`
+}
+
+export async function fetchPayments(
+  kind: 'service' | 'retail',
+  invoiceId: string,
+): Promise<{ payments: PaymentEntry[]; transfers: PaymentTransfer[] }> {
+  const res = await fetch(`${invoiceBase(kind, invoiceId)}/payments`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load payments')
+  return res.json()
+}
+
+export async function recordPayment(
+  kind: 'service' | 'retail',
+  invoiceId: string,
+  body: RecordPaymentBody,
+): Promise<PaymentEntry> {
+  const res = await send('POST', `${invoiceBase(kind, invoiceId)}/payments`, body)
+  if (!res.ok) throw await failure(res, 'Could not record this payment')
+  return res.json()
+}
+
+export async function correctPayment(
+  kind: 'service' | 'retail',
+  invoiceId: string,
+  paymentId: string,
+  body: CorrectPaymentBody,
+): Promise<PaymentEntry> {
+  const res = await send(
+    'POST',
+    `${invoiceBase(kind, invoiceId)}/payments/${encodeURIComponent(paymentId)}/corrections`,
+    body,
+  )
+  if (!res.ok) throw await failure(res, 'Could not correct this payment')
+  return res.json()
+}
+
+export async function fetchRefunds(
+  kind: 'service' | 'retail',
+  invoiceId: string,
+): Promise<{ refunds: RefundEntry[] }> {
+  const res = await fetch(`${invoiceBase(kind, invoiceId)}/refunds`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load refunds')
+  return res.json()
+}
+
+/** `billing.manage`, Admin Mode — capped server-side at money received. */
+export async function recordRefund(
+  kind: 'service' | 'retail',
+  invoiceId: string,
+  body: { amount_cents: number; reason: string },
+): Promise<RefundEntry> {
+  const res = await send('POST', `${invoiceBase(kind, invoiceId)}/refunds`, body)
+  if (!res.ok) throw await failure(res, 'Could not record this refund')
+  return res.json()
+}
+
+export async function fetchBalanceExceptions(
+  kind: 'service' | 'retail',
+  invoiceId: string,
+): Promise<{ exceptions: BalanceException[] }> {
+  const res = await fetch(`${invoiceBase(kind, invoiceId)}/balance-exceptions`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load balance exceptions')
+  return res.json()
+}
+
+/** `billing.manage`, Admin Mode. */
+export async function recordBalanceException(
+  kind: 'service' | 'retail',
+  invoiceId: string,
+  body: { reason: string },
+): Promise<BalanceException> {
+  const res = await send('POST', `${invoiceBase(kind, invoiceId)}/balance-exceptions`, body)
+  if (!res.ok) throw await failure(res, 'Could not record this balance exception')
+  return res.json()
+}
+
 // --- CTI: phone lookup, demo mode, the simulated call (Phase 14, #16) -----------------------
 
 /** A previous provider (`scheduling/cti.py`'s own shape): the most recent visit with each
