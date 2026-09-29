@@ -30,10 +30,9 @@ import {
   type DiscountChoice,
   type RetailSale,
 } from '@/lib/api'
-import { centsToDollars } from '@/lib/money'
+import { money } from '@/lib/money'
 import { OPEN_RETAIL_SALES, PRODUCT_CATALOG, RETAIL_SALE } from '@/lib/query-keys'
 
-const money = (cents: number) => `$${centsToDollars(cents)}`
 
 type CustomerHint = { id: string; name: string }
 

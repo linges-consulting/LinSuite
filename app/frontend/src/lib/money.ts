@@ -14,6 +14,9 @@ export function centsToDollars(cents: number): string {
   return (cents / 100).toFixed(2)
 }
 
+/** Cents for display, with the dollar sign: `money(1250)` is `"$12.50"`. */
+export const money = (cents: number): string => `$${centsToDollars(cents)}`
+
 /**
  * The cents a typed amount means, or `null` when it is not an amount at all.
  *

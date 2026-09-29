@@ -41,10 +41,9 @@ import {
   requestBillOverride,
 } from '@/lib/api'
 import { useSession } from '@/lib/auth'
-import { centsToDollars, dollarsToCents } from '@/lib/money'
+import { dollarsToCents, money } from '@/lib/money'
 import { BILL, DRAFT_BILLS, INLINE_ADMIN, OVERRIDE_REQUESTS } from '@/lib/query-keys'
 
-const money = (cents: number) => `$${centsToDollars(cents)}`
 
 /**
  * Every visit with a draft service bill (#59) — completed appointments waiting to be reviewed

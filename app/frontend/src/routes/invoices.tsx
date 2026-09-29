@@ -25,11 +25,10 @@ import {
   type InvoiceSummary,
   type RetailInvoiceSummary,
 } from '@/lib/api'
-import { centsToDollars } from '@/lib/money'
+import { money } from '@/lib/money'
 import { INVOICES, RETAIL_INVOICES } from '@/lib/query-keys'
 
 const PAGE_SIZE = 25
-const money = (cents: number) => `$${centsToDollars(cents)}`
 
 type Kind = 'service' | 'retail'
 

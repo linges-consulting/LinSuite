@@ -34,10 +34,9 @@ import {
 } from '@/lib/api'
 import { unsettledPendingInsurerIds } from '@/lib/payments'
 import { useCan } from '@/lib/capability-gate'
-import { centsToDollars, dollarsToCents } from '@/lib/money'
+import { centsToDollars, dollarsToCents, money } from '@/lib/money'
 import { INVOICE_BALANCE_EXCEPTIONS, INVOICE_PAYMENTS, INVOICE_REFUNDS } from '@/lib/query-keys'
 
-const money = (cents: number) => `$${centsToDollars(cents)}`
 
 export type InvoicePaymentsPanelProps = {
   invoice: Invoice | RetailInvoice

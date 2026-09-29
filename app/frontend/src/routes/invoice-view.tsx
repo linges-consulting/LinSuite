@@ -24,10 +24,9 @@ import {
   type RetailInvoice,
   type RetailInvoiceLine,
 } from '@/lib/api'
-import { centsToDollars } from '@/lib/money'
+import { money } from '@/lib/money'
 import { CATALOG, INVOICE, PACKAGE_PURCHASE, RETAIL_INVOICE } from '@/lib/query-keys'
 
-const money = (cents: number) => `$${centsToDollars(cents)}`
 
 /**
  * One invoice (spec #95 user stories 15-41; #102): lines with discounts and per-line tax, the

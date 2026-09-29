@@ -44,7 +44,7 @@ import {
   type SellablePackageRow,
 } from '@/lib/api'
 import { useCan } from '@/lib/capability-gate'
-import { centsToDollars, dollarsToCents } from '@/lib/money'
+import { centsToDollars, dollarsToCents, money } from '@/lib/money'
 import {
   CLIENT_PACKAGE_PURCHASES,
   INVOICE,
@@ -52,7 +52,6 @@ import {
   SELLABLE_PACKAGES,
 } from '@/lib/query-keys'
 
-const money = (cents: number) => `$${centsToDollars(cents)}`
 
 type PurchaseStatus = 'active' | 'unpaid' | 'expired' | 'used_up' | 'refunded'
 

@@ -17,10 +17,9 @@ import {
   searchCustomers,
   type Customer,
 } from '@/lib/api'
-import { centsToDollars } from '@/lib/money'
+import { money } from '@/lib/money'
 import { CUSTOMERS, PACKAGE_LIABILITY_REPORT } from '@/lib/query-keys'
 
-const money = (cents: number) => `$${centsToDollars(cents)}`
 
 /** `5 Jan 2026`: a purchase or expiry date needs no clock. */
 function shortDate(instant: string): string {

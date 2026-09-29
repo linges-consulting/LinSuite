@@ -18,10 +18,9 @@ import {
   requestCommissionExport,
   type CommissionRow,
 } from '@/lib/api'
-import { centsToDollars } from '@/lib/money'
+import { money } from '@/lib/money'
 import { COMMISSION_REPORT, ROSTER } from '@/lib/query-keys'
 
-const money = (cents: number) => `$${centsToDollars(cents)}`
 
 const STATUS_VARIANT: Record<CommissionRow['payment_status'], 'success' | 'info' | 'warning' | 'outline'> = {
   received: 'success',
