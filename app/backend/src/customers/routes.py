@@ -228,10 +228,14 @@ def customer_out(customer: Customer, classification: Classification) -> Customer
     )
 
 
-async def _classifications(
+async def classifications_of(
     db: AsyncSession, customer_ids: list[uuid.UUID]
 ) -> dict[uuid.UUID, Classification]:
-    """Every id's classification, in one grouped count query — never one query per row."""
+    """Every id's classification, in one grouped count query — never one query per row.
+
+    Public (no leading underscore): `scheduling/cti.py`'s phone lookup returns the same
+    `CustomerOut` shape this module's list and search already do, and reuses this rather than
+    a second grouped-count query for the same thing."""
     if not customer_ids:
         return {}
     threshold = await db.scalar(select(Business.vip_visit_threshold).where(Business.id == 1))
@@ -328,7 +332,7 @@ async def find_customers(
             .limit(page_size)
         )
     )
-    classifications = await _classifications(db, [c.id for c in rows])
+    classifications = await classifications_of(db, [c.id for c in rows])
     return CustomerListOut(
         customers=[customer_out(c, classifications[c.id]) for c in rows], total=total or 0
     )

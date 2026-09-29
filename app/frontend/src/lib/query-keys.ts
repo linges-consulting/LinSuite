@@ -88,3 +88,9 @@ export const BILL = ['bill'] as const
  *  status — both take the bill id after them. */
 export const OVERRIDE_REQUESTS = ['override-requests'] as const
 export const INLINE_ADMIN = ['inline-admin'] as const
+/** CTI (Phase 14, #16): a phone lookup, keyed by the digits searched — the phone-lookup
+ *  page and the screen-pop panel share the same cache entry for the same number. Whether
+ *  the demo-mode toggle is on, read by the phone-lookup page to decide whether to render
+ *  the simulate control at all. */
+export const PHONE_LOOKUP = ['phone-lookup'] as const
+export const DEMO_MODE = ['cti-demo-mode'] as const

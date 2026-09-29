@@ -981,6 +981,9 @@ export type NotificationSettings = {
 
   // --- walk-in queue toggle (Phase 7 Task 1, #12) — "take a number", not "fit me in" ---
   enable_walk_in_queue: boolean
+
+  // --- CTI demo mode (Phase 14, #16) — off by default, `enable_walk_in_queue`'s exact shape ---
+  demo_mode: boolean
 }
 
 /** A field left out is left alone — the three secrets included, so rotating one credential
@@ -1006,6 +1009,7 @@ export type NotificationSettingsChange = Partial<{
   booking_daily_cap_per_ip: number
   booking_daily_cap_per_email: number
   enable_walk_in_queue: boolean
+  demo_mode: boolean
 }>
 
 export async function fetchNotificationSettings(): Promise<NotificationSettings> {
@@ -2635,5 +2639,59 @@ export async function applyInlineAdminEdit(
     body,
   )
   if (!res.ok) throw await failure(res, 'Could not save this edit')
+  return res.json()
+}
+
+// --- CTI: phone lookup, demo mode, the simulated call (Phase 14, #16) -----------------------
+
+/** A previous provider (`scheduling/cti.py`'s own shape): the most recent visit with each
+ *  distinct staff member this client has completed a service with, newest first. */
+export type PreviousProvider = {
+  staff_id: string
+  display_name: string
+  colour: string
+  service_name: string
+  last_visit_at: string
+}
+
+/** One resolved match: the same non-PHI summary the Clients list and the booking dialog's
+ *  search already send (`CustomerRecord`), so it can seed a quick-book the same way a picked
+ *  search result already does. */
+export type PhoneLookupMatch = {
+  customer: CustomerRecord
+  previous_providers: PreviousProvider[]
+}
+
+/** Three shapes off one endpoint: nobody matches, several people share this prefix (treated
+ *  like search — `candidates` only), or exactly one does (treated like a profile open —
+ *  `match` only). Never more than one of `candidates`/`match` populated at once. */
+export type PhoneLookupResult = {
+  status: 'no_match' | 'candidates' | 'match'
+  candidates: CustomerRecord[]
+  match: PhoneLookupMatch | null
+}
+
+/** Digits, formatting, or a partial number (at least 4 digits) — the server normalises
+ *  either side the same way (`customers/phone.py`). */
+export async function lookupPhone(phone: string): Promise<PhoneLookupResult> {
+  const res = await fetch(`/api/cti/lookup?${new URLSearchParams({ phone })}`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not look up that number')
+  return res.json()
+}
+
+/** Whether the settings panel's demo-mode toggle is on — readable by any signed-in account
+ *  holding `customers.view`, no Admin Mode needed (the write path is what requires it). */
+export async function fetchDemoMode(): Promise<{ enabled: boolean }> {
+  const res = await fetch('/api/cti/demo-mode', { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not read the demo mode setting')
+  return res.json()
+}
+
+/** A fake incoming call — nothing is persisted server-side. 404s while demo mode is off. */
+export type CallEvent = { call_id: string; phone: string; received_at: string }
+
+export async function simulateCall(): Promise<CallEvent> {
+  const res = await send('POST', '/api/cti/simulate-call', {})
+  if (!res.ok) throw await failure(res, 'Could not simulate a call')
   return res.json()
 }

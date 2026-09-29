@@ -263,6 +263,15 @@ class Business(Base):
         Boolean, server_default=text("false")
     )
 
+    # --- CTI demo mode (Phase 14, #16; `scheduling/cti.py`) --------------------------------
+    # Off by default, `enable_walk_in_queue`'s exact shape (0040): with it off, the "simulate
+    # incoming call" control is unreachable anywhere in the product — `scheduling/cti.py`'s
+    # simulate endpoint 404s, exactly the way a disabled queue's endpoints do — so a working
+    # clinic never sees a button that exists only to demo a phone system it doesn't have.
+    # Phone lookup itself (the real feature CLAUDE.md's CTI note promises) needs none of this;
+    # it is always on, gated only by `customers.view`.
+    demo_mode: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+
 
 class AuditEvent(Base):
     """Append-only: who did what, and when (ADR-0002).

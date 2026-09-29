@@ -14,6 +14,7 @@ import { HomePage } from '@/routes/home'
 import { LoginPage } from '@/routes/login'
 import { MfaEnrolPage } from '@/routes/mfa-enrol'
 import { MfaVerifyPage } from '@/routes/mfa-verify'
+import { PhoneLookupPage } from '@/routes/phone-lookup'
 import { PlaceholderPage } from '@/routes/placeholder'
 import { PublicFormPage } from '@/routes/public-form'
 import { QueuePage } from '@/routes/queue'
@@ -173,6 +174,7 @@ function AppRoutes() {
         <Route path="queue" element={<QueuePage />} />
         <Route path="clients" element={<ClientsPage />} />
         <Route path="clients/:id" element={<ClientPage />} />
+        <Route path="phone-lookup" element={<PhoneLookupPage />} />
         <Route path="catalog" element={<PlaceholderPage title="Catalog" />} />
         <Route path="bills" element={<BillsPage />} />
         <Route path="bills/:id" element={<BillReviewPage />} />

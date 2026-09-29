@@ -110,6 +110,8 @@ async def test_an_unconfigured_business_says_so_plainly(client):
     assert body["booking_daily_cap_per_email"] == 5
     # Walk-in queue (Phase 7 Task 1, #12) — off by default, the migration's own default.
     assert body["enable_walk_in_queue"] is False
+    # CTI demo mode (Phase 14, #16) — off by default, same shape.
+    assert body["demo_mode"] is False
 
 
 async def test_the_templates_list_has_all_fourteen_seeded_rows_with_their_merge_fields(client):
@@ -430,6 +432,37 @@ async def test_the_walk_in_queue_toggle_is_left_alone_by_an_unrelated_patch(clie
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["enable_walk_in_queue"] is True
+
+
+# --- CTI demo mode (Phase 14, #16) ------------------------------------------------------------
+#
+# Only the toggle's own GET/PATCH round trip here, the walk-in queue section's exact shape —
+# `tests/test_cti.py` covers what the toggle actually gates (the simulate endpoint's 404).
+
+
+async def test_the_demo_mode_toggle_round_trips(client):
+    await as_admin(client)
+
+    resp = await client.patch(NOTIFICATIONS, json={"demo_mode": True})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["demo_mode"] is True
+
+    events = await audit("business.notification_settings_updated")
+    assert events[-1] == {"changed": ["demo_mode"]}
+
+    again = await client.get(NOTIFICATIONS)
+    assert again.json()["demo_mode"] is True
+
+
+async def test_the_demo_mode_toggle_is_left_alone_by_an_unrelated_patch(client):
+    await as_admin(client)
+    await client.patch(NOTIFICATIONS, json={"demo_mode": True})
+
+    resp = await client.patch(NOTIFICATIONS, json={"sms_enabled": True})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["demo_mode"] is True
 
 
 # --- low-stock alert opt-in (#62) --------------------------------------------------------------

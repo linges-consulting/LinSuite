@@ -71,6 +71,17 @@ class Customer(Base):
         ),
         # The purge job's scan: `retention_expires_at < now()`.
         Index("ix_customers_retention_expires_at", "retention_expires_at"),
+        # Phone lookup (Phase 14, #16): the NANP-normalised value, not a second denormalised
+        # column — see `customers/phone.py` and migration 0071's own docstring for why the
+        # `CASE` here has to stay byte-for-byte what that module compiles.
+        Index(
+            "ix_customers_phone_normalized",
+            text(
+                "CASE WHEN length(phone) = 11 AND left(phone, 1) = '1' "
+                "THEN substr(phone, 2) ELSE phone END"
+            ),
+            postgresql_where=text("phone IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
