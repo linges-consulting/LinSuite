@@ -37,19 +37,32 @@ async def claimed_instance(client):
             await purge.execute(text("DELETE FROM audit_events"))
             await purge.execute(text("DELETE FROM erasure_requests"))
             await purge.execute(text("DELETE FROM form_links"))
+            await purge.execute(text("DELETE FROM retail_return_lines"))  # R26: retail too
+            await purge.execute(text("DELETE FROM retail_returns"))
+            await purge.execute(text("DELETE FROM invoice_payments"))
+            await purge.execute(text("DELETE FROM invoice_balance_authorizations"))
             await purge.execute(text("DELETE FROM invoice_payment_transfers"))  # #68
             await purge.execute(text("DELETE FROM commission_postings"))
+            await purge.execute(text("DELETE FROM retail_invoice_line_taxes"))
+            await purge.execute(text("DELETE FROM retail_invoice_line_discounts"))
+            await purge.execute(text("DELETE FROM retail_invoice_lines"))
             await purge.execute(text("DELETE FROM invoice_line_taxes"))
             await purge.execute(text("DELETE FROM invoice_line_discounts"))
             await purge.execute(text("DELETE FROM invoice_lines"))
             await purge.execute(text("DELETE FROM retail_return_lines"))  # #76
             await purge.execute(text("DELETE FROM retail_returns"))  # #76
             await purge.execute(text("DELETE FROM invoice_refunds"))  # #67
+            await purge.execute(text("DELETE FROM retail_invoices"))
             await purge.execute(text("DELETE FROM invoices"))
             await purge.execute(text("DELETE FROM business_invoice_counters"))
+            await purge.execute(text("DELETE FROM stock_movements"))
         await wipe_document_keys()
         async with session_scope() as db:
             for table in (
+                "retail_sale_lines",
+                "retail_sales",
+                "product_variants",
+                "products",
                 "bill_override_requests",
                 "service_bill_discounts",
                 "retail_sale_discounts",  # review T1, 0065
@@ -230,3 +243,68 @@ async def test_issuing_itself_returns_no_commission_fields_in_the_201_body(clien
 
     assert resp.status_code == 201, resp.text
     _assert_no_commission_leak(resp.json())
+
+
+# --- billing/retail_sales.py: retail invoices (R26) ------------------------------------------
+
+
+async def _retail_as_staff(client) -> dict:
+    """An admin issues a retail sale sold by a staff member with a real retail rate and
+    returns one unit, then hands the session to a plain front-desk Staff account."""
+    from tests.test_retail_sales import add_line, issue, make_staff, new_variant, start_sale
+
+    await as_admin(client)
+    seller = await make_staff(client, commission_rate_retail_bp=2500)
+    variant = await new_variant(client, quantity_on_hand=10)
+    sale = await start_sale(client, sold_by_staff_id=seller["id"])
+    await add_line(client, sale["id"], variant["id"], quantity=2)
+    issued = await issue(client, sale["id"])
+    assert issued.status_code == 201, issued.text
+    _assert_no_commission_leak(issued.json())
+    returned = await client.post(
+        f"/api/retail-invoices/{issued.json()['id']}/returns",
+        json={
+            "reason": "Changed mind",
+            "lines": [
+                {
+                    "retail_invoice_line_id": issued.json()["lines"][0]["id"],
+                    "quantity": 1,
+                    "restock": True,
+                }
+            ],
+        },
+    )
+    assert returned.status_code == 201, returned.text
+    _assert_no_commission_leak(returned.json())
+
+    await add_front_desk_account()
+    client.cookies.clear()
+    await as_staff(client)
+    return issued.json()
+
+
+async def test_retail_invoice_reads_never_include_commission_fields(client):
+    invoice = await _retail_as_staff(client)
+
+    single = await client.get(f"/api/retail-invoices/{invoice['id']}")
+    listed = await client.get("/api/retail-invoices")
+    draft = await client.get(f"/api/retail-sales/{invoice['retail_sale_id']}")
+
+    for resp in (single, listed, draft):
+        assert resp.status_code == 200, resp.text
+        _assert_no_commission_leak(resp.json())
+    assert len(single.json()["lines"]) == 1
+
+
+async def test_retail_cancel_as_staff_returns_no_commission_fields(client):
+    invoice = await _retail_as_staff(client)
+
+    resp = await client.post(
+        f"/api/retail-invoices/{invoice['id']}/cancel", json={"reason": "Wrong item"}
+    )
+
+    assert resp.status_code == 200, resp.text
+    _assert_no_commission_leak(resp.json())
+    replacement = await client.get(f"/api/retail-sales/{resp.json()['replacement_sale_id']}")
+    assert replacement.status_code == 200, replacement.text
+    _assert_no_commission_leak(replacement.json())

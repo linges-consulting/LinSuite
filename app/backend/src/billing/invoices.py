@@ -33,7 +33,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import ColumnElement, exists, select
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -48,6 +48,7 @@ from billing.bill_review import (
     price_bill,
 )
 from billing.commission import commission_amount_cents
+from billing.commission_ledger import forfeited_appointments, reverse_commission
 from billing.documents import render_invoice_documents
 from billing.invoice_numbering import allocate_invoice_number
 from billing.keys import business_key
@@ -357,6 +358,10 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
         # Under the lineage lock (R9) — see `carry_payments`.
         await carry_payments(db, replaces, invoice, actor.id)
 
+    # R28: a session whose package was refunded with "reverse commission" never earns.
+    forfeited = await forfeited_appointments(
+        db, (p.bill_line.appointment_id for p in priced_bill.lines)
+    )
     for p in priced_bill.lines:
         bill_line, priced, billed = p.bill_line, p.priced, p.billed
         # The billed amount in the line's own convention: pre-tax for an exclusive line, the
@@ -409,16 +414,17 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
         basis_cents = priced.commission_basis_cents
         if overridden and bill.override_commission_basis == "reduces":
             basis_cents = billed.pretax_cents
-        db.add(
-            CommissionPosting(
-                invoice_line_id=invoice_line.id,
-                invoice_id=invoice.id,
-                staff_id=bill_line.staff_id,
-                commission_rate_bp=bill_line.commission_rate_bp,
-                basis_cents=basis_cents,
-                amount_cents=commission_amount_cents(basis_cents, bill_line.commission_rate_bp),
+        if bill_line.appointment_id not in forfeited:
+            db.add(
+                CommissionPosting(
+                    invoice_line_id=invoice_line.id,
+                    invoice_id=invoice.id,
+                    staff_id=bill_line.staff_id,
+                    commission_rate_bp=bill_line.commission_rate_bp,
+                    basis_cents=basis_cents,
+                    amount_cents=commission_amount_cents(basis_cents, bill_line.commission_rate_bp),
+                )
             )
-        )
 
         for code, amount_cents in billed.component_cents.items():
             db.add(
@@ -499,36 +505,6 @@ def cancel_issued(db: AsyncSession, invoice: Invoice, actor_id: uuid.UUID, reaso
         },
     )
     return now
-
-
-async def reverse_commission(db: AsyncSession, *where: ColumnElement[bool]) -> int:
-    """Post a `reversal` for every matching `earned` posting not already reversed (a posting is
-    reversed at most once, whichever of #68's cancel or #73's refund gets there first). Dated
-    today, never backdated (#69). Returns how many were reversed; does not commit."""
-    reversal = aliased(CommissionPosting)
-    earned = list(
-        await db.scalars(
-            select(CommissionPosting).where(
-                CommissionPosting.kind == "earned",
-                ~exists().where(reversal.reverses_posting_id == CommissionPosting.id),
-                *where,
-            )
-        )
-    )
-    for posting in earned:
-        db.add(
-            CommissionPosting(
-                invoice_line_id=posting.invoice_line_id,
-                invoice_id=posting.invoice_id,
-                staff_id=posting.staff_id,
-                kind="reversal",
-                commission_rate_bp=posting.commission_rate_bp,
-                basis_cents=posting.basis_cents,
-                amount_cents=-posting.amount_cents,
-                reverses_posting_id=posting.id,
-            )
-        )
-    return len(earned)
 
 
 @router.post("/invoices/{invoice_id}/cancel")

@@ -283,7 +283,13 @@ async def refundable_cents(db: AsyncSession, lineage: list[uuid.UUID]) -> int:
 
 
 async def record_refund(
-    db: AsyncSession, invoice: AnyInvoice, *, amount_cents: int, reason: str, approver: User
+    db: AsyncSession,
+    invoice: AnyInvoice,
+    *,
+    amount_cents: int,
+    reason: str,
+    approver: User,
+    reverses_commission: bool = False,
 ) -> InvoiceRefund:
     """The one refund path (#67; #73/#76 call this too). The caller must already have checked
     the approver holds `billing.manage` in Admin Mode. Stages the refund + audit event without
@@ -308,6 +314,7 @@ async def record_refund(
         amount_cents=amount_cents,
         reason=reason,
         approved_by=approver.id,
+        reverses_commission=reverses_commission,
     )
     db.add(refund)
     await db.flush()

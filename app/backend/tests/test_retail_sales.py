@@ -55,11 +55,11 @@ async def claimed_instance(client):
         await purge.execute(text("DELETE FROM invoice_payments"))  # #66/#76
         await purge.execute(text("DELETE FROM invoice_balance_authorizations"))  # R8
         await purge.execute(text("DELETE FROM invoice_payment_transfers"))  # #68, R15
+        await purge.execute(text("DELETE FROM commission_postings"))  # #69; retail since R27
         await purge.execute(text("DELETE FROM retail_invoice_line_taxes"))  # 0065
         await purge.execute(text("DELETE FROM retail_invoice_line_discounts"))  # 0065
         await purge.execute(text("DELETE FROM retail_invoice_lines"))
         await purge.execute(text("DELETE FROM retail_invoices"))
-        await purge.execute(text("DELETE FROM commission_postings"))  # #69
         await purge.execute(text("DELETE FROM invoice_line_taxes"))
         await purge.execute(text("DELETE FROM invoice_line_discounts"))
         await purge.execute(text("DELETE FROM invoice_lines"))
@@ -436,7 +436,14 @@ async def test_the_commission_rate_is_snapshotted_from_sold_by_at_issue(client):
     assert resp.status_code == 201, resp.text
     line = resp.json()["lines"][0]
     assert line["staff_id"] == seller["id"]
-    assert line["commission_rate_bp"] == 2500
+    # R26: the rate is admin-only — read it off the ledger, never the staff-facing payload.
+    assert "commission_rate_bp" not in line
+    async with session_scope() as db:
+        rate = await db.scalar(
+            text("SELECT commission_rate_bp FROM retail_invoice_lines WHERE id = :id"),
+            {"id": line["id"]},
+        )
+    assert rate == 2500
 
 
 async def test_a_linked_sale_stays_visible_on_the_invoice(client):

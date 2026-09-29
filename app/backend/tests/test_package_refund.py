@@ -14,7 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from core.db import session_scope
-from tests.test_bill_review import EMAIL, PASSWORD
+from tests.test_bill_review import EMAIL, PASSWORD, STAFF
 from tests.test_credit_redemption import (  # noqa: F401 — claimed_instance is an autouse fixture
     bill_of,
     book,
@@ -279,6 +279,73 @@ async def test_a_reversed_posting_is_not_reversed_again_when_its_invoice_is_canc
 
     assert cancelled.status_code == 200, cancelled.text
     assert await scalar("SELECT count(*) FROM commission_postings WHERE kind = 'reversal'") == 1
+
+
+# --- R28: a reversed session never re-earns ------------------------------------------------
+
+
+async def net_commission() -> tuple[int, int]:
+    """(earned rows, net amount) across the whole ledger."""
+    async with session_scope() as db:
+        row = (
+            await db.execute(
+                text(
+                    "SELECT count(*) FILTER (WHERE kind = 'earned'), "
+                    "coalesce(sum(amount_cents), 0) FROM commission_postings"
+                )
+            )
+        ).one()
+    return row[0], row[1]
+
+
+async def rated_world(client):
+    w = await world(client, credits=10, price_cents=96000)
+    rated = await client.patch(f"{STAFF}/{w.staff_id}", json={"commission_rate_services_bp": 1000})
+    assert rated.status_code == 200, rated.text
+    return w
+
+
+REVERSE = {"amount_cents": 1000, "cancel_remaining_credits": False, "reverse_commission": True}
+PRESERVE = {**REVERSE, "reverse_commission": False}
+
+
+@pytest.mark.parametrize(("choice", "earns"), [(REVERSE, False), (PRESERVE, True)])
+async def test_a_bill_issued_after_the_refund_follows_its_commission_choice(client, choice, earns):
+    """The session was delivered (credit redeemed) but its bill not yet issued when the package
+    was refunded: "reverse" means it never earns; "preserve" leaves it earning as usual."""
+    w = await rated_world(client)
+    appointment_id = await book(client, w)
+    assert (await complete(client, appointment_id, w.purchase["id"])).status_code == 200
+    resp = await refund(client, w.purchase["id"], exception=choice)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["commission_reversals"] == 0  # nothing posted yet to reverse
+
+    bill = await bill_of(client, appointment_id)
+    issued = await client.post(f"/api/bills/{bill['id']}/issue", json={})
+
+    assert issued.status_code == 201, issued.text
+    earned_rows, net = await net_commission()
+    assert earned_rows == (1 if earns else 0)
+    assert (net > 0) is earns
+
+
+async def test_reissuing_a_reversed_sessions_bill_never_re_earns(client):
+    w = await rated_world(client)
+    service_invoice = await redeem_and_issue(client, w)
+    assert (await net_commission())[1] > 0
+    assert (await refund(client, w.purchase["id"], exception=REVERSE)).status_code == 201
+    assert (await net_commission())[1] == 0
+
+    cancelled = await client.post(
+        f"/api/invoices/{service_invoice['id']}/cancel", json={"reason": "Wrong date"}
+    )
+    assert cancelled.status_code == 200, cancelled.text
+    reissued = await client.post(
+        f"/api/bills/{cancelled.json()['replacement_bill_id']}/issue", json={}
+    )
+
+    assert reissued.status_code == 201, reissued.text
+    assert await net_commission() == (1, 0)
 
 
 async def test_the_exception_is_capped_at_money_received_less_prior_refunds(client):

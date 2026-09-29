@@ -1319,11 +1319,10 @@ class PackagePurchaseCredit(Base):
 # "commission earns on delivery, not sale") but it is still the same rule applied to what
 # "delivery" means for a retail item: nothing has left the shelf until stock is actually
 # deducted, which only happens at issue — issue *is* the retail delivery moment, so that is
-# when the rate is read and frozen. #75 does **not** post a commission entry anywhere — no
-# such ledger exists yet (#69 is running in parallel and is expected to add the posting hook,
-# symmetrically, once both tickets merge); this column only makes the rate available for #69
-# to read, snapshotted so a later rate change on `Staff` can never rewrite an already-issued
-# line's numbers.
+# when the rate is read and frozen. Review R27 posts the retail `commission_postings` entry in
+# that same issue transaction (reversed on cancel and, proportionally, on returns —
+# `billing/commission_ledger.py`); the rate is snapshotted here so a later rate change on
+# `Staff` can never rewrite an already-issued line's numbers.
 #
 # ---------------------------------------------------------------------------------------------
 
@@ -1641,16 +1640,35 @@ class CommissionPosting(Base):
         ),
         Index("ix_commission_postings_staff_posted", "staff_id", "posted_at"),
         Index("ix_commission_postings_invoice", "invoice_id"),
+        # Review R27 (0066): a service line or a retail line, never both — #76's ledger shape.
+        CheckConstraint(
+            "(invoice_line_id IS NOT NULL AND invoice_id IS NOT NULL "
+            "AND retail_invoice_line_id IS NULL AND retail_invoice_id IS NULL) OR "
+            "(invoice_line_id IS NULL AND invoice_id IS NULL "
+            "AND retail_invoice_line_id IS NOT NULL AND retail_invoice_id IS NOT NULL)",
+            name="ck_commission_postings_one_line",
+        ),
+        Index("ix_commission_postings_retail_invoice", "retail_invoice_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True, server_default=text("gen_random_uuid()")
     )
-    invoice_line_id: Mapped[uuid.UUID] = mapped_column(
+    invoice_line_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("invoice_lines.id", ondelete="RESTRICT")
     )
-    invoice_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("invoices.id", ondelete="RESTRICT"))
-    # The delivering staff member — always `InvoiceLine.staff_id`, never a package seller.
+    invoice_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("invoices.id", ondelete="RESTRICT")
+    )
+    # Review R27: retail commission, posted at retail issue against the seller
+    # (`RetailInvoiceLine.staff_id`, the snapshotted retail rate).
+    retail_invoice_line_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("retail_invoice_lines.id", ondelete="RESTRICT")
+    )
+    retail_invoice_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("retail_invoices.id", ondelete="RESTRICT")
+    )
+    # The delivering staff member (service) or the seller (retail) — never a package seller.
     staff_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("staff.id", ondelete="RESTRICT"))
     kind: Mapped[str] = mapped_column(String(16), server_default=text("'earned'"))
     # Copied straight off `InvoiceLine.commission_rate_bp` — never re-read live.
@@ -1660,8 +1678,9 @@ class CommissionPosting(Base):
     # Positive for an "earned" posting, negative for a "reversal" — never zero-clamped or
     # rewritten; see the module section above.
     amount_cents: Mapped[int] = mapped_column(Integer)
-    # Null for an "earned" posting; set on a "reversal" to the posting it corrects. Not read by
-    # anything #69 builds — kept for #67/#68/#73 to find "what does this correct."
+    # Null for an "earned" posting; set on a "reversal" to the posting it corrects. A retail
+    # return (R27) may reverse one earned posting in several proportional steps; the reversals
+    # naming it never sum past it (`billing/invoices.py::reverse_commission`).
     reverses_posting_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("commission_postings.id", ondelete="RESTRICT")
     )
@@ -1824,6 +1843,9 @@ class InvoiceRefund(Base):
     amount_cents: Mapped[int] = mapped_column(Integer)
     reason: Mapped[str] = mapped_column(Text)
     approved_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    # R28 (0066): a package refund's explicit "reverse commission" choice (#73). Sessions
+    # redeemed from that package never earn afterwards, even when their bill issues later.
+    reverses_commission: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     refunded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -2042,3 +2064,28 @@ class RetailInvoiceLineTax(Base):
     component_code: Mapped[str] = mapped_column(String(16), primary_key=True)
     rate_bp: Mapped[int] = mapped_column(Integer)
     amount_cents: Mapped[int] = mapped_column(Integer)
+
+
+class CommissionExport(Base):
+    """One queued CSV export of the commission report (R29). `billing/commission_report.py`
+    inserts it `pending`; the Celery task fills `content` and flips it to `ready` (or
+    `failed`). The window is resolved at request time, so the file matches what was asked."""
+
+    __tablename__ = "commission_exports"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'ready', 'failed')", name="ck_commission_exports_status"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    requested_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    from_date: Mapped[Date] = mapped_column(DateColumn)
+    to_date: Mapped[Date] = mapped_column(DateColumn)
+    staff_id: Mapped[uuid.UUID | None] = mapped_column()
+    status: Mapped[str] = mapped_column(String(16), server_default=text("'pending'"))
+    content: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

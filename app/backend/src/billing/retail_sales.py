@@ -41,9 +41,12 @@ from billing.bill_review import (
     eligible_discounts,
     tax_out,
 )
+from billing.commission import commission_amount_cents
+from billing.commission_ledger import reverse_commission
 from billing.discount_resolver import DiscountConflict
 from billing.invoice_numbering import allocate_invoice_number
 from billing.models import (
+    CommissionPosting,
     Discount,
     RetailInvoice,
     RetailInvoiceLine,
@@ -167,8 +170,9 @@ class RetailInvoiceLineOut(BaseModel):
     line_total_cents: int
     discounts: list[RetailInvoiceLineDiscountOut]
     taxes: list[RetailInvoiceLineTaxOut]
+    # R26: no commission rate or basis — this payload is staff-facing (`billing.view`); the
+    # admin-only commission report (`commission.view`) is where retail commission is read.
     staff_id: str
-    commission_rate_bp: int
 
 
 class RetailInvoiceOut(BaseModel):
@@ -373,7 +377,6 @@ async def _invoice_out(db: SessionDep, invoice: RetailInvoice) -> RetailInvoiceO
                     for t in line.taxes
                 ],
                 staff_id=str(line.staff_id),
-                commission_rate_bp=line.commission_rate_bp,
             )
             for line in invoice.lines
         ],
@@ -718,6 +721,20 @@ async def issue_retail_sale(
         )
         db.add(invoice_line)
         await db.flush()
+        # R27: retail commission is earned at the sale (retail's delivery), on the pre-tax
+        # basis with "absorbed" discounts left out, at the seller's rate frozen just above.
+        db.add(
+            CommissionPosting(
+                retail_invoice_line_id=invoice_line.id,
+                retail_invoice_id=invoice.id,
+                staff_id=invoice_line.staff_id,
+                commission_rate_bp=invoice_line.commission_rate_bp,
+                basis_cents=p.priced.commission_basis_cents,
+                amount_cents=commission_amount_cents(
+                    p.priced.commission_basis_cents, invoice_line.commission_rate_bp
+                ),
+            )
+        )
         for discount in p.discounts:
             db.add(
                 RetailInvoiceLineDiscount(
@@ -907,6 +924,13 @@ async def return_retail_items(
                 actor_user_id=actor.id,
                 reason=payload.reason,
             )
+        # R27: returned units stop earning — the line's cumulative reversal follows the share
+        # returned so far (`billing/commission_ledger.py`'s rule), restocked or not.
+        await reverse_commission(
+            db,
+            CommissionPosting.retail_invoice_line_id == line.id,
+            share=(returned.get(line.id, 0) + item.quantity, line.quantity),
+        )
     await db.flush()
     record_event(
         db,
@@ -1013,6 +1037,9 @@ async def cancel_retail_invoice(
         invoice.cancelled_at = datetime.now(UTC)
         invoice.cancelled_by = actor.id
         invoice.cancel_reason = payload.reason
+        # R27: what the original still earns is reversed today; the replacement earns its own
+        # at issue, so the pair nets to one earning (#68's service shape).
+        await reverse_commission(db, CommissionPosting.retail_invoice_id == invoice.id)
         replacement = RetailSale(
             customer_id=invoice.customer_id,
             sold_by_staff_id=invoice.sold_by_staff_id,
