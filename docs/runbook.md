@@ -593,12 +593,12 @@ health check's status code on its own (a missing future partition is not "the ap
 
 ## 10. Dropping an old access-log partition
 
-This is deliberately **never automated**. The purge role's own `DELETE` grant on
-`audit_access_log` partitions (`public.ensure_access_log_partitions()`, migrations 0021/0070)
-covers row-level deletes for its own retention job — it does not, and structurally cannot,
-`DROP TABLE`: dropping a whole partition is DDL, and DDL on this table is schema-owner-only.
-Trimming the audit trail is meant to be a deliberate, documented act, not something a nightly
-job decides on its own.
+This is deliberately **never automated**. No runtime role can remove access-log history: the
+app role only inserts, and since migration 0067 the purge role holds `SELECT` alone on
+`audit_access_log` and every partition `public.ensure_access_log_partitions()` creates
+(ADR-0001 rule 15). Dropping a whole partition is DDL, and DDL on this table is
+schema-owner-only — so trimming the audit trail is a deliberate, documented act by the
+operator, not something a nightly job decides on its own.
 
 1. **Confirm nothing in the partition is still inside anyone's retention window** before
    touching it. The access log inherits the business's longest applicable retention horizon
