@@ -181,9 +181,11 @@ async def test_enrolment_hands_back_a_provisioning_uri_issued_by_the_business(cl
     assert started.status_code == 200, started.text
     uri = body["provisioning_uri"]
     assert uri.startswith("otpauth://totp/")
-    # The issuer is what an authenticator app labels the entry with: this business, not a
-    # product name, so somebody with two clinics on one phone can tell them apart.
-    assert "issuer=Cedar%20Lane%20Clinic" in uri
+    # The issuer is what an authenticator app labels the entry with: the product and this
+    # business, so somebody with two clinics on one phone can tell them apart; the account
+    # under it is the email.
+    assert "issuer=LinSuite%20-%20Cedar%20Lane%20Clinic" in uri
+    assert uri.startswith("otpauth://totp/LinSuite%20-%20Cedar%20Lane%20Clinic:")
     assert body["secret"] in uri
 
 

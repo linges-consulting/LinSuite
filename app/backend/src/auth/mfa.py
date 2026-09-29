@@ -144,9 +144,14 @@ def unseal(sealed: str | None, email: str) -> str | None:
         return None
 
 
-def provisioning_uri(secret: str, email: str, issuer: str) -> str:
-    """What the QR code encodes. The issuer is the business, so somebody carrying two
-    clinics on one phone can tell the two entries apart."""
+PRODUCT_NAME = "LinSuite"
+
+
+def provisioning_uri(secret: str, email: str, business_name: str | None) -> str:
+    """What the QR code encodes. The issuer is "LinSuite - <business>", so somebody carrying
+    two clinics on one phone can tell the entries apart; the account under it is the email.
+    Authenticator apps render the pair their own way (e.g. "Issuer (email)")."""
+    issuer = f"{PRODUCT_NAME} - {business_name}" if business_name else PRODUCT_NAME
     return pyotp.TOTP(secret, interval=TOTP_INTERVAL_SECONDS).provisioning_uri(
         name=email, issuer_name=issuer
     )
