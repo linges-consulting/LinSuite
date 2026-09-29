@@ -130,8 +130,15 @@ async def refund_package(
 
     refund = None
     if amount > 0:
+        # R28: the choice is persisted on the refund row, so a session redeemed from this
+        # package whose bill issues (or is reissued) later never earns either.
         refund = await record_refund(
-            db, invoice, amount_cents=amount, reason=payload.reason, approver=actor
+            db,
+            invoice,
+            amount_cents=amount,
+            reason=payload.reason,
+            approver=actor,
+            reverses_commission=reverse,
         )
     if invoice.status == "issued":
         cancel_issued(db, invoice, actor.id, payload.reason)

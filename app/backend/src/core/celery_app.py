@@ -32,6 +32,7 @@ from core.logging import configure_logging
 celery_app = Celery(
     "linsuite",
     include=[
+        "billing.commission_report",
         "billing.documents",
         "core.tasks",
         "customers.tasks",
