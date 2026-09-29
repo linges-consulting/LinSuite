@@ -1295,6 +1295,99 @@ export async function reactivateVariant(productId: string, variantId: string): P
   return res.json()
 }
 
+// --- packages: prepaid credit definitions (Settings → Packages, #101) ----------------------
+
+/** One service a package definition carries credits for. `service_active` is carried the
+ *  same way `ServiceRequirement.resource_active` is — a definition that already named a
+ *  service which has since been deactivated has to say so rather than go quietly wrong. */
+export type PackageDefinitionServiceRow = {
+  service_id: string
+  service_name: string
+  service_active: boolean
+  credits: number
+}
+
+/** A package or bundle definition: what it costs, how long a purchase is good for, and the
+ *  services and credit counts it carries. `services` is never empty — see
+ *  `billing/packages.py`'s module docstring for why a definition with none is not
+ *  representable at all, not just an edge case of a real one. */
+export type PackageDefinitionRow = {
+  id: string
+  name: string
+  description: string | null
+  price_cents: number
+  /** Null: never expires. Otherwise, days from the purchase date. */
+  expires_after_days: number | null
+  transferable: boolean
+  tax_component_keys: string[]
+  tax_convention: TaxConvention
+  active: boolean
+  services: PackageDefinitionServiceRow[]
+}
+
+export type PackageDefinitionServiceDraft = { service_id: string; credits: number }
+
+/** The scalar fields, on both create and edit. `services` is its own field on create (the
+ *  whole set, required) and its own endpoint on edit (`PUT /{id}/services`) — the same split
+ *  `ServiceDraft` keeps for eligible staff and requirements. */
+export type PackageDefinitionDraft = {
+  name: string
+  description: string | null
+  price_cents: number
+  expires_after_days: number | null
+  transferable: boolean
+  tax_component_keys: string[]
+  tax_convention: TaxConvention
+}
+
+export async function fetchPackageDefinitions(
+  includeInactive = false,
+): Promise<PackageDefinitionRow[]> {
+  const res = await fetch(`/api/admin/packages${includeInactive ? '?include_inactive=true' : ''}`)
+  if (!res.ok) throw await failure(res, 'Could not load the packages')
+  return (await res.json()).packages
+}
+
+export async function createPackageDefinition(
+  draft: PackageDefinitionDraft & { services: PackageDefinitionServiceDraft[] },
+): Promise<PackageDefinitionRow> {
+  const res = await send('POST', '/api/admin/packages', draft)
+  if (!res.ok) throw await failure(res, 'Could not create the package')
+  return res.json()
+}
+
+export async function updatePackageDefinition(
+  id: string,
+  draft: Partial<PackageDefinitionDraft>,
+): Promise<PackageDefinitionRow> {
+  const res = await send('PATCH', `/api/admin/packages/${id}`, draft)
+  if (!res.ok) throw await failure(res, 'Could not save the package')
+  return res.json()
+}
+
+/** The whole services set, replaced — the same "nothing half-saved" shape
+ *  `replaceServiceRequirements` uses. */
+export async function replacePackageDefinitionServices(
+  id: string,
+  services: PackageDefinitionServiceDraft[],
+): Promise<PackageDefinitionRow> {
+  const res = await send('PUT', `/api/admin/packages/${id}/services`, { services })
+  if (!res.ok) throw await failure(res, "Could not save the package's services")
+  return res.json()
+}
+
+export async function deactivatePackageDefinition(id: string): Promise<PackageDefinitionRow> {
+  const res = await send('POST', `/api/admin/packages/${id}/deactivate`, {})
+  if (!res.ok) throw await failure(res, 'Could not deactivate the package')
+  return res.json()
+}
+
+export async function reactivatePackageDefinition(id: string): Promise<PackageDefinitionRow> {
+  const res = await send('POST', `/api/admin/packages/${id}/reactivate`, {})
+  if (!res.ok) throw await failure(res, 'Could not reactivate the package')
+  return res.json()
+}
+
 // --- forms: templates and their frozen versions (Settings → Forms) ---------------------------
 
 export type FormKind = 'intake' | 'consent' | 'waiver' | 'other'
