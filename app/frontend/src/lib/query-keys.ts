@@ -122,3 +122,9 @@ export const INVOICE_BALANCE_EXCEPTIONS = ['invoice-balance-exceptions'] as cons
 export const PRODUCT_CATALOG = ['product-catalog'] as const
 export const OPEN_RETAIL_SALES = ['open-retail-sales'] as const
 export const RETAIL_SALE = ['retail-sale'] as const
+/** The client Packages tab (#108): one client's package purchases, id after — a different key
+ *  from `PACKAGE_DEFINITIONS` (Settings → Packages, admin) and from the staff-facing sellable
+ *  list below, since purchasing invalidates only this client's own history. */
+export const CLIENT_PACKAGE_PURCHASES = ['client-package-purchases'] as const
+/** The *Sell package* dialog's own read (#108): active packages, `billing.view`, Staff Mode. */
+export const SELLABLE_PACKAGES = ['sellable-packages'] as const

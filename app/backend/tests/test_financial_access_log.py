@@ -63,6 +63,18 @@ async def test_opening_a_package_purchase_logs_one_row(client):
     assert await access_rows("package_purchase", w.purchase["id"]) == [w.customer_id]
 
 
+async def test_opening_a_clients_package_purchases_logs_one_row_per_open(client):
+    # #108: the client Packages tab — opening it is the same kind of financial-history read as
+    # an invoice's, logged even though nothing in the response is in `PHI_FIELDS`.
+    w = await world(client)
+
+    for _ in range(2):
+        resp = await client.get(f"/api/customers/{w.customer_id}/package-purchases")
+        assert resp.status_code == 200, resp.text
+
+    assert await access_rows("package_purchases", w.customer_id) == [w.customer_id, w.customer_id]
+
+
 async def test_opening_a_service_bill_logs_one_row(client):
     w = await world(client)  # signs in as admin; the visit below is a second, billable one
     bill_id, _ = await complete_a_visit(client, service_name="Deep Tissue")
