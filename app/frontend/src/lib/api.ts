@@ -1404,6 +1404,108 @@ export async function reactivatePackageDefinition(id: string): Promise<PackageDe
   return res.json()
 }
 
+// --- packages: selling and holding one (client Packages tab, #108) -------------------------
+
+/** What front desk sees to sell (`GET /api/packages`, `billing.view`, Staff Mode) — active
+ *  packages only, and only what selling one needs: unlike `PackageDefinitionRow`, no
+ *  `description`/`transferable`/`active`, which stay the admin screen's own fields. */
+export type SellablePackageServiceRow = { service_id: string; service_name: string; credits: number }
+export type SellablePackageRow = {
+  id: string
+  name: string
+  price_cents: number
+  expires_after_days: number | null
+  tax_convention: TaxConvention
+  services: SellablePackageServiceRow[]
+}
+
+export async function fetchSellablePackages(): Promise<SellablePackageRow[]> {
+  const res = await fetch('/api/packages', { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load the packages')
+  return (await res.json()).packages
+}
+
+export async function purchasePackage(
+  definitionId: string,
+  customerId: string,
+): Promise<PackagePurchase> {
+  const res = await send('POST', `/api/packages/${definitionId}/purchase`, {
+    customer_id: customerId,
+  })
+  if (!res.ok) throw await failure(res, 'Could not sell this package')
+  return res.json()
+}
+
+/** One credit grant on a purchase (`GET /api/packages/{purchase_id}` / the purchase endpoint's
+ *  own frozen allocation, distinct from `ClientPackagePurchaseCredit` below, which tracks
+ *  remaining/used rather than the allocation). */
+export type PackagePurchaseCredit = {
+  service_id: string
+  credits_total: number
+  allocated_price_cents: number
+}
+
+/** `POST /api/packages/{id}/purchase`'s response — the frozen purchase plus the invoice it was
+ *  issued as. `invoice_id` is a plain service `invoices` row (`ck_invoices_source_xor`): the
+ *  same invoice view a service invoice opens in, at `/bills/invoices/{invoice_id}`. */
+export type PackagePurchase = {
+  id: string
+  package_definition_id: string
+  customer_id: string
+  name: string
+  price_cents: number
+  expires_after_days: number | null
+  expires_at: string | null
+  purchased_at: string
+  credits_activated: boolean
+  activated_at: string | null
+  credits_voided_at: string | null
+  credits: PackagePurchaseCredit[]
+  invoice_id: string
+  invoice_number: number
+  computed_subtotal_cents: number
+  computed_tax_total_cents: number
+  tax_totals_by_component: Record<string, number>
+  grand_total_cents: number
+}
+
+/** One service's remaining/used credits on a client's purchase
+ *  (`ClientPackagePurchaseCreditOut`). */
+export type ClientPackagePurchaseCredit = {
+  service_id: string
+  service_name: string
+  credits_total: number
+  credits_used: number
+  credits_remaining: number
+}
+
+/** A client's Packages tab (`GET /api/customers/{id}/package-purchases`, `billing.view`,
+ *  logged like any other client-scoped financial read — `core/access_log.py`). `customer_id`
+ *  is the purchaser, permanently; #111's package transfer will add a derived current holder
+ *  and a transfer chain onto this same row without renaming it. */
+export type ClientPackagePurchase = {
+  id: string
+  package_definition_id: string
+  name: string
+  price_cents: number
+  customer_id: string
+  purchased_at: string
+  expires_at: string | null
+  credits_activated: boolean
+  credits_voided_at: string | null
+  invoice_id: string
+  invoice_number: number
+  credits: ClientPackagePurchaseCredit[]
+}
+
+export async function fetchClientPackagePurchases(
+  customerId: string,
+): Promise<ClientPackagePurchase[]> {
+  const res = await fetch(`/api/customers/${customerId}/package-purchases`, { cache: 'no-store' })
+  if (!res.ok) throw await failure(res, 'Could not load this client’s packages')
+  return (await res.json()).purchases
+}
+
 // --- forms: templates and their frozen versions (Settings → Forms) ---------------------------
 
 export type FormKind = 'intake' | 'consent' | 'waiver' | 'other'

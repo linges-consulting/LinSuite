@@ -4,9 +4,10 @@ import { renderApp, stubApi } from './harness'
 
 /**
  * The client profile's Invoices and Packages cards (#97/#95 user stories 54/65): behind
- * `billing.view`, the same front-desk capability Billing and Sell already use. Invoices is
- * now the real card (#99, covered in depth by `tests/client-invoices.test.tsx`); Packages
- * stays an empty slot. This file only covers whether the cards render at all.
+ * `billing.view`, the same front-desk capability Billing and Sell already use. Both are now
+ * real cards — Invoices (#99, `tests/client-invoices.test.tsx`) and Packages (#108,
+ * `tests/client-packages.test.tsx`) cover their own content in depth. This file only covers
+ * whether the cards render at all.
  */
 
 afterEach(() => vi.unstubAllGlobals())
@@ -81,6 +82,9 @@ function profileStub(capabilities: string[]) {
           timezone: 'America/Toronto',
         })
       }
+      if (parsed.pathname === '/api/customers/c1/package-purchases') {
+        return Response.json({ purchases: [] })
+      }
       return undefined
     },
   })
@@ -92,7 +96,7 @@ test('a client with billing.view sees Invoices and Packages cards, both empty', 
 
   expect(await screen.findByRole('heading', { name: 'Priya Nair' })).toBeInTheDocument()
   expect(await screen.findByText('No invoices yet')).toBeInTheDocument()
-  expect(screen.getByText('Packages are not built yet')).toBeInTheDocument()
+  expect(await screen.findByText('No packages yet')).toBeInTheDocument()
 })
 
 test('without billing.view neither card renders', async () => {
@@ -101,5 +105,5 @@ test('without billing.view neither card renders', async () => {
 
   await screen.findByRole('heading', { name: 'Priya Nair' })
   await waitFor(() => expect(screen.queryByText('No invoices yet')).not.toBeInTheDocument())
-  expect(screen.queryByText('Packages are not built yet')).not.toBeInTheDocument()
+  expect(screen.queryByText('No packages yet')).not.toBeInTheDocument()
 })

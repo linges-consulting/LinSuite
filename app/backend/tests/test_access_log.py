@@ -84,6 +84,8 @@ LOGGED = {
     ("GET", "/api/retail-invoices/{invoice_id}/balance-exceptions"),
     ("GET", "/api/bills/{bill_id}"),
     ("GET", "/api/packages/purchases/{purchase_id}"),
+    # #108: the client Packages tab — a client's own purchase history, logged the same way.
+    ("GET", "/api/customers/{customer_id}/package-purchases"),
     # Lists: logged only when `?customer_id=` narrows them to one client's history
     # (`LogAccessIfFiltered`); unfiltered they are list renders (ADR-0002 §4) and write nothing.
     ("GET", "/api/invoices"),
