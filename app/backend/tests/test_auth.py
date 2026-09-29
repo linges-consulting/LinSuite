@@ -8,8 +8,9 @@ from sqlalchemy import text
 
 from auth import session as session_mod
 from core.config import get_settings
-from core.db import get_purge_engine, session_scope
+from core.db import session_scope
 from core.redis import get_redis
+from tests.conftest import get_owner_engine
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -27,10 +28,13 @@ COOKIE = "linsuite_session"
 @pytest.fixture(autouse=True)
 async def claimed_instance(client):
     """Every test starts on an instance whose setup wizard has already created the admin."""
-    # Only the purge role may remove audit history — the app role is refused, which is what
-    # test_the_application_role_cannot_rewrite_or_erase_an_audit_event proves.
-    async with get_purge_engine().begin() as purge:
-        await purge.execute(text("DELETE FROM audit_events"))
+    # Neither runtime role may remove audit history (#83: the purge role's DELETE is now
+    # exactly `documents`/`form_submissions`/`session_notes`/`customer_document_keys`) — the
+    # app role is refused, which is what
+    # test_the_application_role_cannot_rewrite_or_erase_an_audit_event proves. So this reset
+    # runs as the schema owner, the one role either trigger lets through.
+    async with get_owner_engine().begin() as owner:
+        await owner.execute(text("DELETE FROM audit_events"))
     async with session_scope() as db:
         for table in ("users", "businesses", "setup_token"):
             await db.execute(text(f"DELETE FROM {table}"))

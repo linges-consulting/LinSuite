@@ -64,6 +64,21 @@ Phase 9 (#9, migration 0031): `session_notes.customer_id` also references the ke
 
 **9. A restore brings shredded keys back.** Backups taken before a purge still contain the wrapped keys it destroyed. After any restore, run `customers.tasks.purge_expired` before the system is used again; it is idempotent, re-shreds every key whose hold has passed, and finishes every unheld erasure request (`docs/tech-stack.md` §10).
 
+## Amendment — 2026-09-29 (#83; M5 spec #82): purge-role default-deny
+
+Written when pre-flight for M5 found the hole rule 4's own baseline left open: `0001_baseline`'s `ALTER DEFAULT PRIVILEGES` handed `linsuite_purge` `SELECT, DELETE` on *every* table, present and future, not only the ones retention expiry actually purges — and every ledger and audit trigger built since (the M4 wave's invoices, stock movements, commission postings, package purchases and redemptions, retail sales and returns; the two audit logs) copied the same "let the purge role through unconditionally" shape as a convenience for test teardown. A leaked purge credential, or a grant restored by mistake, could therefore have erased the financial ledger or either audit log — exactly the records this ADR's trigger design was meant to make erasure-proof for everything the purge role does not need to touch.
+
+**10. The purge role's authority is narrowed to exactly the four tables `customers/tasks.py::_shred` deletes from:** `documents`, `form_submissions`, `session_notes`, `customer_document_keys`. Everywhere else it is `SELECT` only, by construction rather than convention:
+
+- `ALTER DEFAULT PRIVILEGES` now grants the purge role `SELECT` alone on tables the schema owner creates from here on, so a future migration that never thinks about the purge role at all still ships closed rather than open.
+- Every existing table's `DELETE` is revoked from the purge role and re-granted on exactly the four — parents and partitions alike, so `audit_access_log`'s existing yearly children lose it too, not only the parent a revoke on it alone would leave untouched (rule 4's own asymmetry, first flagged in migration 0019's docstring).
+- `ensure_access_log_partitions()` (migration 0021) — the one path that grants directly rather than through the default-privileges mechanism, since `linsuite_app` cannot `CREATE TABLE` — stops granting `DELETE` to the purge role on a partition it creates, so a January nobody has reached yet is never a table the purge role can delete from either.
+- Every ledger and audit trigger function is redefined without the `current_user = 'linsuite_purge'` half of its bypass check; the schema-owner half stays, because migrations and an operator's own recovery must not be blocked. `documents`, `form_submissions`, `session_notes` and `customer_document_keys` are untouched — their own guards already condition the purge role's `DELETE` on the client's retention hold (rules 4 and 7) rather than letting it through unconditionally, which is the shape every other trigger is now brought to resemble the *absence* of, since these four are the only tables the purge role should still reach at all.
+
+**11. Test teardown that used the purge role for tables outside the four now runs as the schema owner instead** — the same connection `wipe_document_keys` (`tests/conftest.py`) already used for `business_document_keys`, and the one an operator's own recovery would connect as. No test depends on the purge role deleting outside its four tables; several new ones (`tests/test_schema.py`) pin that it cannot, including with the grant restored by hand and the trigger alone standing in the way.
+
+migration 0067 (`0067_purge_role_default_deny.py`) is the whole change; its downgrade restores rule 4's original shape exactly, function bodies included.
+
 ## Consequences
 
 **Positive**

@@ -97,12 +97,14 @@ async def test_the_app_role_recreates_next_year_with_the_parents_grants_and_trig
                 {"r": role, "t": NEXT, "p": privilege},
             )
 
-        # Exactly the parent's: the app appends and reads, the purge role reads and deletes.
+        # The app appends and reads; the purge role reads only (#83: its DELETE is exactly
+        # `documents`/`form_submissions`/`session_notes`/`customer_document_keys`, and a new
+        # partition of the access log is never one of those four).
         for privilege, app, purge in (
             ("SELECT", True, True),
             ("INSERT", True, False),
             ("UPDATE", False, False),
-            ("DELETE", False, True),
+            ("DELETE", False, False),
             ("TRUNCATE", False, False),
         ):
             assert await may(APP_ROLE, privilege) is app, f"{APP_ROLE} {privilege}"

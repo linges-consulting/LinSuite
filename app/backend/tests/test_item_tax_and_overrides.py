@@ -16,7 +16,8 @@ from billing.commission import CommissionDiscountInput
 from billing.discount_resolver import DiscountInput, resolve_discount_amounts
 from billing.pricing import OverrideConflict, distribute_override, price_line
 from billing.tax import ComponentRate, compute_line_tax
-from core.db import get_purge_engine, session_scope
+from core.db import session_scope
+from tests.conftest import get_owner_engine
 from tests.test_bill_review import (
     BILLS,
     as_admin,
@@ -37,9 +38,11 @@ from tests.test_retail_sales import (  # noqa: F401 — autouse fixture
 
 @pytest.fixture(autouse=True)
 async def wipe_issued_rows_after(claimed_instance):  # noqa: F811 — runs after its setup
-    """Issued rows are purge-only; later test files' app-role wipes cannot remove them."""
+    """Issued rows are immutable to the app role; later test files' app-role wipes cannot
+    remove them, and none of these are among the purge role's four permitted tables (#83), so
+    this reset runs as the schema owner."""
     yield
-    async with get_purge_engine().begin() as purge:
+    async with get_owner_engine().begin() as owner:
         for table in (
             "retail_return_lines",
             "retail_returns",
@@ -62,7 +65,7 @@ async def wipe_issued_rows_after(claimed_instance):  # noqa: F811 — runs after
             "business_invoice_counters",
             "stock_movements",
         ):
-            await purge.execute(text(f"DELETE FROM {table}"))
+            await owner.execute(text(f"DELETE FROM {table}"))
 
 
 GST = ComponentRate("GST", 500)

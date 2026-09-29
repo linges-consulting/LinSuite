@@ -23,10 +23,10 @@ import pytest
 from PIL import Image
 from sqlalchemy import text
 
-from core.db import get_purge_engine, session_scope
+from core.db import session_scope
 from core.redis import get_redis
 from core.security import hash_password
-from tests.conftest import add_account
+from tests.conftest import add_account, get_owner_engine
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -61,8 +61,8 @@ PROFILE = {
 
 @pytest.fixture(autouse=True)
 async def claimed_instance(client):
-    async with get_purge_engine().begin() as purge:
-        await purge.execute(text("DELETE FROM audit_events"))
+    async with get_owner_engine().begin() as owner:
+        await owner.execute(text("DELETE FROM audit_events"))
     async with session_scope() as db:
         for table in ("branding_assets", "users", "businesses", "setup_token"):
             await db.execute(text(f"DELETE FROM {table}"))

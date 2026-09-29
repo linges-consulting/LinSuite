@@ -20,11 +20,11 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
 from auth.capabilities import CAPABILITIES, Requires
-from core.db import get_purge_engine, session_scope
+from core.db import session_scope
 from core.redis import get_redis
 from core.security import hash_password
 from main import app as main_app
-from tests.conftest import add_account
+from tests.conftest import add_account, get_owner_engine
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -47,8 +47,8 @@ FULL_ADMIN = ["admin", "roles.manage", "users.manage"]
 
 @pytest.fixture(autouse=True)
 async def claimed_instance(client):
-    async with get_purge_engine().begin() as purge:
-        await purge.execute(text("DELETE FROM audit_events"))
+    async with get_owner_engine().begin() as owner:
+        await owner.execute(text("DELETE FROM audit_events"))
     async with session_scope() as db:
         for table in ("users", "businesses", "setup_token"):
             await db.execute(text(f"DELETE FROM {table}"))

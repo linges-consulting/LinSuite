@@ -17,8 +17,8 @@ from sqlalchemy.exc import DBAPIError
 from billing.allocation import allocate_bundle_price
 from billing.models import PackagePurchase
 from billing.package_purchase import activate_credits
-from core.db import get_purge_engine, session_scope
-from tests.conftest import add_account, wipe_document_keys
+from core.db import session_scope
+from tests.conftest import add_account, get_owner_engine, wipe_document_keys
 
 EMAIL = "owner@cedar.example"
 PASSWORD = "correct horse battery"
@@ -47,27 +47,29 @@ def purchase_url(definition_id: str) -> str:
 @pytest.fixture(autouse=True)
 async def claimed_instance(client):
     async def wipe():
-        async with get_purge_engine().begin() as purge:
-            await purge.execute(text("DELETE FROM audit_events"))
-            await purge.execute(text("DELETE FROM erasure_requests"))
-            await purge.execute(text("DELETE FROM form_links"))
-            # #71's own guarded tables, purge-role-bypassed (migration 0055) — must go before
-            # `invoices`/`package_definitions`/`customers`/`services` below, all of which they
-            # reference with `ON DELETE RESTRICT`.
-            await purge.execute(text("DELETE FROM package_credit_redemptions"))  # #72
-            await purge.execute(text("DELETE FROM package_credit_voids"))  # #73
-            await purge.execute(text("DELETE FROM package_purchase_credits"))
-            await purge.execute(text("DELETE FROM invoice_payment_transfers"))  # #68
-            await purge.execute(text("DELETE FROM commission_postings"))  # #69
-            await purge.execute(text("DELETE FROM invoice_line_taxes"))
-            await purge.execute(text("DELETE FROM invoice_line_discounts"))
-            await purge.execute(text("DELETE FROM invoice_lines"))
-            await purge.execute(text("DELETE FROM retail_return_lines"))  # #76
-            await purge.execute(text("DELETE FROM retail_returns"))  # #76
-            await purge.execute(text("DELETE FROM invoice_refunds"))  # #67
-            await purge.execute(text("DELETE FROM invoices"))
-            await purge.execute(text("DELETE FROM package_purchases"))
-            await purge.execute(text("DELETE FROM business_invoice_counters"))
+        # #83: none of these are among the purge role's four permitted tables — reset as the
+        # schema owner instead.
+        async with get_owner_engine().begin() as owner:
+            await owner.execute(text("DELETE FROM audit_events"))
+            await owner.execute(text("DELETE FROM erasure_requests"))
+            await owner.execute(text("DELETE FROM form_links"))
+            # #71's own guarded tables — must go before `invoices`/`package_definitions`/
+            # `customers`/`services` below, all of which they reference with `ON DELETE
+            # RESTRICT`.
+            await owner.execute(text("DELETE FROM package_credit_redemptions"))  # #72
+            await owner.execute(text("DELETE FROM package_credit_voids"))  # #73
+            await owner.execute(text("DELETE FROM package_purchase_credits"))
+            await owner.execute(text("DELETE FROM invoice_payment_transfers"))  # #68
+            await owner.execute(text("DELETE FROM commission_postings"))  # #69
+            await owner.execute(text("DELETE FROM invoice_line_taxes"))
+            await owner.execute(text("DELETE FROM invoice_line_discounts"))
+            await owner.execute(text("DELETE FROM invoice_lines"))
+            await owner.execute(text("DELETE FROM retail_return_lines"))  # #76
+            await owner.execute(text("DELETE FROM retail_returns"))  # #76
+            await owner.execute(text("DELETE FROM invoice_refunds"))  # #67
+            await owner.execute(text("DELETE FROM invoices"))
+            await owner.execute(text("DELETE FROM package_purchases"))
+            await owner.execute(text("DELETE FROM business_invoice_counters"))
         await wipe_document_keys()
         async with session_scope() as db:
             for table in (
