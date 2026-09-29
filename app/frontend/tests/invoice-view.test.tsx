@@ -166,6 +166,32 @@ const DRAFT_BILL = {
   inline_admin_bill_edit_enabled: false,
 }
 
+/** A package purchase's own frozen shape (`GET /api/packages/purchases/{id}`) — the #109 gap
+ *  fix's read, distinct from the invoice it was issued as. */
+function packagePurchase(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'pp1',
+    package_definition_id: 'pd1',
+    customer_id: 'c1',
+    name: '10-Session Massage Pack',
+    price_cents: 96000,
+    expires_after_days: null as number | null,
+    expires_at: null as string | null,
+    purchased_at: '2026-09-20T15:00:00Z',
+    credits_activated: true,
+    activated_at: '2026-09-20T15:00:00Z',
+    credits_voided_at: null as string | null,
+    credits: [{ service_id: 'sv1', credits_total: 10, allocated_price_cents: 96000 }],
+    invoice_id: 'inv-pkg1',
+    invoice_number: 12,
+    computed_subtotal_cents: 96000,
+    computed_tax_total_cents: 0,
+    tax_totals_by_component: {},
+    grand_total_cents: 96000,
+    ...overrides,
+  }
+}
+
 function stub(
   opts: {
     capabilities?: string[]
@@ -173,6 +199,8 @@ function stub(
     invoice?: ReturnType<typeof serviceInvoice>
     retail?: ReturnType<typeof retailInvoice>
     bill?: typeof DRAFT_BILL
+    packagePurchase?: ReturnType<typeof packagePurchase>
+    catalogServices?: { id: string; name: string }[]
   } = {},
 ) {
   const { capabilities = ['billing.view'], mode = 'staff' } = opts
@@ -192,6 +220,34 @@ function stub(
       if (invoiceMatch && invoice && invoiceMatch[1] === invoice.id) return Response.json(invoice)
       if (opts.retail && parsed.pathname === `/api/retail-invoices/${opts.retail.id}`) {
         return Response.json(opts.retail)
+      }
+      // The payments panel's own reads — stubbed here so every invoice-page test answers them,
+      // per this ticket's own note, rather than falling through to the harness's generic 200.
+      const id = invoice?.id ?? opts.retail?.id
+      if (id && parsed.pathname === `/api/invoices/${id}/payments`) {
+        return Response.json({ payments: [], transfers: [] })
+      }
+      if (id && parsed.pathname === `/api/invoices/${id}/refunds`) return Response.json({ refunds: [] })
+      if (id && parsed.pathname === `/api/invoices/${id}/balance-exceptions`) {
+        return Response.json({ exceptions: [] })
+      }
+      if (id && parsed.pathname === `/api/retail-invoices/${id}/payments`) {
+        return Response.json({ payments: [], transfers: [] })
+      }
+      if (id && parsed.pathname === `/api/retail-invoices/${id}/refunds`) {
+        return Response.json({ refunds: [] })
+      }
+      if (id && parsed.pathname === `/api/retail-invoices/${id}/balance-exceptions`) {
+        return Response.json({ exceptions: [] })
+      }
+      if (
+        opts.packagePurchase &&
+        parsed.pathname === `/api/packages/purchases/${opts.packagePurchase.id}`
+      ) {
+        return Response.json(opts.packagePurchase)
+      }
+      if (parsed.pathname === '/api/catalog/services') {
+        return Response.json({ services: opts.catalogServices ?? [] })
       }
       return undefined
     },
@@ -309,4 +365,49 @@ test('a cancelled invoice has no cancel & replace slot', async () => {
   await screen.findByRole('heading', { name: 'Invoice #42' })
   expect(screen.getByText('Wrong client billed')).toBeInTheDocument()
   expect(screen.queryByText('Cancel & replace')).not.toBeInTheDocument()
+})
+
+// --- a package-purchase invoice's own lines (#109 gap fix: #102's `lines` is always []) ------
+
+test('a package-purchase invoice shows its package name and services and credits in place of the empty lines table', async () => {
+  const invoice = serviceInvoice({
+    id: 'inv-pkg1',
+    invoice_number: 12,
+    service_bill_id: null,
+    package_purchase_id: 'pp1',
+    lines: [],
+  })
+  stub({
+    invoice,
+    packagePurchase: packagePurchase(),
+    catalogServices: [{ id: 'sv1', name: 'Massage' }],
+  })
+  renderApp('/bills/invoices/inv-pkg1')
+
+  expect(await screen.findByRole('heading', { name: 'Invoice #12' })).toBeInTheDocument()
+  const linesTable = within(await screen.findByRole('table', { name: 'Invoice lines' }))
+  expect(await screen.findByText('10-Session Massage Pack')).toBeInTheDocument()
+  expect(linesTable.getByText('Massage')).toBeInTheDocument()
+  expect(linesTable.getByText('10')).toBeInTheDocument()
+  expect(linesTable.getByText('$960.00')).toBeInTheDocument()
+})
+
+test('a service deactivated since the purchase falls back to "—" in the package lines table', async () => {
+  const invoice = serviceInvoice({
+    id: 'inv-pkg2',
+    invoice_number: 13,
+    service_bill_id: null,
+    package_purchase_id: 'pp2',
+    lines: [],
+  })
+  stub({
+    invoice,
+    packagePurchase: packagePurchase({ id: 'pp2', invoice_id: 'inv-pkg2', invoice_number: 13 }),
+    catalogServices: [],
+  })
+  renderApp('/bills/invoices/inv-pkg2')
+
+  await screen.findByRole('heading', { name: 'Invoice #13' })
+  const linesTable = within(await screen.findByRole('table', { name: 'Invoice lines' }))
+  expect(await linesTable.findByText('—')).toBeInTheDocument()
 })

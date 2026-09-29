@@ -1469,6 +1469,52 @@ export type PackagePurchase = {
   grand_total_cents: number
 }
 
+/** `GET /api/packages/purchases/{id}` — the frozen purchase shape (`billing.view`, logged like
+ *  any other client-scoped financial read): what was actually bought, independent of credits
+ *  used since. The invoice view (#102 gap fix) reads this to show a package invoice's contents
+ *  in place of its always-empty `lines`, since `InvoiceOut` deliberately does not duplicate
+ *  this module's response shape (`billing/invoices.py::InvoiceOut`'s own docstring). */
+export async function fetchPackagePurchase(purchaseId: string): Promise<PackagePurchase> {
+  const res = await fetch(`/api/packages/purchases/${encodeURIComponent(purchaseId)}`, {
+    cache: 'no-store',
+  })
+  if (!res.ok) throw await failure(res, 'Could not load this package purchase')
+  return res.json()
+}
+
+/** #109: `POST /api/packages/purchases/{id}/refund` — `billing.manage`, Admin Mode. Standard
+ *  (no `exception`) refunds everything the purchase invoice holds and voids every credit, but
+ *  only while nothing has been redeemed. `exception` is the manual goodwill path
+ *  (`billing/package_refund.py::RefundException`): the amount is required; the two choices
+ *  default server-side when omitted (`cancel_remaining_credits`: cancel on a full refund, keep
+ *  on a partial one; `reverse_commission`: preserve/`false`) but the resolved choices are
+ *  always logged. */
+export type PackageRefundBody = {
+  reason: string
+  exception?: {
+    amount_cents: number
+    cancel_remaining_credits?: boolean | null
+    reverse_commission?: boolean
+  }
+}
+
+export type PackageRefundResult = {
+  package_purchase_id: string
+  invoice: Invoice
+  refund: RefundEntry | null
+  credits_voided: boolean
+  commission_reversals: number
+}
+
+export async function refundPackagePurchase(
+  purchaseId: string,
+  body: PackageRefundBody,
+): Promise<PackageRefundResult> {
+  const res = await send('POST', `/api/packages/purchases/${encodeURIComponent(purchaseId)}/refund`, body)
+  if (!res.ok) throw await failure(res, 'Could not refund this package')
+  return res.json()
+}
+
 /** One service's remaining/used credits on a client's purchase
  *  (`ClientPackagePurchaseCreditOut`). */
 export type ClientPackagePurchaseCredit = {

@@ -6,21 +6,23 @@ import { renderApp, stubApi } from './harness'
 afterEach(() => vi.unstubAllGlobals())
 
 /**
- * A client's Packages tab (#108, spec #95 user stories 51-54): purchases with remaining
- * credits per service, expiry and status, plus *Sell package* landing on the new invoice with
- * the payment dialog open. `?pay=1` itself is `invoice-payments-panel.test.tsx`'s own test —
- * this file only pins that the Sell flow reaches it.
+ * A client's Packages tab (#108, spec #95 user stories 51-54; #109 stories 55-56): purchases
+ * with remaining credits per service, expiry and status, *Sell package* landing on the new
+ * invoice with the payment dialog open, and *Refund* — gated to Admin Mode + `billing.manage`,
+ * the server's standard values pre-selected, and the manual exception forced once a credit has
+ * been redeemed. `?pay=1` itself is `invoice-payments-panel.test.tsx`'s own test — this file
+ * only pins that the Sell flow reaches it.
  */
 
-const ACCOUNT = {
+const ACCOUNT = (capabilities: string[], mode: 'staff' | 'admin' = 'staff') => ({
   id: 'u1',
   email: 'desk@cedar.example',
   role: 'Staff',
-  capabilities: ['customers.view', 'billing.view'],
-  mode: 'staff' as const,
-  can_switch_modes: false,
-  admin_grant_expires_at: null,
-  admin_hard_limit_at: null,
+  capabilities,
+  mode,
+  can_switch_modes: mode === 'admin',
+  admin_grant_expires_at: mode === 'admin' ? new Date(Date.now() + 900_000).toISOString() : null,
+  admin_hard_limit_at: mode === 'admin' ? new Date(Date.now() + 900_000).toISOString() : null,
   must_change_password: false,
   mfa: {
     enrolled: false,
@@ -30,7 +32,7 @@ const ACCOUNT = {
     verified_at: null,
     email_otp_allowed: false,
   },
-}
+})
 
 const PROFILE = {
   customer: {
@@ -89,7 +91,7 @@ const SELLABLE = {
   services: [{ service_id: 'sv1', service_name: 'Massage', credits: 10 }],
 }
 
-function packageInvoice() {
+function packageInvoice(overrides: Record<string, unknown> = {}) {
   return {
     id: 'inv-pkg1',
     invoice_number: 12,
@@ -123,20 +125,29 @@ function packageInvoice() {
     refunded_cents: 0,
     prepaid_cents: 0,
     held_credit_cents: 0,
+    ...overrides,
   }
 }
 
 function fake({
   purchases = [PURCHASE],
   sellable = [SELLABLE],
+  capabilities = ['customers.view', 'billing.view'],
+  mode = 'staff' as 'staff' | 'admin',
+  invoice = packageInvoice(),
+  onRefund,
 }: {
   purchases?: (typeof PURCHASE)[]
   sellable?: (typeof SELLABLE)[]
+  capabilities?: string[]
+  mode?: 'staff' | 'admin'
+  invoice?: ReturnType<typeof packageInvoice>
+  onRefund?: (body: Record<string, unknown>) => Response | undefined
 } = {}) {
   return stubApi({
     signedIn: true,
     respond: (url, body) => {
-      if (url === '/api/auth/me') return Response.json(ACCOUNT)
+      if (url === '/api/auth/me') return Response.json(ACCOUNT(capabilities, mode))
       if (url === '/api/customers/c1') return Response.json(PROFILE)
       if (url === '/api/customers/c1/package-purchases') return Response.json({ purchases })
       if (url === '/api/packages') return Response.json({ packages: sellable })
@@ -165,12 +176,35 @@ function fake({
           { status: 201 },
         )
       }
-      if (url === '/api/invoices/inv-pkg1') return Response.json(packageInvoice())
-      if (url === '/api/invoices/inv-pkg1/payments') {
+      if (url === '/api/packages/purchases/pp1/refund' && body !== undefined) {
+        return (
+          onRefund?.(body) ??
+          Response.json(
+            {
+              package_purchase_id: 'pp1',
+              invoice: { ...invoice, status: 'cancelled' },
+              refund: {
+                id: 'rf1',
+                invoice_id: invoice.id,
+                retail_invoice_id: null,
+                amount_cents: (body.exception as { amount_cents: number } | undefined)?.amount_cents ?? 0,
+                reason: body.reason,
+                approved_by: 'u1',
+                refunded_at: new Date().toISOString(),
+              },
+              credits_voided: true,
+              commission_reversals: 0,
+            },
+            { status: 201 },
+          )
+        )
+      }
+      if (url === `/api/invoices/${invoice.id}` && body === undefined) return Response.json(invoice)
+      if (url === `/api/invoices/${invoice.id}/payments`) {
         return Response.json({ payments: [], transfers: [] })
       }
-      if (url === '/api/invoices/inv-pkg1/refunds') return Response.json({ refunds: [] })
-      if (url === '/api/invoices/inv-pkg1/balance-exceptions') {
+      if (url === `/api/invoices/${invoice.id}/refunds`) return Response.json({ refunds: [] })
+      if (url === `/api/invoices/${invoice.id}/balance-exceptions`) {
         return Response.json({ exceptions: [] })
       }
       return undefined
@@ -275,4 +309,103 @@ test('with no active packages, the Sell dialog says so', async () => {
   await user.click(screen.getByRole('button', { name: 'Sell package' }))
 
   expect(await screen.findByText('No active packages to sell.')).toBeInTheDocument()
+})
+
+// --- Refund (#109, spec #95 stories 55-56) ----------------------------------------------------
+
+test('Refund is absent in Staff Mode', async () => {
+  fake({ capabilities: ['customers.view', 'billing.view', 'billing.manage'], mode: 'staff' })
+  renderApp('/clients/c1')
+
+  await screen.findByRole('table', { name: 'Packages' })
+  expect(screen.queryByRole('button', { name: 'Refund' })).not.toBeInTheDocument()
+})
+
+test('Refund is absent without billing.manage, even in Admin Mode', async () => {
+  fake({ capabilities: ['customers.view', 'billing.view'], mode: 'admin' })
+  renderApp('/clients/c1')
+
+  await screen.findByRole('table', { name: 'Packages' })
+  expect(screen.queryByRole('button', { name: 'Refund' })).not.toBeInTheDocument()
+})
+
+test('Refund pre-selects the standard amount, says who it refunds, and sends it without a manual exception', async () => {
+  const user = userEvent.setup()
+  let sentBody: Record<string, unknown> | undefined
+  const unredeemed = {
+    ...PURCHASE,
+    credits: [{ ...PURCHASE.credits[0], credits_used: 0, credits_remaining: 10 }],
+  }
+  fake({
+    purchases: [unredeemed],
+    capabilities: ['customers.view', 'billing.view', 'billing.manage'],
+    mode: 'admin',
+    invoice: packageInvoice({
+      outstanding_cents: 0,
+      client_outstanding_cents: 0,
+      checkout_complete: true,
+    }),
+    onRefund: (body) => {
+      sentBody = body
+      return undefined
+    },
+  })
+  renderApp('/clients/c1')
+
+  await screen.findByRole('table', { name: 'Packages' })
+  await user.click(screen.getByRole('button', { name: 'Refund' }))
+
+  const dialog = await screen.findByRole('dialog')
+  within(dialog).getByRole('heading', { name: 'Refund 10-Session Massage Pack' })
+  expect(within(dialog).getByText('Refunds Priya Nair, who paid.')).toBeInTheDocument()
+  // The server's standard amount — money received (the invoice is fully paid: outstanding is
+  // 0) less prior refunds (none) — pre-selected without an extra click.
+  await screen.findByText('$960.00')
+
+  await user.type(within(dialog).getByLabelText('Reason'), 'Client moved away')
+  await user.click(within(dialog).getByRole('button', { name: 'Refund' }))
+
+  await waitFor(() => expect(sentBody).toBeDefined())
+  expect(sentBody).toEqual({ reason: 'Client moved away' })
+  await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+})
+
+test('a redeemed credit forces the manual exception, and sends the chosen remaining-credit and commission choices', async () => {
+  const user = userEvent.setup()
+  let sentBody: Record<string, unknown> | undefined
+  fake({
+    capabilities: ['customers.view', 'billing.view', 'billing.manage'],
+    mode: 'admin',
+    onRefund: (body) => {
+      sentBody = body
+      return undefined
+    },
+  })
+  renderApp('/clients/c1')
+
+  await screen.findByRole('table', { name: 'Packages' })
+  await user.click(screen.getByRole('button', { name: 'Refund' }))
+
+  const dialog = await screen.findByRole('dialog')
+  expect(
+    within(dialog).getByText(/no longer refundable under the standard policy/),
+  ).toBeInTheDocument()
+  expect(within(dialog).queryByRole('checkbox', { name: 'Manual exception' })).not.toBeInTheDocument()
+
+  await user.type(within(dialog).getByLabelText('Amount'), '200.00')
+  await user.click(within(dialog).getByRole('combobox', { name: 'Remaining credits' }))
+  await user.click(await screen.findByRole('option', { name: 'Cancel remaining credits' }))
+  await user.click(within(dialog).getByRole('checkbox', { name: 'Reverse commission already earned' }))
+  await user.type(within(dialog).getByLabelText('Reason'), 'Goodwill after a dispute')
+  await user.click(within(dialog).getByRole('button', { name: 'Refund' }))
+
+  await waitFor(() => expect(sentBody).toBeDefined())
+  expect(sentBody).toEqual({
+    reason: 'Goodwill after a dispute',
+    exception: {
+      amount_cents: 20000,
+      cancel_remaining_credits: true,
+      reverse_commission: true,
+    },
+  })
 })

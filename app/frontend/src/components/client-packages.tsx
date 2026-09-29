@@ -2,11 +2,14 @@ import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { PackageOpen } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router'
+import { toast } from 'sonner'
+import { ChoiceSelect } from '@/components/choice-select'
 import { EmptyState } from '@/components/empty-state'
 import { Field, Form, FormError } from '@/components/form'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   Dialog,
   DialogContent,
@@ -15,6 +18,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -24,15 +29,19 @@ import {
 } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { Textarea } from '@/components/ui/textarea'
 import {
   fetchClientPackagePurchases,
+  fetchInvoice,
   fetchSellablePackages,
   purchasePackage,
+  refundPackagePurchase,
   type ClientPackagePurchase,
   type SellablePackageRow,
 } from '@/lib/api'
-import { centsToDollars } from '@/lib/money'
-import { CLIENT_PACKAGE_PURCHASES, SELLABLE_PACKAGES } from '@/lib/query-keys'
+import { useCan } from '@/lib/capability-gate'
+import { centsToDollars, dollarsToCents } from '@/lib/money'
+import { CLIENT_PACKAGE_PURCHASES, INVOICE, SELLABLE_PACKAGES } from '@/lib/query-keys'
 
 const money = (cents: number) => `$${centsToDollars(cents)}`
 
@@ -59,18 +68,32 @@ const STATUS: Record<PurchaseStatus, { label: string; variant: 'success' | 'warn
 
 /**
  * A client's Packages tab (spec #95 user story 54; #108): purchases with remaining credits
- * per service, expiry and status, plus *Sell package* (story 52-53). Behind `billing.view` —
- * `clients.tsx` is what decides whether this card renders, the same gate `ClientInvoicesCard`
- * uses. Refund (#109) and transfer (#111, spec #96) are later tickets' own per-purchase
- * actions; `ClientPackagePurchase.customer_id` is already shaped so #111 can add a derived
+ * per service, expiry and status, plus *Sell package* (story 52-53) and *Refund* (#109, story
+ * 55-56). Behind `billing.view` — `clients.tsx` is what decides whether this card renders, the
+ * same gate `ClientInvoicesCard` uses. `purchaserName` is who paid, for the refund dialog's own
+ * wording (spec #96: refunds always go to the purchaser) — for now the purchaser is always the
+ * customer this card is rendered for, since no transfer exists yet; #111 will pass the holder
+ * separately once one can. Transfer (#111, spec #96) is a later ticket's own per-purchase
+ * action; `ClientPackagePurchase.customer_id` is already shaped so #111 can add a derived
  * holder and transfer chain onto this same row without a rename.
  */
-export function ClientPackagesCard({ customerId }: { customerId: string }) {
+export function ClientPackagesCard({
+  customerId,
+  purchaserName,
+}: {
+  customerId: string
+  purchaserName: string
+}) {
   const [sellOpen, setSellOpen] = useState(false)
+  const canRefund = useCan('billing.manage')
+  const queryClient = useQueryClient()
   const query = useQuery({
     queryKey: [...CLIENT_PACKAGE_PURCHASES, customerId],
     queryFn: () => fetchClientPackagePurchases(customerId),
   })
+
+  const refresh = () =>
+    queryClient.invalidateQueries({ queryKey: [...CLIENT_PACKAGE_PURCHASES, customerId] })
 
   return (
     <Card>
@@ -101,12 +124,19 @@ export function ClientPackagesCard({ customerId }: { customerId: string }) {
                   <TableHead className="pl-4">Package</TableHead>
                   <TableHead>Credits remaining</TableHead>
                   <TableHead>Expiry</TableHead>
-                  <TableHead className="pr-4">Status</TableHead>
+                  <TableHead className={canRefund ? '' : 'pr-4'}>Status</TableHead>
+                  {canRefund && <TableHead className="pr-4">Actions</TableHead>}
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {query.data.map((row) => (
-                  <PackagePurchaseRow key={row.id} row={row} />
+                  <PackagePurchaseRow
+                    key={row.id}
+                    row={row}
+                    canRefund={canRefund}
+                    purchaserName={purchaserName}
+                    onRefunded={refresh}
+                  />
                 ))}
               </TableBody>
             </Table>
@@ -119,9 +149,20 @@ export function ClientPackagesCard({ customerId }: { customerId: string }) {
   )
 }
 
-function PackagePurchaseRow({ row }: { row: ClientPackagePurchase }) {
+function PackagePurchaseRow({
+  row,
+  canRefund,
+  purchaserName,
+  onRefunded,
+}: {
+  row: ClientPackagePurchase
+  canRefund: boolean
+  purchaserName: string
+  onRefunded: () => void
+}) {
   const status = deriveStatus(row)
   const { label, variant } = STATUS[status]
+  const [refunding, setRefunding] = useState(false)
   return (
     <TableRow className="h-12">
       <TableCell className="pl-4">
@@ -145,10 +186,187 @@ function PackagePurchaseRow({ row }: { row: ClientPackagePurchase }) {
           'Never'
         )}
       </TableCell>
-      <TableCell className="pr-4">
+      <TableCell className={canRefund ? '' : 'pr-4'}>
         <Badge variant={variant}>{label}</Badge>
       </TableCell>
+      {canRefund && (
+        <TableCell className="pr-4">
+          <Button size="sm" variant="outline" onClick={() => setRefunding(true)}>
+            Refund
+          </Button>
+        </TableCell>
+      )}
+      {refunding && (
+        <RefundPurchaseDialog
+          purchase={row}
+          purchaserName={purchaserName}
+          onClose={() => setRefunding(false)}
+          onRefunded={onRefunded}
+        />
+      )}
     </TableRow>
+  )
+}
+
+type CreditsChoice = 'default' | 'keep' | 'cancel'
+
+/**
+ * *Refund* (#109, spec #95 stories 55-56; spec #96: refunds go to the purchaser, who paid).
+ * Pre-selects the server's standard values: no credit redeemed on the purchase (already known
+ * from `row.credits`, no extra read) pre-selects the standard, whole-invoice refund, read via
+ * the invoice's own balance (`GET /api/invoices/{id}`, already the invoice view's own read —
+ * `money received less prior refunds` is `grand_total_cents - outstanding_cents` for a package
+ * invoice, which never carries a prepaid line). Any credit redeemed forces the manual
+ * exception, matching `billing/package_refund.py`'s own refusal. The manual exception offers
+ * exactly the choices the route supports: an explicit amount, the remaining-credit choice
+ * (server default: cancel on a full refund, keep on a partial one) and the commission choice
+ * (server default: preserve).
+ */
+function RefundPurchaseDialog({
+  purchase,
+  purchaserName,
+  onClose,
+  onRefunded,
+}: {
+  purchase: ClientPackagePurchase
+  purchaserName: string
+  onClose: () => void
+  onRefunded: () => void
+}) {
+  const redeemed = purchase.credits.some((c) => c.credits_used > 0)
+  const invoiceQuery = useQuery({
+    queryKey: [...INVOICE, purchase.invoice_id],
+    queryFn: () => fetchInvoice(purchase.invoice_id),
+  })
+  const standardCents = invoiceQuery.data
+    ? Math.max(invoiceQuery.data.grand_total_cents - invoiceQuery.data.outstanding_cents, 0)
+    : null
+
+  const [exception, setException] = useState(redeemed)
+  const [reason, setReason] = useState('')
+  const [amount, setAmount] = useState('')
+  const [creditsChoice, setCreditsChoice] = useState<CreditsChoice>('default')
+  const [reverseCommission, setReverseCommission] = useState(false)
+
+  // Pre-selected the moment the standard amount is known — a fresh purchase never overwrites
+  // an amount the admin already edited while switching modes, since this only fires while the
+  // standard (non-exception) amount is the one shown.
+  useEffect(() => {
+    if (!exception && standardCents !== null) setAmount(centsToDollars(standardCents))
+  }, [exception, standardCents])
+
+  const amountCents = dollarsToCents(amount)
+  const incomplete = !reason.trim() || (exception && (amountCents === null || amountCents <= 0))
+
+  const save = useMutation({
+    mutationFn: () =>
+      refundPackagePurchase(purchase.id, {
+        reason: reason.trim(),
+        exception: exception
+          ? {
+              amount_cents: amountCents as number,
+              cancel_remaining_credits: creditsChoice === 'default' ? null : creditsChoice === 'cancel',
+              reverse_commission: reverseCommission,
+            }
+          : undefined,
+      }),
+    onSuccess: () => {
+      toast.success('Package refunded')
+      onRefunded()
+      onClose()
+    },
+  })
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>Refund {purchase.name}</DialogTitle>
+          <DialogDescription>Refunds {purchaserName}, who paid.</DialogDescription>
+        </DialogHeader>
+
+        <Form onSubmit={() => !incomplete && save.mutate()}>
+          {redeemed ? (
+            <p className="text-sm text-muted-foreground">
+              A credit has been used, so this package is no longer refundable under the standard
+              policy — only a manual exception can refund it.
+            </p>
+          ) : (
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="refund-exception"
+                checked={exception}
+                onCheckedChange={(on) => setException(on === true)}
+              />
+              <Label htmlFor="refund-exception" className="font-normal">
+                Manual exception
+              </Label>
+            </div>
+          )}
+
+          {exception ? (
+            <>
+              <Field label="Amount" htmlFor="refund-amount">
+                <Input
+                  id="refund-amount"
+                  inputMode="decimal"
+                  className="tabular-nums"
+                  value={amount}
+                  onChange={(e) => setAmount(e.target.value)}
+                />
+              </Field>
+              <Field label="Remaining credits" htmlFor="refund-credits">
+                <ChoiceSelect
+                  id="refund-credits"
+                  value={creditsChoice}
+                  onValueChange={(v) => setCreditsChoice(v as CreditsChoice)}
+                  options={[
+                    {
+                      value: 'default',
+                      label: 'Server default (cancel on a full refund, keep on a partial one)',
+                    },
+                    { value: 'keep', label: 'Keep remaining credits' },
+                    { value: 'cancel', label: 'Cancel remaining credits' },
+                  ]}
+                />
+              </Field>
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="refund-reverse-commission"
+                  checked={reverseCommission}
+                  onCheckedChange={(on) => setReverseCommission(on === true)}
+                />
+                <Label htmlFor="refund-reverse-commission" className="font-normal">
+                  Reverse commission already earned
+                </Label>
+              </div>
+            </>
+          ) : (
+            <p className="text-sm">
+              Standard refund:{' '}
+              <span className="tabular-nums">
+                {standardCents === null ? '…' : money(standardCents)}
+              </span>
+            </p>
+          )}
+
+          <Field label="Reason" htmlFor="refund-reason">
+            <Textarea id="refund-reason" value={reason} onChange={(e) => setReason(e.target.value)} />
+          </Field>
+
+          {save.error && <FormError>{save.error.message}</FormError>}
+
+          <DialogFooter>
+            <Button type="button" variant="ghost" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={incomplete || save.isPending}>
+              {save.isPending ? 'Refunding…' : 'Refund'}
+            </Button>
+          </DialogFooter>
+        </Form>
+      </DialogContent>
+    </Dialog>
   )
 }
 
