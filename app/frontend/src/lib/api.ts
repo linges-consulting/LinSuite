@@ -1256,6 +1256,22 @@ export async function receiveStock(
   return res.json()
 }
 
+/** A counted correction (`inventory.adjust`): `delta` is signed, already computed from the
+ *  counted quantity against on-hand — the server records exactly what is sent. */
+export async function adjustStock(
+  productId: string,
+  variantId: string,
+  quantityDelta: number,
+  reason: string,
+): Promise<ProductRow> {
+  const res = await send('POST', `/api/admin/products/${productId}/variants/${variantId}/adjust`, {
+    quantity_delta: quantityDelta,
+    reason,
+  })
+  if (!res.ok) throw await failure(res, 'Could not adjust the stock')
+  return res.json()
+}
+
 export async function createVariant(
   productId: string,
   draft: ProductVariantDraft,
