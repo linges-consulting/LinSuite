@@ -3932,3 +3932,33 @@ export function stockConflict(error: unknown): { name: string; available: number
   )
   return match ? { name: match[1], available: Number(match[2]) } : null
 }
+
+/** The seven checklist steps (#116, spec #113): business, hours, tax, services, staff, email,
+ *  branding — in that fixed order, each `done` computed server-side. `branding` is the only
+ *  one `optional`. */
+export type OnboardingStepKey =
+  | 'business'
+  | 'hours'
+  | 'tax'
+  | 'services'
+  | 'staff'
+  | 'email'
+  | 'branding'
+export type OnboardingStep = { key: OnboardingStepKey; done: boolean; optional: boolean }
+export type OnboardingStatus = { steps: OnboardingStep[]; dismissed_at: string | null }
+
+/** Admin Mode, `admin` capability only — a 403 means either is missing (`useCan('admin')` is
+ *  what decides whether to even ask). */
+export async function fetchOnboardingStatus(): Promise<OnboardingStatus> {
+  const res = await fetch('/api/admin/onboarding')
+  if (!res.ok) throw await failure(res, 'Could not load the setup checklist')
+  return res.json()
+}
+
+/** Shared by every administrator (spec user story 9): dismissing sets one timestamp on the
+ *  business row, not per-account state. */
+export async function dismissOnboarding(): Promise<OnboardingStatus> {
+  const res = await post('/api/admin/onboarding/dismiss', {})
+  if (!res.ok) throw await failure(res, 'Could not dismiss the checklist')
+  return res.json()
+}

@@ -135,3 +135,6 @@ export const PACKAGE_PURCHASE = ['package-purchase'] as const
 /** The Transfer dialog's own warning (#111): the current holder's upcoming appointments for
  *  a purchase's covered services, id after. */
 export const PACKAGE_TRANSFER_UPCOMING = ['package-transfer-upcoming'] as const
+/** The "Get your business ready" checklist and its dismissal (#116): seven steps, each
+ *  computed server-side, and the shared dismissal timestamp. */
+export const ONBOARDING = ['onboarding'] as const

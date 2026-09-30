@@ -2,6 +2,8 @@ import { useQuery } from '@tanstack/react-query'
 import { CalendarPlus, ClipboardList, RefreshCw } from 'lucide-react'
 import { Link } from 'react-router'
 import { EmptyState } from '@/components/empty-state'
+import { OnboardingChecklist } from '@/components/onboarding-checklist'
+import { OnboardingEmailBanner } from '@/components/onboarding-email-banner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -28,6 +30,8 @@ export function HomePage() {
         title="Your workspace is ready"
         description="Scheduling, clients and your service catalog arrive with the next releases. Until then, this page reports whether the backend is reachable."
       />
+      <OnboardingEmailBanner />
+      <OnboardingChecklist />
       {canSeeFormsNeeded && <FormsNeededCard />}
       {user?.mode === 'admin' && <BusinessProfileCard />}
       <SystemStatus />

@@ -33,6 +33,12 @@ beyond what was asked: without it, the banner could keep reporting "ready" again
 has actually tested since it changed, which is the same silent-failure shape #11's acceptance
 criterion exists to rule out, just one step later than "unconfigured".
 
+**The test-send actions are the only way `*_verified_at` is ever set — and, since #116, the only
+way a *failed* one clears it again.** A credential edit already un-verifies a sender (below); a
+test send that fails against unchanged credentials now does the same, so "a sender is configured
+and its latest test send succeeded" (the onboarding checklist's and the email banner's own
+wording) is never answered from a stale success sitting behind a since-failed retry.
+
 **The test-send actions are the only way `*_verified_at` is ever set**, and they call the real
 adapter synchronously (`run_in_threadpool`, the same pattern `core/security.py` uses for a
 blocking Argon2 hash from an async handler — `ResendProvider`/`SmtpProvider`/`TwilioProvider`
@@ -491,6 +497,15 @@ async def send_test_email(
             ),
         )
     except Exception as error:
+        # #116: the most recent test send failed, so a prior success no longer speaks for this
+        # sender — the same invalidation a credential edit already does in the PATCH above,
+        # applied to "credentials unchanged but the send itself failed" too.
+        if business.email_sender == "resend" and business.resend_domain_verified_at is not None:
+            business.resend_domain_verified_at = None
+            await db.commit()
+        elif business.email_sender == "smtp" and business.smtp_verified_at is not None:
+            business.smtp_verified_at = None
+            await db.commit()
         raise HTTPException(400, f"The test email could not be sent: {error}") from error
 
     now = datetime.now(UTC)
