@@ -2804,6 +2804,9 @@ export type TaxComponent = {
    *  (#57 acceptance criterion 1). Which components actually apply to one catalog item is a
    *  later ticket's job. */
   applicable_to_business: boolean
+  /** `'manual'` (an administrator created it) or `'prefill'` (#118: created the moment the
+   *  business's province was first saved). Read-only — see `TaxStatus` for what this drives. */
+  origin: 'manual' | 'prefill'
 }
 
 export type TaxComponentDraft = {
@@ -2841,6 +2844,30 @@ export async function addTaxComponentRate(
 ): Promise<TaxComponent> {
   const res = await send('POST', `/api/admin/billing/tax-components/${id}/rates`, rate)
   if (!res.ok) throw await failure(res, 'Could not add the new rate')
+  return res.json()
+}
+
+/** Tax pre-fill (#118): whether there is anything to confirm, and the two conditions that show
+ *  a prompt instead of an automatic change — the province moved since pre-fill ran, or the
+ *  built-in table now lists a different current rate than a pre-filled component has. */
+export type TaxStatus = {
+  confirmed_at: string | null
+  prefilled: boolean
+  province_changed: boolean
+  newer_rate_available: boolean
+}
+
+export async function fetchTaxStatus(): Promise<TaxStatus> {
+  const res = await fetch('/api/admin/billing/tax-status')
+  if (!res.ok) throw await failure(res, 'Could not load the tax confirmation status')
+  return res.json()
+}
+
+/** The Tax step's "Looks right". Always succeeds when called (no precondition) — the panel
+ *  only shows the button when `TaxStatus.prefilled` is true and `confirmed_at` is not set. */
+export async function confirmTax(): Promise<TaxStatus> {
+  const res = await post('/api/admin/billing/tax-confirmation', {})
+  if (!res.ok) throw await failure(res, 'Could not confirm the tax setup')
   return res.json()
 }
 

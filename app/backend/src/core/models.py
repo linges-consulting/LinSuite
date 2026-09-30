@@ -296,6 +296,15 @@ class Business(Base):
     # entirely (spec: independent of dismissal).
     onboarding_dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # --- tax pre-fill confirmation (#118, spec #113 "Tax pre-fill") ------------------------
+    # Set once, by an Admin-Mode "Looks right" on the Tax step (`billing/tax_routes.py`). NULL
+    # means either nobody has confirmed yet, or the business has no pre-filled components to
+    # confirm (a fresh instance with no province saved yet). `settings/onboarding_routes.py`'s
+    # `_tax_done` treats this OR any `tax_components.origin = 'manual'` row as done — see that
+    # column's own docstring in `billing/models.py` for why the second case is the simplest
+    # correct reading of "already configured tax by hand."
+    tax_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
 
 class AuditEvent(Base):
     """Append-only: who did what, and when (ADR-0002).

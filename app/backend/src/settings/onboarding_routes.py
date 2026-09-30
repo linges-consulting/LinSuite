@@ -7,9 +7,13 @@ from data that already lives somewhere; this file writes nothing except the dism
 timestamp, which is why it is a router of its own rather than more fields on `settings/routes.py`
 or `settings/notifications_routes.py`.
 
-**Tax's rule is the pre-#118 approximation the spec calls out by name**: "at least one active
-component with a rate" — not yet "the owner confirmed the pre-filled rates". #118 replaces
-`_tax_done` alone with a read of a confirmation timestamp; nothing else here changes.
+**Tax's rule (#118): confirmed, or already the owner's own.** Done when `businesses.
+tax_confirmed_at` is set (the "Looks right" on the Tax step, `billing/tax_routes.py`), **or**
+when at least one active `tax_components` row has `origin = 'manual'` — an owner who configured
+tax by hand, whether before pre-fill ever ran or alongside it, has already taken responsibility
+for it and is never asked to additionally click "Looks right" for rows they did not create
+themselves. A business with only unconfirmed `'prefill'` rows, and nothing else, reads as not
+done — spec story 24, "unreviewed rates are never assumed correct."
 
 **Email reuses `notifications.providers.email_ready`** rather than re-deriving "a sender is
 configured and its latest test send succeeded" — the one function the notifications panel and
@@ -76,11 +80,13 @@ async def _hours_done(db: SessionDep) -> bool:
     return await db.scalar(select(WorkingHours.id).limit(1)) is not None
 
 
-async def _tax_done(db: SessionDep) -> bool:
+async def _tax_done(db: SessionDep, business: Business) -> bool:
+    if business.tax_confirmed_at is not None:
+        return True
     row = await db.scalar(
         select(TaxComponent.id)
         .join(TaxComponentRate, TaxComponentRate.component_id == TaxComponent.id)
-        .where(TaxComponent.active.is_(True))
+        .where(TaxComponent.active.is_(True), TaxComponent.origin == "manual")
         .limit(1)
     )
     return row is not None
@@ -102,7 +108,7 @@ async def _steps(business: Business, db: SessionDep) -> list[OnboardingStep]:
     return [
         OnboardingStep(key="business", done=_business_details_done(business)),
         OnboardingStep(key="hours", done=await _hours_done(db)),
-        OnboardingStep(key="tax", done=await _tax_done(db)),
+        OnboardingStep(key="tax", done=await _tax_done(db, business)),
         OnboardingStep(key="services", done=await _services_done(db)),
         OnboardingStep(key="staff", done=await _staff_done(db)),
         OnboardingStep(key="email", done=email_ready(business)),

@@ -24,6 +24,7 @@ from sqlalchemy import select
 
 from auth.capabilities import Requires
 from auth.models import User
+from billing.tax_prefill import prefill_if_eligible
 from core.audit import record_event
 from core.db import SessionDep
 from core.models import Business
@@ -204,6 +205,13 @@ async def update_business(
             actor_user_id=admin.id,
             metadata={"changed": changed},
         )
+    if "province" in changed:
+        # #118, spec #113 "Tax pre-fill": staged, not yet committed — the profile save and
+        # whatever pre-fill creates land in the one `db.commit()` below, or neither does.
+        # `prefill_if_eligible`'s own gate ("no tax components at all") is what makes this safe
+        # to call on every province save, not just the first: a second save, or a later
+        # province change, is always a no-op here.
+        await prefill_if_eligible(db, business, actor_user_id=admin.id)
     await db.commit()
     if changed:
         # Only `slot_granularity_minutes` and `booking_horizon_days` are engine inputs, but
