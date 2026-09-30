@@ -23,12 +23,17 @@ from dataclasses import dataclass
 
 HEX = re.compile(r"^#[0-9a-fA-F]{6}$")
 
+# The shipped theme is tweakcn's Stillwater (docs/DESIGN.md): its slate-blue primary and its
+# sage-green secondary are what a business starts on until it picks its own.
+DEFAULT_PRIMARY = "#1a6289"
+DEFAULT_SECONDARY = "#2f7a5c"
+
 # The two foregrounds the design system has: white, and slate-900 (`--foreground`).
 WHITE = "#ffffff"
 NEAR_BLACK = "#0f172a"
 
 # Where a dark-theme variant lands on Oklab's lightness axis. 0.72 is where DESIGN.md's own
-# default pair already sits: `#1d4ed8` derives to `#659dff`, against the hand-picked `#60a5fa`.
+# pre-Stillwater default pair sat: `#1d4ed8` derived to `#659dff`, against a hand-picked `#60a5fa`.
 _DARK_L = 0.72
 # How much of the colour's chroma survives the lightening. All of it reads as neon up there.
 _CHROMA_KEPT = 0.9

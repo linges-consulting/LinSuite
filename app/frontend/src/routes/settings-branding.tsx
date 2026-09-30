@@ -51,8 +51,8 @@ export function BrandingPanel() {
   )
 
   const colours = draft ?? {
-    brand_primary: stored.data?.brand_primary ?? '#1d4ed8',
-    brand_secondary: stored.data?.brand_secondary ?? '#0f766e',
+    brand_primary: stored.data?.brand_primary ?? '#1a6289',
+    brand_secondary: stored.data?.brand_secondary ?? '#2f7a5c',
   }
   const valid = HEX.test(colours.brand_primary) && HEX.test(colours.brand_secondary)
 
@@ -207,7 +207,7 @@ function ColourField(props: {
         />
       </div>
       {malformed ? (
-        <p className="text-xs text-destructive">Use a six-digit hex colour, like #1d4ed8.</p>
+        <p className="text-xs text-destructive">Use a six-digit hex colour, like #1a6289.</p>
       ) : (
         <ContrastNote ratio={props.ratio} darkRatio={props.darkRatio} />
       )}

@@ -417,8 +417,8 @@ class BrandingDocument(BaseModel):
 async def branding_document(db: SessionDep) -> BrandingDocument:
     business = await db.scalar(select(Business).where(Business.id == 1))
     palette = branding.palette(
-        business.brand_primary if business else "#1d4ed8",
-        business.brand_secondary if business else "#0f766e",
+        business.brand_primary if business else branding.DEFAULT_PRIMARY,
+        business.brand_secondary if business else branding.DEFAULT_SECONDARY,
     )
     digests = dict(
         (await db.execute(select(BrandingAsset.kind, BrandingAsset.sha256))).all()  # type: ignore[arg-type]
