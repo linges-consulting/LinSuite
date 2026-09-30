@@ -29,7 +29,7 @@ function status(overrides: Partial<OnboardingStatus> = {}): OnboardingStatus {
   }
 }
 
-test('shows progress, an Optional label on branding, and a link to each step\'s Settings tab', async () => {
+test('shows progress, an Optional label on branding, and a link to each step\'s focused page', async () => {
   stubApi({
     ...ADMIN,
     respond: (url) => {
@@ -48,14 +48,15 @@ test('shows progress, an Optional label on branding, and a link to each step\'s 
   // Every other step carries no such label.
   expect(within(screen.getByText('Tax').closest('li')!).queryByText('Optional')).not.toBeInTheDocument()
 
-  expect(screen.getByRole('link', { name: /Tax/ })).toHaveAttribute('href', '/settings?tab=tax')
+  // #117: each step opens its own focused page rather than a Settings tab.
+  expect(screen.getByRole('link', { name: /Tax/ })).toHaveAttribute('href', '/setup-checklist/tax')
   expect(screen.getByRole('link', { name: /Email sending/ })).toHaveAttribute(
     'href',
-    '/settings?tab=notifications',
+    '/setup-checklist/email',
   )
   expect(screen.getByRole('link', { name: /Opening hours/ })).toHaveAttribute(
     'href',
-    '/settings?tab=staff',
+    '/setup-checklist/hours',
   )
 })
 

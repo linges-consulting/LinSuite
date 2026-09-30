@@ -26,6 +26,7 @@ import { SchedulePage } from '@/routes/schedule'
 import { SecurityPage } from '@/routes/security'
 import { SellPage } from '@/routes/sell'
 import { SettingsPage } from '@/routes/settings'
+import { SetupChecklistStepPage } from '@/routes/setup-checklist'
 import { SetupPage } from '@/routes/setup'
 
 /**
@@ -202,6 +203,11 @@ function AppRoutes() {
           }
         />
         <Route path="security" element={<SecurityPage />} />
+        {/* The checklist's own focused step pages (#117, spec #113). Gated inside the page
+            itself (`useCan('admin')`) rather than `RequireAdminMode` here — see that file's
+            docstring — so it lives in the same route group as everything else that needs a
+            live session, without needing that wrapper too. */}
+        <Route path="setup-checklist/:step" element={<SetupChecklistStepPage />} />
       </Route>
     </Routes>
   )

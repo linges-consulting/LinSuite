@@ -35,8 +35,15 @@ export function MfaEnrolPage({ gated = false }: { gated?: boolean }) {
   // the one thing behind the second factor that was not itself protected by it — so it is
   // collected before the QR code rather than discovered as a 403 on a screen already drawn.
   const [current, setCurrent] = useState<string | null>(null)
+  // Locked in at mount, deliberately not read live off `gated` again below: confirming the
+  // enrolment is exactly what flips the server's `enrolment_required` answer to false, and
+  // `EnrolmentDone`'s own re-read of the session (so it can pick up an Admin Mode grant the
+  // server opened alongside it, #117) lands *before* its `setLeft(true)` — which would hand
+  // this component a fresh, now-ungated `gated` prop a render ahead of the navigate it drives,
+  // and send a forced enrolment to Security instead of Home.
+  const [wasGated] = useState(gated)
 
-  if (codes) return <EnrolmentDone codes={codes} />
+  if (codes) return <EnrolmentDone codes={codes} gated={wasGated} />
   if (user?.mfa.enrolled && current === null) return <ConfirmCurrent onConfirmed={setCurrent} />
   return (
     <AuthLayout>
@@ -226,8 +233,15 @@ function EmailEnrolment(props: Step) {
  * The codes, and the only time they exist anywhere but on paper. Leaving this screen is
  * deliberate and explicit — a redirect the moment enrolment succeeded would close the one
  * window in which they can be written down.
+ *
+ * A gated enrolment (the business forced it) lands on Home rather than Security — #117, spec
+ * #113: this is the fresh install's owner finishing the one thing standing between the setup
+ * wizard and the "Get your business ready" checklist waiting there, not somebody who came
+ * from Security and would expect to land back on it. The server may also have opened an
+ * Admin Mode window in the same response (`auth/modes.py::try_first_run_admin_grant`) — the
+ * session re-read below is what picks that up.
  */
-function EnrolmentDone({ codes }: { codes: string[] }) {
+function EnrolmentDone({ codes, gated }: { codes: string[]; gated: boolean }) {
   const queryClient = useQueryClient()
   const [left, setLeft] = useState(false)
 
@@ -236,7 +250,7 @@ function EnrolmentDone({ codes }: { codes: string[] }) {
   // is evaluating the answer that cleared it — an imperative navigate can run one render
   // ahead of the cache update, and the gate then sends the browser straight back here with
   // the codes gone.
-  if (left) return <Navigate to="/security" replace />
+  if (left) return <Navigate to={gated ? '/' : '/security'} replace />
 
   return (
     <AuthLayout>

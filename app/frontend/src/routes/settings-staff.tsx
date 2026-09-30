@@ -450,8 +450,13 @@ const basisPoints = (percentage: string) => Math.round(Number(percentage || 0) *
 /**
  * Create or edit. The email and the role are only on the create form: changing an address is
  * a different act from editing a person, and the role has its own select on the row.
+ *
+ * Exported so the focused Staff checklist step (`routes/setup-checklist.tsx`, #117) can open
+ * it pre-checked for "Add me as a practitioner" — the same form, the same `updateStaff` call,
+ * on the signed-in administrator's own existing row rather than a second implementation of
+ * the practitioner-credentials form.
  */
-function StaffDialog(props: {
+export function StaffDialog(props: {
   member?: StaffRow
   roles: RoleOption[]
   palette: StaffColour[]
