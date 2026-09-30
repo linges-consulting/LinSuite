@@ -71,10 +71,19 @@ async def as_admin(client, email=EMAIL, password=PASSWORD):
 
 
 async def set_province(client, province: str) -> None:
+    """Saves the province through the same endpoint #118's pre-fill hooks into. Pre-fill only
+    ever fires when the business has zero tax components (`billing/tax_prefill.py`'s own gate),
+    so it is harmless here on a freshly claimed instance — but this file's tests exercise the
+    *manual* CRUD path independently of it, so clear whatever pre-fill just created and keep
+    testing a blank slate. `tests/test_tax_prefill.py` is what actually tests pre-fill."""
     resp = await client.put(
         "/api/admin/business", json={"name": "Cedar Lane Clinic", "province": province}
     )
     assert resp.status_code == 200, resp.text
+    async with session_scope() as db:
+        await db.execute(text("DELETE FROM tax_component_rates"))
+        await db.execute(text("DELETE FROM tax_components"))
+        await db.commit()
 
 
 def draft(**overrides) -> dict:

@@ -353,6 +353,7 @@ class TaxComponent(Base):
             "province IS NULL OR province IN (" + ", ".join(f"'{p}'" for p in PROVINCE_CODES) + ")",
             name="ck_tax_components_province",
         ),
+        CheckConstraint("origin IN ('manual', 'prefill')", name="ck_tax_components_origin"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -364,6 +365,14 @@ class TaxComponent(Base):
     name: Mapped[str] = mapped_column(String(100))
     province: Mapped[str | None] = mapped_column(String(2))
     active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    # `'manual'` (default, every component before #118) or `'prefill'` — set once, at creation,
+    # never changed. This is the flag spec #113/#118 asks for to tell "an owner's own
+    # configuration" apart from "pre-fill created this": `settings/onboarding_routes.py`'s
+    # `_tax_done` treats any `'manual'` row as proof the owner is already responsible for tax,
+    # confirmation timestamp or not, and `billing/tax_routes.py`'s prompt logic only ever
+    # compares `'prefill'` rows against the table (an owner's own manual component in another
+    # province, `test_billing_tax_settings.py`'s `ab_lct`, is not a stale pre-fill going stale).
+    origin: Mapped[str] = mapped_column(String(16), server_default=text("'manual'"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     rates: Mapped[list["TaxComponentRate"]] = relationship(

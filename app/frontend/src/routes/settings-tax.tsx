@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { MoreHorizontal, Pencil, Plus, Power, PowerOff } from 'lucide-react'
+import { CheckCircle2, MoreHorizontal, Pencil, Plus, Power, PowerOff, TriangleAlert } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { Field, Form, FormError } from '@/components/form'
@@ -26,13 +26,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import {
   addTaxComponentRate,
   ApiError,
+  confirmTax,
   createTaxComponent,
   fetchProvinces,
   fetchTaxComponents,
+  fetchTaxStatus,
   updateTaxComponent,
   type TaxComponent,
+  type TaxStatus,
 } from '@/lib/api'
-import { TAX_COMPONENTS } from '@/lib/query-keys'
+import { ONBOARDING, TAX_COMPONENTS, TAX_STATUS } from '@/lib/query-keys'
 
 // Basis points, the `Staff.commission_rate_*_bp` convention (CLAUDE.md) — a screen thinks in
 // percent, the wire thinks in basis points. Copied from `settings-staff.tsx` rather than
@@ -53,6 +56,7 @@ const basisPoints = (percentage: string) => Math.round(Number(percentage || 0) *
 export function TaxSettingsPanel() {
   const components = useQuery({ queryKey: TAX_COMPONENTS, queryFn: fetchTaxComponents })
   const provinces = useQuery({ queryKey: ['provinces'], queryFn: fetchProvinces, staleTime: Infinity })
+  const status = useQuery({ queryKey: TAX_STATUS, queryFn: fetchTaxStatus })
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<TaxComponent | null>(null)
   const [ratingId, setRatingId] = useState<string | null>(null)
@@ -70,6 +74,8 @@ export function TaxSettingsPanel() {
 
   return (
     <div className="flex flex-col gap-4">
+      {status.data && <TaxPrefillBanner status={status.data} />}
+
       <div className="flex flex-wrap items-center justify-between gap-4">
         <p className="max-w-3xl text-sm text-muted-foreground">
           GST, HST, PST and the like, effective-dated so a rate change never rewrites a
@@ -123,6 +129,64 @@ export function TaxSettingsPanel() {
         />
       )}
       {rating && <TaxRateDialog component={rating} onClose={() => setRatingId(null)} />}
+    </div>
+  )
+}
+
+/** Tax pre-fill (#118): "Looks right" once, plus the province-change/newer-rate prompt.
+ *  Neither ever changes a component on its own — a save through the table above, or nothing,
+ *  is the only way a rate moves (spec #113: "nothing changes automatically"). */
+function TaxPrefillBanner(props: { status: TaxStatus }) {
+  const { status } = props
+  const queryClient = useQueryClient()
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: TAX_STATUS })
+    // Confirming can flip the onboarding checklist's tax step (#116).
+    queryClient.invalidateQueries({ queryKey: ONBOARDING })
+  }
+
+  const confirm = useMutation({
+    mutationFn: confirmTax,
+    onSuccess: () => {
+      toast.success('Tax setup confirmed')
+      refresh()
+    },
+    onError: (error) => toast.error(error.message),
+  })
+
+  const needsConfirmation = status.prefilled && !status.confirmed_at
+  const needsPrompt = status.province_changed || status.newer_rate_available
+
+  if (!needsConfirmation && !needsPrompt) return null
+
+  return (
+    <div className="flex flex-col gap-3">
+      {needsConfirmation && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/40 p-4">
+          <div className="flex items-start gap-2">
+            <CheckCircle2 className="mt-0.5 size-4 text-muted-foreground" aria-hidden />
+            <p className="text-sm text-muted-foreground">
+              These tax components were filled in automatically from your business's province.
+              Review them, then confirm.
+            </p>
+          </div>
+          <Button size="sm" disabled={confirm.isPending} onClick={() => confirm.mutate()}>
+            {confirm.isPending ? 'Confirming…' : 'Looks right'}
+          </Button>
+        </div>
+      )}
+      {needsPrompt && (
+        <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4">
+          <TriangleAlert className="mt-0.5 size-4 text-amber-600" aria-hidden />
+          <p className="text-sm">
+            {status.province_changed
+              ? "Your business's province has changed since these components were set up."
+              : 'The official rate table has a newer rate than what is configured here.'}{' '}
+            Nothing has changed automatically — review the components below and update them
+            yourself if needed.
+          </p>
+        </div>
+      )}
     </div>
   )
 }

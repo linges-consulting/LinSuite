@@ -152,6 +152,13 @@ async def bc_business_with_gst_and_pst(client) -> None:
     await as_admin(client)
     resp = await client.put("/api/admin/business", json={"name": "Cedar Lane", "province": "BC"})
     assert resp.status_code == 200, resp.text
+    # #118 pre-fills BC's own GST/PST the moment the province is saved on a business with no
+    # components yet — this file wants its own hand-built rates instead, so clear whatever
+    # pre-fill just created before building the exact fixture these tests expect.
+    async with session_scope() as db:
+        await db.execute(text("DELETE FROM tax_component_rates"))
+        await db.execute(text("DELETE FROM tax_components"))
+        await db.commit()
     await make_tax_component(client, code="gst", name="GST", province=None, rate_bp=500)
     await make_tax_component(client, code="pst", name="PST", province="BC", rate_bp=700)
 

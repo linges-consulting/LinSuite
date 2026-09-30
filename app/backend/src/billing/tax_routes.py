@@ -23,6 +23,7 @@ acceptance criterion 1's "selected from the business's jurisdiction, not hardcod
 """
 
 import uuid
+from datetime import UTC, datetime
 from datetime import date as Date
 from typing import Annotated, Literal
 
@@ -38,6 +39,7 @@ from auth.models import User
 from billing.bill_review import business_or_404
 from billing.models import MAX_TAX_RATE_BP, TaxComponent, TaxComponentRate
 from billing.tax import resolve_rate_bp
+from billing.tax_table import find_component, rate_as_of
 from core.audit import record_event
 from core.db import SessionDep
 from core.forms import blank_to_none
@@ -94,6 +96,10 @@ class TaxComponentOut(BaseModel):
     # What acceptance criterion 1 asks the panel to show: whether this business's own
     # province would pick this component up. A hint only — see the module docstring.
     applicable_to_business: bool
+    # `'manual'` or `'prefill'` (#118) — `billing/models.py::TaxComponent.origin`'s own
+    # docstring. Read-only here: pre-fill is the only writer of `'prefill'`, and it only ever
+    # runs once.
+    origin: str
 
 
 class TaxComponentCreate(BaseModel):
@@ -209,6 +215,7 @@ def _out(component: TaxComponent, *, today: Date, business_province: str | None)
         current_rate_bp=resolve_rate_bp(history, today),
         applicable_to_business=component.province is None
         or component.province == business_province,
+        origin=component.origin,
     )
 
 
@@ -356,3 +363,84 @@ async def add_tax_component_rate(
     await db.commit()
     await db.refresh(component, attribute_names=["rates"])
     return _out(component, today=today_in(business.timezone), business_province=business.province)
+
+
+# --- pre-fill status and confirmation (#118, spec #113 "Tax pre-fill") ---------------------
+#
+# Everything the Tax panel needs to decide between three states — nothing to confirm yet (no
+# pre-filled components), "Looks right" pending, and confirmed — plus the two conditions spec
+# #113 says get a prompt instead of a silent change: the business's own province moved since
+# pre-fill ran, or `billing/tax_table.py` now lists a different current rate than what pre-fill
+# gave a component. Both compare only `origin == "prefill"` rows against the table — an owner's
+# own manually-added component in a second province (`test_billing_tax_settings.py`'s `ab_lct`)
+# is not pre-fill going stale, so it is never part of this comparison.
+
+
+class TaxStatusOut(BaseModel):
+    confirmed_at: datetime | None
+    # Whether there is anything to confirm at all — the panel's "Looks right" only ever shows
+    # when this is true and `confirmed_at` is not.
+    prefilled: bool
+    province_changed: bool
+    newer_rate_available: bool
+
+
+def _component_up_to_date(component: TaxComponent, as_of: Date) -> bool:
+    """A pre-filled component is current if the table still lists the exact rate it was given
+    — same `rate_bp`, same `effective_from` — among its own rate rows. A component whose
+    `province` the table no longer recognises (should not happen with today's thirteen, but a
+    future table edit could narrow one) counts as up to date: there is nothing newer to compare
+    against, only a component the table no longer covers, which is a different conversation."""
+    if component.province is None:
+        return True
+    table_component = find_component(component.code, component.province)
+    if table_component is None:
+        return True
+    table_rate = rate_as_of(table_component, as_of)
+    if table_rate is None:
+        return True
+    return any(
+        r.effective_from == table_rate.effective_from and r.rate_bp == table_rate.rate_bp
+        for r in component.rates
+    )
+
+
+async def _tax_status(db: SessionDep, business) -> TaxStatusOut:
+    prefilled = list(
+        await db.scalars(
+            select(TaxComponent)
+            .options(selectinload(TaxComponent.rates))
+            .where(TaxComponent.origin == "prefill")
+        )
+    )
+    today = today_in(business.timezone)
+    return TaxStatusOut(
+        confirmed_at=business.tax_confirmed_at,
+        prefilled=bool(prefilled),
+        province_changed=any(c.province != business.province for c in prefilled),
+        newer_rate_available=any(not _component_up_to_date(c, today) for c in prefilled),
+    )
+
+
+@router.get("/tax-status")
+async def read_tax_status(_: BillingManager, db: SessionDep) -> TaxStatusOut:
+    business = await business_or_404(db)
+    return await _tax_status(db, business)
+
+
+@router.post("/tax-confirmation")
+async def confirm_tax(admin: BillingManager, db: SessionDep) -> TaxStatusOut:
+    """The owner's "Looks right" on the checklist's Tax step. Sets the timestamp
+    unconditionally — re-confirming after editing a rate is allowed and harmless, the same way
+    `settings/routes.py::update_security`'s retention save can be re-run."""
+    business = await business_or_404(db)
+    business.tax_confirmed_at = datetime.now(UTC)
+    record_event(
+        db,
+        "billing.tax_confirmed",
+        target_type="business",
+        target_id=str(business.id),
+        actor_user_id=admin.id,
+    )
+    await db.commit()
+    return await _tax_status(db, business)
