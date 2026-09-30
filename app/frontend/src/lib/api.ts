@@ -2005,6 +2005,10 @@ export type RosterEntry = {
   /** The account behind the column: how this screen tells its own column from the others,
    *  which is the line between overriding one's own evening and somebody else's. */
   user_id: string
+  /** Delivers services, as opposed to front-desk or admin-only staff. What the calendar's
+   *  "Practitioners" picker offers, and what a practitioner's own default (their own column
+   *  only) is decided from. */
+  is_practitioner: boolean
 }
 
 export async function fetchRoster(): Promise<RosterEntry[]> {

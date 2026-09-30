@@ -20,10 +20,13 @@ import { SchedulePage } from '@/routes/schedule'
  */
 
 // The session is u1, so Ana's column is the signed-in person's own; Bo's is somebody else's.
-// Bo may run two at once (tech-stack §20), Ana one.
+// Bo may run two at once (tech-stack §20), Ana one. Both are practitioners — the Practitioners
+// picker's own default-narrowing behaviour is `tests/schedule-practitioners.test.tsx`'s; every
+// test here pre-selects both (`renderSchedule` below) so a drag/booking test is not also,
+// incidentally, a test of which columns the picker starts on.
 const ROSTER = [
-  { id: 's1', display_name: 'Ana Rossi', colour: 'blue', hex: '#1d4ed8', dark_hex: '#659dff', sort_order: 0, user_id: 'u1', max_concurrent_appointments: 1 },
-  { id: 's2', display_name: 'Bo Chen', colour: 'teal', hex: '#0f766e', dark_hex: '#68b5ac', sort_order: 1, user_id: 'u2', max_concurrent_appointments: 2 },
+  { id: 's1', display_name: 'Ana Rossi', colour: 'blue', hex: '#1d4ed8', dark_hex: '#659dff', sort_order: 0, user_id: 'u1', max_concurrent_appointments: 1, is_practitioner: true },
+  { id: 's2', display_name: 'Bo Chen', colour: 'teal', hex: '#0f766e', dark_hex: '#68b5ac', sort_order: 1, user_id: 'u2', max_concurrent_appointments: 2, is_practitioner: true },
 ]
 
 const CAN_OVERRIDE = ['schedule.view', 'schedule.manage', 'customers.manage', 'schedule.override_availability']
@@ -423,7 +426,20 @@ function fakeServer({
   return calls
 }
 
+/** The signed-in account (`u1`) already chose "All" — the Practitioners picker's own default
+ *  narrowing (own column only, for a practitioner) is exercised by
+ *  `tests/schedule-practitioners.test.tsx`; every other test here wants both columns, the
+ *  way the calendar always showed them before the picker existed. */
+function seedBothPractitionersChosen() {
+  try {
+    localStorage.setItem('linsuite.schedule.practitioners.u1', JSON.stringify(['s1', 's2']))
+  } catch {
+    // jsdom always has localStorage; a real failure here would fail the test loudly anyway.
+  }
+}
+
 function renderSchedule() {
+  seedBothPractitionersChosen()
   return render(
     <ThemeProvider>
       <QueryClientProvider client={createQueryClient()}>
@@ -733,9 +749,9 @@ test('the week view asks for Monday to Sunday and shows seven day columns', asyn
   expect(await screen.findByRole('region', { name: 'Mon' })).toBeInTheDocument()
   expect(document.querySelectorAll('[data-column]')).toHaveLength(7)
   expect(within(screen.getByRole('region', { name: 'Mon' })).getByTestId('event-a1')).toBeInTheDocument()
-  // Narrowing to one person asks the server for that person.
-  await user.click(screen.getByRole('combobox', { name: 'Staff member' }))
-  await user.click(await screen.findByRole('option', { name: 'Ana Rossi' }))
+  // Narrowing to one person, through the Practitioners picker, asks the server for that person.
+  await user.click(screen.getByRole('button', { name: /Practitioners/ }))
+  await user.click(screen.getByRole('checkbox', { name: /Bo Chen/ }))
   await waitFor(() =>
     expect(calls.some((c) => c.url === '/api/schedule?from=2026-06-15&to=2026-06-21&staff_id=s1')).toBe(true),
   )
