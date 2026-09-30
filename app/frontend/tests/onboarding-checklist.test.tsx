@@ -19,6 +19,7 @@ function status(overrides: Partial<OnboardingStatus> = {}): OnboardingStatus {
       { key: 'business', done: true, optional: false },
       { key: 'hours', done: true, optional: false },
       { key: 'tax', done: false, optional: false },
+      { key: 'spaces', done: false, optional: false },
       { key: 'services', done: false, optional: false },
       { key: 'staff', done: true, optional: false },
       { key: 'email', done: false, optional: false },
@@ -41,7 +42,7 @@ test('shows progress, an Optional label on branding, and a link to each step\'s 
   renderApp('/')
 
   expect(await screen.findByText('Get your business ready')).toBeInTheDocument()
-  expect(screen.getByText('3 of 7 steps done')).toBeInTheDocument()
+  expect(screen.getByText('3 of 8 steps done')).toBeInTheDocument()
 
   const brandingRow = screen.getByText('Branding').closest('li')!
   expect(within(brandingRow).getByText('Optional')).toBeInTheDocument()

@@ -37,6 +37,7 @@ DISMISS = f"{ONBOARDING}/dismiss"
 NOTIFICATIONS = "/api/admin/business/notifications"
 TAX_COMPONENTS = "/api/admin/billing/tax-components"
 SERVICES = "/api/admin/services"
+RESOURCES = "/api/admin/resources"
 STAFF = "/api/admin/staff"
 
 
@@ -51,6 +52,7 @@ async def claimed_instance(client):
             "tax_components",
             "working_hours",
             "services",
+            "resources",
             "password_reset_tokens",
             "staff",
             "users",
@@ -111,15 +113,17 @@ async def test_a_fresh_instance_has_every_step_undone_except_staff(client):
 
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert {s["key"] for s in body["steps"]} == {
+    # Order matters: a service can require a space, so spaces come before services.
+    assert [s["key"] for s in body["steps"]] == [
         "business",
         "hours",
         "tax",
+        "spaces",
         "services",
         "staff",
         "email",
         "branding",
-    }
+    ]
     for s in body["steps"]:
         assert s["done"] is (s["key"] == "staff"), s
         assert s["optional"] is (s["key"] == "branding")
@@ -207,6 +211,28 @@ async def test_tax_step_flips_once_an_active_component_has_a_rate(client):
     resp = await client.patch(f"{TAX_COMPONENTS}/{component['id']}", json={"active": False})
     assert resp.status_code == 200, resp.text
     assert step((await client.get(ONBOARDING)).json(), "tax")["done"] is False
+
+
+# --- spaces: at least one active space, before services ----------------------------------------
+
+
+async def test_spaces_step_flips_once_an_active_space_exists(client):
+    """Equipment alone does not count: the step is the room a service is delivered in."""
+    await as_admin(client)
+
+    assert step((await client.get(ONBOARDING)).json(), "spaces")["done"] is False
+
+    equipment = await client.post(RESOURCES, json={"kind": "equipment", "name": "Hot stones"})
+    assert equipment.status_code == 201, equipment.text
+    assert step((await client.get(ONBOARDING)).json(), "spaces")["done"] is False
+
+    space = await client.post(RESOURCES, json={"kind": "space", "name": "Room 1"})
+    assert space.status_code == 201, space.text
+    assert step((await client.get(ONBOARDING)).json(), "spaces")["done"] is True
+
+    resp = await client.post(f"{RESOURCES}/{space.json()['id']}/deactivate", json={})
+    assert resp.status_code == 200, resp.text
+    assert step((await client.get(ONBOARDING)).json(), "spaces")["done"] is False
 
 
 # --- services: at least one active service -----------------------------------------------------

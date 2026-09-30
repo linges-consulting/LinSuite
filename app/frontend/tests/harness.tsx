@@ -532,7 +532,7 @@ export function stubApi({
       if (url === '/api/admin/onboarding') {
         return Response.json({
           steps: (
-            ['business', 'hours', 'tax', 'services', 'staff', 'email', 'branding'] as const
+            ['business', 'hours', 'tax', 'spaces', 'services', 'staff', 'email', 'branding'] as const
           ).map((key) => ({ key, done: true, optional: key === 'branding' })),
           dismissed_at: '2026-01-01T00:00:00Z',
         })

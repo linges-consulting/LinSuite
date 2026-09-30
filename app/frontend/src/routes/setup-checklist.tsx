@@ -12,6 +12,7 @@ import { STAFF, STAFF_PALETTE } from '@/lib/query-keys'
 import { BrandingPanel } from '@/routes/settings-branding'
 import { BusinessPanel } from '@/routes/settings-business'
 import { NotificationsPanel } from '@/routes/settings-notifications'
+import { ResourcesPanel } from '@/routes/settings-resources'
 import { ServicesPanel } from '@/routes/settings-services'
 import { StaffDialog, StaffPanel } from '@/routes/settings-staff'
 import { TaxSettingsPanel } from '@/routes/settings-tax'
@@ -27,6 +28,7 @@ const STEP_PANEL: Record<OnboardingStepKey, ComponentType> = {
   business: BusinessPanel,
   hours: StaffPanel,
   tax: TaxSettingsPanel,
+  spaces: ResourcesPanel,
   services: ServicesPanel,
   staff: StaffPanel,
   email: NotificationsPanel,

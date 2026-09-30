@@ -18,6 +18,7 @@ function status(overrides: Partial<OnboardingStatus> = {}): OnboardingStatus {
       { key: 'business', done: true, optional: false },
       { key: 'hours', done: true, optional: false },
       { key: 'tax', done: true, optional: false },
+      { key: 'spaces', done: true, optional: false },
       { key: 'services', done: true, optional: false },
       { key: 'staff', done: true, optional: false },
       { key: 'email', done: false, optional: false },
