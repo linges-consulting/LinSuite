@@ -545,7 +545,9 @@ test('changing the dates asks the server again with from and to', async () => {
   expect(await screen.findByText('Nobody opened this record in these dates')).toBeInTheDocument()
 })
 
-test('in Staff Mode the card asks for Admin Mode instead of requesting a refusal', async () => {
+// #114 (spec #113 Staff Mode section): the card is administrative end to end, so `useCan`
+// hides it outright in Staff Mode rather than rendering a card that asks for a mode switch.
+test('in Staff Mode there is no access history card, and nothing asks for one', async () => {
   const { calls } = auditor({
     ...ME_AUDITOR,
     mode: 'staff',
@@ -553,12 +555,11 @@ test('in Staff Mode the card asks for Admin Mode instead of requesting a refusal
     admin_hard_limit_at: null,
   })
   renderApp('/clients/c1')
+  await screen.findByRole('heading', { name: 'Priya Nair' })
 
-  expect(await screen.findByRole('heading', { name: 'Access history' })).toBeInTheDocument()
-  expect(screen.getByText(/Switch to Admin Mode/)).toBeInTheDocument()
+  expect(screen.queryByRole('heading', { name: 'Access history' })).not.toBeInTheDocument()
+  expect(screen.queryByText(/Admin Mode/)).not.toBeInTheDocument()
   expect(reportCalls(calls)).toHaveLength(0)
-  // The export control needs Admin Mode too — absent, not disabled (M6 spec #95).
-  expect(screen.queryByRole('button', { name: 'Export CSV' })).not.toBeInTheDocument()
 })
 
 /**

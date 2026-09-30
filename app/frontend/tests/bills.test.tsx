@@ -12,15 +12,15 @@ import { renderApp, stubApi } from './harness'
 
 afterEach(() => vi.unstubAllGlobals())
 
-const ACCOUNT = (capabilities: string[]) => ({
+const ACCOUNT = (capabilities: string[], mode: 'staff' | 'admin' = 'staff') => ({
   id: 'u2',
   email: 'desk@cedar.example',
   role: 'Staff',
   capabilities,
-  mode: 'staff' as const,
-  can_switch_modes: false,
-  admin_grant_expires_at: null,
-  admin_hard_limit_at: null,
+  mode,
+  can_switch_modes: mode === 'admin',
+  admin_grant_expires_at: mode === 'admin' ? new Date(Date.now() + 900_000).toISOString() : null,
+  admin_hard_limit_at: mode === 'admin' ? new Date(Date.now() + 900_000).toISOString() : null,
   must_change_password: false,
   mfa: {
     enrolled: false,
@@ -90,6 +90,9 @@ function bill(overrides: Record<string, unknown> = {}) {
 function billsStub(
   opts: {
     capabilities?: string[]
+    /** #114: `billing.manage` is administrative — deciding an override request needs this
+     *  session actually in Admin Mode, not just holding the capability. */
+    mode?: 'staff' | 'admin'
     bill?: ReturnType<typeof bill>
     applyResponse?: { status: number; body: unknown }
     /** #107: the cancelled invoice `bill.replaces_invoice_id` points at — the "Replaces #N"
@@ -97,7 +100,7 @@ function billsStub(
     replacesInvoice?: { id: string; invoice_number: number; cancel_reason: string }
   } = {},
 ) {
-  const { capabilities = ['billing.view'], applyResponse, replacesInvoice } = opts
+  const { capabilities = ['billing.view'], mode = 'staff', applyResponse, replacesInvoice } = opts
   let current = opts.bill ?? bill()
   const applied: string[][] = []
   const requests: any[] = []
@@ -122,7 +125,7 @@ function billsStub(
     signedIn: true,
     respond: (url: string, body: any) => {
       const parsed = new URL(url, 'http://test')
-      if (url === '/api/auth/me') return Response.json(ACCOUNT(capabilities))
+      if (url === '/api/auth/me') return Response.json(ACCOUNT(capabilities, mode))
       if (!capabilities.includes('billing.view') && parsed.pathname.startsWith('/api/bills')) {
         return Response.json(
           { detail: "You don't hold a capability this needs.", code: 'capability_required' },
@@ -365,7 +368,11 @@ test('staff can submit an exception request and it shows as pending', async () =
 test('an admin/owner reviewing can approve a pending request', async () => {
   const user = userEvent.setup()
   const seeded = bill({ bill_override_requests_enabled: true })
-  const api = billsStub({ capabilities: ['billing.view', 'billing.manage'], bill: seeded })
+  const api = billsStub({
+    capabilities: ['billing.view', 'billing.manage'],
+    mode: 'admin',
+    bill: seeded,
+  })
   renderApp('/bills/b1')
   await user.click(await screen.findByRole('button', { name: 'Request an exception' }))
   await user.type(await screen.findByLabelText('Proposed total'), '95')
@@ -378,6 +385,28 @@ test('an admin/owner reviewing can approve a pending request', async () => {
   await waitFor(() => expect(screen.getByText('approved')).toBeInTheDocument())
   expect(screen.getByText('Admin-authorized total')).toBeInTheDocument()
   expect(api.calls.some((c) => c.url.endsWith('/decision') && c.method === 'POST')).toBe(true)
+})
+
+// #114 (spec #113 Staff Mode section): `billing.manage` is administrative, so holding it is
+// not enough on its own — deciding a request needs the session in Admin Mode too, or the
+// buttons offer an action `decideOverrideRequest` would refuse.
+test('holding billing.manage in Staff Mode does not offer Approve or Reject on a pending request', async () => {
+  const user = userEvent.setup()
+  billsStub({
+    capabilities: ['billing.view', 'billing.manage'],
+    mode: 'staff',
+    bill: bill({ bill_override_requests_enabled: true }),
+  })
+  renderApp('/bills/b1')
+
+  await user.click(await screen.findByRole('button', { name: 'Request an exception' }))
+  await user.type(await screen.findByLabelText('Proposed total'), '95')
+  await user.type(screen.getByLabelText('Reason'), 'Goodwill')
+  await user.click(screen.getByRole('button', { name: 'Submit' }))
+
+  await screen.findByText('pending')
+  expect(screen.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Reject' })).not.toBeInTheDocument()
 })
 
 test('an admin/owner can authenticate inline and an edit ends the window on save', async () => {

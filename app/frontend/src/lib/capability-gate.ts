@@ -16,8 +16,11 @@ import { useSession } from '@/lib/auth'
  * question is about. A fixed list is the simplest correct source, the same posture `lib/nav.ts`
  * already takes with its own `ADMINISTRATIVE` array. Keep this in sync with `capabilities.py`
  * by hand; nothing enforces the two agreeing.
+ *
+ * Exported so `lib/nav.ts` can gate a nav entry by the same rule instead of guessing at its
+ * own copy of "which of these capabilities are administrative."
  */
-const ADMIN_MODE_CAPABILITIES: ReadonlySet<string> = new Set([
+export const ADMIN_MODE_CAPABILITIES: ReadonlySet<string> = new Set([
   'admin',
   'roles.manage',
   'users.manage',

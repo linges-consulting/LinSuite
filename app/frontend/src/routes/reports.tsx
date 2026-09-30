@@ -6,11 +6,13 @@ import { CommissionReportTab } from '@/routes/reports-commission'
 import { PackageLiabilityReportTab } from '@/routes/reports-package-liability'
 
 /**
- * Reports (#97/#95/#110): Commission and Package liability, tables only, each with its own
- * CSV export. `lib/nav.ts`'s own `anyOf` is what hides the nav entry from an account holding
- * neither `commission.view` nor `billing.manage`; here, each tab is offered only when its own
- * capability passes `useCan` — both are administrative, so absent in Staff Mode too (spec #95
- * "Mode and capability rule": absent, never disabled).
+ * Reports (#97/#95/#110/#114): Commission and Package liability, tables only, each with its
+ * own CSV export. `lib/nav.ts`'s own `anyOf` is what hides the nav entry from an account
+ * holding neither `commission.view` nor `billing.manage`, and `App.tsx`'s `RequireAdminMode`
+ * is what keeps this whole route from rendering at all in Staff Mode — so by the time this
+ * component runs, the only way to hold neither capability is a direct URL, which is a
+ * permission gap rather than a mode one, and the empty state below says so without mentioning
+ * a mode the visitor is already in.
  */
 export function ReportsPage() {
   const canCommission = useCan('commission.view')
@@ -21,8 +23,8 @@ export function ReportsPage() {
     return (
       <EmptyState
         icon={ShieldCheck}
-        title="Switch to Admin Mode"
-        description="Reports need Admin Mode and the capability to view them."
+        title="No reports available"
+        description="Your role doesn't hold the commission or billing capability that reports need."
       />
     )
   }

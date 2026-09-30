@@ -328,6 +328,11 @@ describe('the query client tells the three 403s apart', () => {
     expect(await screen.findByText('Admin Mode expired', {}, AFTER_RETRY)).toBeInTheDocument()
   })
 
+  // #114 (spec #113 Staff Mode section): `/settings` is now a whole Admin-only route guarded
+  // by `RequireAdminMode`, so a Staff Mode visit never reaches `SettingsPage` — and so never
+  // sends the `/api/admin/*` request this refusal answers — at all. What is left to prove is
+  // the same thing the test's title always meant: nobody in Staff Mode is told their Admin
+  // Mode "expired" when they were never in it.
   it('does not claim an expiry to somebody who was never in Admin Mode', async () => {
     renderWithRefusal('staff', {
       detail: 'Switch to Admin Mode to do this.',
@@ -335,7 +340,7 @@ describe('the query client tells the three 403s apart', () => {
     })
 
     await waitFor(
-      () => expect(screen.getByRole('heading', { name: 'Settings' })).toBeInTheDocument(),
+      () => expect(screen.getByText('This area needs Admin Mode')).toBeInTheDocument(),
       AFTER_RETRY,
     )
     expect(screen.queryByText('Admin Mode expired')).not.toBeInTheDocument()
