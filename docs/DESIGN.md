@@ -83,6 +83,13 @@ Body is **14px** (`text-sm`) — this is a desktop tool; 16px is for marketing. 
 
 Weight carries hierarchy: 600 titles, 500 labels/nav, 400 body. No display sizes above 24px anywhere in the app.
 
+## Tabs
+
+- **Page-level sections** (Settings, Billing, Reports) use the shadcn Tabs `line` variant: natural-width
+  labels, muted when inactive, a foreground underline on the active one.
+- **In-page toggles and second-level tabs** (Schedule's Day/Week, Settings → Resources' Spaces/Equipment)
+  keep the default segmented pill, so a control never looks like navigation and underlines never nest.
+
 ## Spacing, radius, elevation
 
 - Tailwind 4px scale. Page gutter `p-4 md:p-6`. Card padding 16. Table row 40px. Nav item 36px. Top bar and sidebar header 56px.
