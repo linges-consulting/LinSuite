@@ -104,9 +104,11 @@ class PermanentDeliveryError(Exception):
 
 def is_permanent_status(status_code: int) -> bool:
     """A 4xx is the caller's own fault (bad number/address, bad/expired auth) — retrying the
-    identical request changes nothing. A 5xx is the provider's, and worth another try. Pure,
-    so it is tested on its own (S2), with no `httpx` request involved."""
-    return 400 <= status_code < 500
+    identical request changes nothing. A 5xx is the provider's, and worth another try. 429 is
+    the exception among 4xx: "slow down", not "this message is wrong", so a burst that hits the
+    provider's rate limit is retried with backoff rather than dropped. Pure, so it is tested
+    on its own (S2), with no `httpx` request involved."""
+    return 400 <= status_code < 500 and status_code != 429
 
 
 # SMTP replies with its own 4xx (temporary)/5xx (permanent) reply codes, opposite of HTTP's

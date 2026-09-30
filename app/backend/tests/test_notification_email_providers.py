@@ -501,11 +501,9 @@ def test_mailgun_raises_permanently_on_a_400_validation_error():
         provider.send_email(to="c@d.example", subject="s", text="t")
 
 
-def test_mailgun_classifies_a_429_exactly_like_the_existing_classifier_does():
-    # `is_permanent_status` treats every 4xx as permanent, 429 included (see the parametrized
-    # `test_is_permanent_status_is_true_for_every_4xx` below, which already pins this for
-    # Resend/Twilio) — Mailgun reuses that same classifier rather than special-casing 429, so
-    # this pins that a rate limit is classified identically here, not retried differently.
+def test_a_rate_limit_is_retried_not_dropped():
+    # 429 means "slow down", not "this message is wrong": a burst of reminders hitting the
+    # provider's rate limit must be retried with backoff, never recorded as a permanent failure.
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, json={"message": "rate limited"})
 
@@ -516,7 +514,7 @@ def test_mailgun_classifies_a_429_exactly_like_the_existing_classifier_does():
         from_address="a@b.example",
         client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
-    with pytest.raises(PermanentDeliveryError):
+    with pytest.raises(httpx.HTTPStatusError):
         provider.send_email(to="c@d.example", subject="s", text="t")
 
 
@@ -735,13 +733,13 @@ def test_email_ready_for_mailgun_requires_the_verified_timestamp():
 # --- is_permanent_status / is_permanent_smtp_error (S2, pure — Task 4, #11) -------------------
 
 
-@pytest.mark.parametrize("status_code", [400, 401, 404, 422, 429, 499])
-def test_is_permanent_status_is_true_for_every_4xx(status_code):
+@pytest.mark.parametrize("status_code", [400, 401, 404, 422, 499])
+def test_is_permanent_status_is_true_for_every_4xx_but_a_rate_limit(status_code):
     assert is_permanent_status(status_code) is True
 
 
-@pytest.mark.parametrize("status_code", [200, 301, 500, 502, 503])
-def test_is_permanent_status_is_false_outside_4xx(status_code):
+@pytest.mark.parametrize("status_code", [200, 301, 429, 500, 502, 503])
+def test_is_permanent_status_is_false_outside_4xx_and_for_a_rate_limit(status_code):
     assert is_permanent_status(status_code) is False
 
 
