@@ -93,14 +93,37 @@ test('Next walks the fixed step order, and Back returns the same way', async () 
   renderApp('/setup-checklist/business')
 
   expect(await screen.findByRole('heading', { name: 'Business details' })).toBeInTheDocument()
-  expect(screen.getByText('Step 1 of 7')).toBeInTheDocument()
+  expect(screen.getByText('Step 1 of 8')).toBeInTheDocument()
 
   await user.click(screen.getByRole('link', { name: 'Next' }))
   expect(await screen.findByRole('heading', { name: 'Opening hours' })).toBeInTheDocument()
-  expect(screen.getByText('Step 2 of 7')).toBeInTheDocument()
+  expect(screen.getByText('Step 2 of 8')).toBeInTheDocument()
 
   await user.click(screen.getByRole('link', { name: 'Back' }))
   expect(await screen.findByRole('heading', { name: 'Business details' })).toBeInTheDocument()
+})
+
+test('spaces come right before services, because a service can require one', async () => {
+  const user = userEvent.setup()
+  stubApi({
+    ...ADMIN,
+    respond: (url) => {
+      if (url.startsWith('/api/admin/resources')) return Response.json({ resources: [] })
+      return undefined
+    },
+  })
+
+  renderApp('/setup-checklist/spaces')
+
+  expect(await screen.findByRole('heading', { name: 'Spaces' })).toBeInTheDocument()
+  expect(screen.getByText('Step 4 of 8')).toBeInTheDocument()
+
+  await user.click(screen.getByRole('link', { name: 'Next' }))
+  expect(await screen.findByRole('heading', { name: 'Services' })).toBeInTheDocument()
+
+  await user.click(screen.getByRole('link', { name: 'Back' }))
+  await user.click(await screen.findByRole('link', { name: 'Back' }))
+  expect(await screen.findByRole('heading', { name: 'Tax' })).toBeInTheDocument()
 })
 
 test('the link back to the checklist goes Home', async () => {

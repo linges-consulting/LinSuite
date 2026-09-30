@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, expect, test, vi } from 'vitest'
 import { renderApp, stubApi, type Call } from './harness'
@@ -248,6 +248,54 @@ test('choosing Mailgun and saving sends the domain, region and new key', async (
   expect(body.mailgun_region).toBe('eu')
   expect(body.mailgun_api_key).toBe('key-live')
   expect(body.mailgun_from_address).toBe('hello@cedar.example')
+})
+
+/**
+ * Found by the product owner (#121): switch to another tab to fetch a Mailgun API key, come
+ * back, and the form had reset. Root cause was `RequireAdminMode` — the route guard around
+ * `/settings` — unmounting the whole page the instant a background focus refetch noticed the
+ * sliding Admin Mode window had quietly lapsed while the tab sat inactive (nothing slides it
+ * while backgrounded: `refetchInterval` pauses off-screen, and `/auth/me` itself never slides
+ * it). What is pinned here: that discovery must not throw away a half-typed field.
+ */
+test('a background Admin Mode lapse does not lose a half-typed Mailgun draft', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true })
+  try {
+    const { server } = fakeNotifications()
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
+    renderApp('/settings')
+    await user.click(await screen.findByRole('tab', { name: 'Notifications' }))
+
+    await user.click(await screen.findByRole('combobox', { name: 'Sender' }))
+    await user.click(await screen.findByRole('option', { name: 'Mailgun' }))
+    await user.type(await screen.findByLabelText('Domain'), 'mail.cedar.example')
+
+    // The window lapses server-side, silently — this tab has not been told yet, same as
+    // `mode-switcher.test.tsx`'s `expireAdminWindow` cases.
+    server.expireAdminWindow()
+
+    // Past every staleTime in play (the session's 10s, the notification settings' default
+    // 30s) — otherwise a focus event has nothing stale to refetch, and would prove nothing.
+    await act(async () => {
+      vi.advanceTimersByTime(31_000)
+    })
+    await act(async () => {
+      window.dispatchEvent(new Event('visibilitychange'))
+    })
+
+    // The session catches up with the lapsed window...
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Switch mode/ })).toHaveTextContent(
+        'Staff Mode',
+      ),
+    )
+    // ...but the page itself stays up rather than being swapped for the guard's notice, and
+    // the domain typed before the window lapsed is still sitting in the field.
+    expect(screen.queryByText('This area needs Admin Mode')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Domain')).toHaveValue('mail.cedar.example')
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 test('a stored Mailgun key is never retyped to keep it', async () => {

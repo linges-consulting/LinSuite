@@ -1,6 +1,7 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Briefcase, Check, ShieldCheck } from 'lucide-react'
 import { useEffect, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router'
 import { toast } from 'sonner'
 import { Field, Form, FormError } from '@/components/form'
 import { CodeField } from '@/components/mfa'
@@ -40,9 +41,15 @@ import { clockTime, useThrottle } from '@/lib/throttle'
  * turns the next click into an unexplained failure, and this is a tool people are using
  * while a client is in the room.
  */
+/** Screens that exist only in Admin Mode (`App.tsx` `RequireAdminMode`, and the checklist's
+ *  own step pages). */
+const ADMIN_ONLY_PATHS = ['/settings', '/reports', '/setup-checklist']
+
 export function ModeSwitcher() {
   const { user } = useSession()
   const switchMode = useSwitchMode()
+  const navigate = useNavigate()
+  const { pathname } = useLocation()
   const [askingPassword, setAskingPassword] = useState(false)
   // Whether the server has said this window also needs a code. It is asked for only when
   // the twelve-hourly interval has elapsed, so it is discovered from a 403 rather than
@@ -53,6 +60,20 @@ export function ModeSwitcher() {
 
   const admin = user.mode === 'admin'
   const label = admin ? 'Admin Mode' : 'Staff Mode'
+
+  // Choosing Staff Mode on purpose leaves an admin-only screen, since Staff Mode shows none.
+  // A *lapse* keeps the screen and any half-typed draft instead — see `RequireAdminMode`.
+  // Awaited rather than a per-call `onSuccess`, which is skipped if this observer re-subscribes
+  // while the session it just replaced re-renders the shell. A refused switch is reported by the
+  // query client's global handler, so it is caught here only to stay on the page.
+  const leaveAdmin = async () => {
+    try {
+      await switchMode.mutateAsync({ mode: 'staff' })
+    } catch {
+      return
+    }
+    if (ADMIN_ONLY_PATHS.some((path) => pathname.startsWith(path))) navigate('/', { replace: true })
+  }
 
   const enterAdmin = () => {
     // A live grant makes this free. If the window lapsed a moment ago and this tab has not
@@ -99,7 +120,7 @@ export function ModeSwitcher() {
           <DropdownMenuLabel className="font-normal text-muted-foreground">
             Working as
           </DropdownMenuLabel>
-          <ModeItem mode="staff" active={!admin} onSelect={() => switchMode.mutate({ mode: 'staff' })}>
+          <ModeItem mode="staff" active={!admin} onSelect={leaveAdmin}>
             <Briefcase aria-hidden />
             Staff Mode
           </ModeItem>

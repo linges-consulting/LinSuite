@@ -138,8 +138,8 @@ class Business(Base):
     receipt_footer: Mapped[str | None] = mapped_column(Text)
     # Six-digit hex, lowercase. The CHECK is in the migration: these end up as CSS variable
     # values on `<html>`, so "is it really a colour" is worth asserting in two places.
-    brand_primary: Mapped[str] = mapped_column(String(7), server_default=text("'#1d4ed8'"))
-    brand_secondary: Mapped[str] = mapped_column(String(7), server_default=text("'#0f766e'"))
+    brand_primary: Mapped[str] = mapped_column(String(7), server_default=text("'#1a6289'"))
+    brand_secondary: Mapped[str] = mapped_column(String(7), server_default=text("'#2f7a5c'"))
 
     # --- what the availability engine reads (tech-stack §19; `scheduling/availability.py`) --
     # The step slot starts are offered on, from local midnight. Five-minute steps, at most an

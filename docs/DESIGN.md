@@ -3,6 +3,12 @@
 A dense operational tool — calendars, tables, forms — used all day by staff. It should feel
 crisp and quiet, not like a marketing site. Source of truth for tokens: `app/frontend/src/index.css`.
 
+**Theme: tweakcn "Stillwater"** (https://tweakcn.com/themes/cmosbagdm000004ju5t9v43tb) — cool slate-blue
+neutrals, Geist, soft shadows, 0.625rem radius. Its palette is layer 2 below; its primary and a chart
+colour are the default brand pair in layer 1. Two deliberate departures: inputs keep an edge one step
+darker than borders (Stillwater uses the same value, too faint for form fields), and the status colours
+(`success`, `warning`, `info`), which Stillwater does not define, are unchanged.
+
 ## Tokens
 
 Three layers. Components only ever use layer 2 via Tailwind utilities (layer 3).
@@ -12,10 +18,10 @@ Three layers. Components only ever use layer 2 via Tailwind utilities (layer 3).
 
 | Token | Default | Used for |
 |---|---|---|
-| `--brand-primary` / `-foreground` | `#1d4ed8` / `#fff` | primary buttons, active states, focus ring, links |
-| `--brand-primary-dark` / `-foreground` | `#60a5fa` / `#0f172a` | the same roles on dark surfaces (a dark brand colour is unreadable on slate-950) |
-| `--brand-secondary` / `-foreground` | `#0f766e` / `#fff` | accents: calendar highlights, secondary chart series. Never buttons. |
-| `--brand-secondary-dark` / `-foreground` | `#68b5ac` / `#0f172a` | the same, on dark surfaces |
+| `--brand-primary` / `-foreground` | `#1a6289` / `#fff` | primary buttons, active states, focus ring, links |
+| `--brand-primary-dark` / `-foreground` | `#7ab0d0` / `#0f1419` | the same roles on dark surfaces (a dark brand colour is unreadable on slate-950) |
+| `--brand-secondary` / `-foreground` | `#2f7a5c` / `#fff` | accents: calendar highlights, secondary chart series. Never buttons. |
+| `--brand-secondary-dark` / `-foreground` | `#7cb79c` / `#0f1419` | the same, on dark surfaces |
 
 A business sets only `--brand-primary` and `--brand-secondary`. The other four are **derived**,
 server-side, in `app/backend/src/settings/branding.py` — one implementation, which the Branding
@@ -25,8 +31,8 @@ screen's live preview asks for rather than re-deriving in TypeScript.
   chroma. Oklab because its lightness axis is perceptually uniform: scaling `#rrggbb` toward
   `#ffffff` in sRGB shifts hue (blues go violet, reds go pink), and the result is a different
   colour rather than a lighter one. Chroma is pulled back slightly because full saturation at
-  that lightness reads as neon. `#1d4ed8` derives to `#659dff`, against the `#60a5fa` that was
-  chosen by hand for the default — close enough that the rule and the taste agree.
+  that lightness reads as neon. (Under the pre-Stillwater defaults, `#1d4ed8` derived to `#659dff`
+  against a hand-picked `#60a5fa` — close enough that the rule and the taste agreed.)
 - **The foreground** is whichever of `#ffffff` and `#0f172a` has the higher WCAG contrast on
   the colour.
 - **Contrast is reported, never enforced.** The Branding screen shows the ratio of text on each
@@ -41,8 +47,8 @@ light palette inside a dark page, exactly as `.dark` already did the reverse.
 
 **2. Semantic** — `background`, `foreground`, `card`, `popover`, `primary`, `secondary` (neutral, *not* brand),
 `muted`, `accent`, `border`, `input`, `ring`, `sidebar-*`, and status: `destructive`, `success`, `warning`, `info`.
-Neutrals are Tailwind **slate** (cool grey pairs with blue). Light: page `slate-50`, cards white, text `slate-900`,
-muted text `slate-600` (7:1). Dark: page `slate-950`, cards `slate-900`, text `slate-100`, muted `slate-400`.
+Neutrals are Stillwater's cool slate-blue greys (OKLCH, hue ~250): a near-white page with white cards and
+slate-navy text in light; a deep blue-slate page with slightly lifted cards in dark. Exact values in `index.css`.
 
 **3. Utilities** — `bg-primary`, `text-muted-foreground`, `border-input`, `bg-success/10 text-success`, etc.
 
@@ -53,11 +59,12 @@ Dark mode is designed with light, not derived from it; check contrast in both.
 
 ## Typography
 
-**One family, deliberately.** Inter Variable, self-hosted (`@fontsource-variable/inter`; on-prem installs
-cannot depend on Google Fonts), for headings, body and data alike. A display/body pairing earns its keep on
-marketing pages; in a tool where the largest text is an 18px page title and most of the screen is a 14px
-table, a second face adds a download and a seam without adding hierarchy — weight and size do that work.
-Inter's `cv11`/`ss01` alternates and tabular figures are enabled globally.
+**One family, deliberately.** Geist Variable, self-hosted (`@fontsource-variable/geist`; on-prem installs
+cannot depend on Google Fonts), for headings, body and data alike — Stillwater's sans. A display/body pairing
+earns its keep on marketing pages; in a tool where the largest text is an 18px page title and most of the
+screen is a 14px table, a second face adds a download and a seam without adding hierarchy — weight and size
+do that work. Monospace (secrets, codes, keys) is JetBrains Mono Variable (`@fontsource-variable/jetbrains-mono`).
+Tabular figures are enabled globally for data.
 
 `--font-heading` is a real token (shadcn's `Card`, `Dialog` titles use `font-heading`) and resolves to
 `--font-sans`. It stays as the single place a pairing would be introduced — e.g. a tenant's brand face —
@@ -76,11 +83,18 @@ Body is **14px** (`text-sm`) — this is a desktop tool; 16px is for marketing. 
 
 Weight carries hierarchy: 600 titles, 500 labels/nav, 400 body. No display sizes above 24px anywhere in the app.
 
+## Tabs
+
+- **Page-level sections** (Settings, Billing, Reports) use the shadcn Tabs `line` variant: natural-width
+  labels, muted when inactive, a foreground underline on the active one.
+- **In-page toggles and second-level tabs** (Schedule's Day/Week, Settings → Resources' Spaces/Equipment)
+  keep the default segmented pill, so a control never looks like navigation and underlines never nest.
+
 ## Spacing, radius, elevation
 
 - Tailwind 4px scale. Page gutter `p-4 md:p-6`. Card padding 16. Table row 40px. Nav item 36px. Top bar and sidebar header 56px.
-- `--radius: 6px`. Buttons/inputs `rounded-lg` (6), cards `rounded-xl` (~8), badges pill. Nothing rounder.
-- Elevation is a `ring-1 ring-foreground/10` or a border, never a drop shadow, except popovers/dialogs (shadcn defaults).
+- `--radius: 0.625rem` (10px, Stillwater). Buttons/inputs `rounded-lg` (10), cards `rounded-xl` (14), badges pill. Nothing rounder.
+- Elevation is a border or a `ring-1 ring-foreground/10` first. Where a shadow is used it is one of Stillwater's `shadow-*` tokens — very soft and cool-tinted in light, plain black in dark — never an ad-hoc value.
 - Reading width for prose/empty states `max-w-3xl`; data views are full width.
 
 ## Layout

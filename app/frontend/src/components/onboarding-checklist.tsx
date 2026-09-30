@@ -11,7 +11,7 @@ import { STEP_LABEL } from '@/lib/onboarding-steps'
 import { ONBOARDING } from '@/lib/query-keys'
 
 /**
- * "Get your business ready" (#116, spec #113): the seven-step setup checklist, Admin Mode,
+ * "Get your business ready" (#116, spec #113): the eight-step setup checklist, Admin Mode,
  * `admin` capability only — `useCan('admin')` covers both and this renders nothing at all
  * otherwise, the same "absent, never disabled" rule every other Admin-only surface here follows
  * (`lib/capability-gate.ts`). Nothing fetches until that gate passes, so a Staff Mode session or

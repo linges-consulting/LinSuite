@@ -1,7 +1,7 @@
 import type { OnboardingStepKey } from '@/lib/api'
 
 /**
- * The seven checklist steps, in the fixed order both the checklist itself
+ * The eight checklist steps, in the fixed order both the checklist itself
  * (`components/onboarding-checklist.tsx`) and its focused step pages
  * (`routes/setup-checklist.tsx`, #117) render in. Sourced from the server's own order
  * (`settings/onboarding_routes.py::_steps`) — kept in sync by hand, the same posture
@@ -15,6 +15,9 @@ export const STEP_ORDER: OnboardingStepKey[] = [
   'business',
   'hours',
   'tax',
+  // Before services: a service can require a space, and one needing "any space" cannot be
+  // booked until a space exists.
+  'spaces',
   'services',
   'staff',
   'email',
@@ -25,6 +28,7 @@ export const STEP_LABEL: Record<OnboardingStepKey, string> = {
   business: 'Business details',
   hours: 'Opening hours',
   tax: 'Tax',
+  spaces: 'Spaces',
   services: 'Services',
   staff: 'Staff',
   email: 'Email sending',

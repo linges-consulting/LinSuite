@@ -1,6 +1,6 @@
 """Settings → Onboarding: the "Get your business ready" checklist (#116, spec #113).
 
-A read of seven steps plus a dismiss action, both behind `Requires("admin")` — the same
+A read of eight steps plus a dismiss action, both behind `Requires("admin")` — the same
 Admin-Mode-only gate every other settings surface here already sits behind
 (`auth/capabilities.py`: `admin` is `requires_admin_mode=True`). Every `done` flag is computed
 from data that already lives somewhere; this file writes nothing except the dismissal
@@ -40,7 +40,7 @@ from core.audit import record_event
 from core.db import SessionDep
 from core.models import Business
 from notifications.providers import email_ready
-from scheduling.models import Service, Staff, WorkingHours
+from scheduling.models import Resource, Service, Staff, WorkingHours
 from settings.models import LOGO, BrandingAsset
 
 AdminCapability = Annotated[User, Depends(Requires("admin"))]
@@ -92,6 +92,17 @@ async def _tax_done(db: SessionDep, business: Business) -> bool:
     return row is not None
 
 
+async def _spaces_done(db: SessionDep) -> bool:
+    """At least one active space — before services, because a service can require one (an
+    "any space" requirement is unbookable until a space exists). Equipment does not count."""
+    return (
+        await db.scalar(
+            select(Resource.id).where(Resource.kind == "space", Resource.active.is_(True)).limit(1)
+        )
+        is not None
+    )
+
+
 async def _services_done(db: SessionDep) -> bool:
     return await db.scalar(select(Service.id).where(Service.active.is_(True)).limit(1)) is not None
 
@@ -109,6 +120,7 @@ async def _steps(business: Business, db: SessionDep) -> list[OnboardingStep]:
         OnboardingStep(key="business", done=_business_details_done(business)),
         OnboardingStep(key="hours", done=await _hours_done(db)),
         OnboardingStep(key="tax", done=await _tax_done(db, business)),
+        OnboardingStep(key="spaces", done=await _spaces_done(db)),
         OnboardingStep(key="services", done=await _services_done(db)),
         OnboardingStep(key="staff", done=await _staff_done(db)),
         OnboardingStep(key="email", done=email_ready(business)),

@@ -343,6 +343,17 @@ async def test_a_suggestion_is_only_a_suggestion(client):
 # --- colours --------------------------------------------------------------------------------
 
 
+async def test_a_new_business_starts_on_the_stillwater_brand_colours(client):
+    """The shipped theme is tweakcn's Stillwater: its slate-blue as the default primary and its
+    sage green as the default secondary, until a business picks its own."""
+    resp = await client.get(BRANDING)
+
+    assert resp.status_code == 200, resp.text
+    colours = resp.json()["colors"]
+    assert colours["primary"] == "#1a6289"
+    assert colours["secondary"] == "#2f7a5c"
+
+
 async def test_branding_is_public_and_carries_the_derived_dark_variants(client):
     await as_admin(client)
     saved = await client.put(

@@ -3971,13 +3971,14 @@ export function stockConflict(error: unknown): { name: string; available: number
   return match ? { name: match[1], available: Number(match[2]) } : null
 }
 
-/** The seven checklist steps (#116, spec #113): business, hours, tax, services, staff, email,
+/** The eight checklist steps (#116, spec #113): business, hours, tax, spaces, services, staff, email,
  *  branding — in that fixed order, each `done` computed server-side. `branding` is the only
  *  one `optional`. */
 export type OnboardingStepKey =
   | 'business'
   | 'hours'
   | 'tax'
+  | 'spaces'
   | 'services'
   | 'staff'
   | 'email'
