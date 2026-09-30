@@ -75,8 +75,12 @@ class Business(Base):
             name="ck_businesses_retention_profile",
         ),
         CheckConstraint(
-            "email_sender IS NULL OR email_sender IN ('resend', 'smtp')",
+            "email_sender IS NULL OR email_sender IN ('resend', 'smtp', 'mailgun')",
             name="ck_businesses_email_sender",
+        ),
+        CheckConstraint(
+            "mailgun_region IS NULL OR mailgun_region IN ('us', 'eu')",
+            name="ck_businesses_mailgun_region",
         ),
         CheckConstraint(
             "cancellation_cutoff_hours >= 0", name="ck_businesses_cancellation_cutoff_hours"
@@ -183,6 +187,19 @@ class Business(Base):
     # SMTP's equivalent of `resend_domain_verified_at`: SMTP has no domain to verify, only a
     # test send that succeeded, so it is named for what it actually records.
     smtp_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # --- notification email sender: Mailgun (M7, #115; `notifications/providers.py`) --------
+    # A third `email_sender` choice, over Mailgun's HTTP messages API — the reason it exists at
+    # all is that DigitalOcean blocks outbound SMTP on new droplets, so an HTTP-based sender is
+    # the one that actually works there. Same encryption/verification shape as Resend above:
+    # `mailgun_api_key_encrypted` under `NOTIFICATION_CREDENTIAL_KEY`, `mailgun_verified_at` set
+    # only by a successful test send. `mailgun_region` picks the API host: Mailgun's EU accounts
+    # only work against the EU host, never the US one.
+    mailgun_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    mailgun_domain: Mapped[str | None] = mapped_column(String(255))
+    mailgun_region: Mapped[str | None] = mapped_column(String(2))
+    mailgun_from_address: Mapped[str | None] = mapped_column(String(320))
+    mailgun_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # --- notification SMS sender (Phase 12 Task 3, #11; `notifications/providers.py`) -------
     # Off by default: unlike email (which degrades to `console`), SMS is opt-in per tenant —

@@ -39,6 +39,11 @@ type Settings = {
   smtp_from_address: string | null
   smtp_password_set: boolean
   smtp_verified_at: string | null
+  mailgun_domain: string | null
+  mailgun_region: 'us' | 'eu' | null
+  mailgun_from_address: string | null
+  mailgun_api_key_set: boolean
+  mailgun_verified_at: string | null
   sms_enabled: boolean
   sms_ready: boolean
   twilio_account_sid: string | null
@@ -87,6 +92,11 @@ function fakeNotifications(initial: Partial<Settings> = {}) {
     smtp_from_address: null,
     smtp_password_set: false,
     smtp_verified_at: null,
+    mailgun_domain: null,
+    mailgun_region: null,
+    mailgun_from_address: null,
+    mailgun_api_key_set: false,
+    mailgun_verified_at: null,
     sms_enabled: false,
     sms_ready: false,
     twilio_account_sid: null,
@@ -108,12 +118,14 @@ function fakeNotifications(initial: Partial<Settings> = {}) {
         if (body !== undefined) {
           // Same shape the real PATCH handler uses: a secret key present and truthy replaces
           // the stored flag, absent leaves it alone — never re-derived from the raw value.
-          const { resend_api_key, smtp_password, twilio_auth_token, ...rest } = body
+          const { resend_api_key, smtp_password, mailgun_api_key, twilio_auth_token, ...rest } =
+            body
           settings = {
             ...settings,
             ...rest,
             resend_api_key_set: resend_api_key ? true : settings.resend_api_key_set,
             smtp_password_set: smtp_password ? true : settings.smtp_password_set,
+            mailgun_api_key_set: mailgun_api_key ? true : settings.mailgun_api_key_set,
             twilio_auth_token_set: twilio_auth_token ? true : settings.twilio_auth_token_set,
           }
         }
@@ -124,6 +136,7 @@ function fakeNotifications(initial: Partial<Settings> = {}) {
           ...settings,
           resend_domain_verified_at: '2026-01-02T00:00:00Z',
           smtp_verified_at: '2026-01-02T00:00:00Z',
+          mailgun_verified_at: '2026-01-02T00:00:00Z',
           email_ready: true,
         }
         return Response.json(settings)
@@ -214,6 +227,65 @@ test('a successful test email flips the readiness badge', async () => {
   await waitFor(() => expect(screen.getByText('Ready')).toBeInTheDocument())
   expect(await screen.findByText(/Test email sent to owner@cedar.example/)).toBeInTheDocument()
 });
+
+test('choosing Mailgun and saving sends the domain, region and new key', async () => {
+  const { calls } = fakeNotifications()
+  const user = await openNotifications()
+
+  await user.click(await screen.findByRole('combobox', { name: 'Sender' }))
+  await user.click(await screen.findByRole('option', { name: 'Mailgun' }))
+  await user.type(await screen.findByLabelText('Domain'), 'mail.cedar.example')
+  await user.click(screen.getByRole('combobox', { name: 'Region' }))
+  await user.click(await screen.findByRole('option', { name: 'EU' }))
+  await user.type(screen.getByLabelText('API key'), 'key-live')
+  await user.type(screen.getByLabelText('From address'), 'hello@cedar.example')
+  await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+  await waitFor(() => expect(patches(calls)).toHaveLength(1))
+  const body = patches(calls)[0].body as Record<string, unknown>
+  expect(body.email_sender).toBe('mailgun')
+  expect(body.mailgun_domain).toBe('mail.cedar.example')
+  expect(body.mailgun_region).toBe('eu')
+  expect(body.mailgun_api_key).toBe('key-live')
+  expect(body.mailgun_from_address).toBe('hello@cedar.example')
+})
+
+test('a stored Mailgun key is never retyped to keep it', async () => {
+  const { calls } = fakeNotifications({
+    email_sender: 'mailgun',
+    mailgun_domain: 'mail.cedar.example',
+    mailgun_region: 'us',
+    mailgun_from_address: 'hello@cedar.example',
+    mailgun_api_key_set: true,
+  })
+  const user = await openNotifications()
+
+  await user.clear(await screen.findByLabelText('From address'))
+  await user.type(screen.getByLabelText('From address'), 'new@cedar.example')
+  await user.click(screen.getByRole('button', { name: 'Save changes' }))
+
+  await waitFor(() => expect(patches(calls)).toHaveLength(1))
+  const body = patches(calls)[0].body as Record<string, unknown>
+  expect(body.mailgun_from_address).toBe('new@cedar.example')
+  expect('mailgun_api_key' in body).toBe(false)
+})
+
+test('a successful Mailgun test email flips the readiness badge', async () => {
+  fakeNotifications({
+    email_sender: 'mailgun',
+    mailgun_domain: 'mail.cedar.example',
+    mailgun_region: 'us',
+    mailgun_from_address: 'hello@cedar.example',
+    mailgun_api_key_set: true,
+  })
+  const user = await openNotifications()
+  expect(screen.getByText('Not verified yet')).toBeInTheDocument()
+
+  await user.type(await screen.findByLabelText('Send a test email to'), 'owner@cedar.example')
+  await user.click(screen.getByRole('button', { name: 'Send test email' }))
+
+  await waitFor(() => expect(screen.getByText('Ready')).toBeInTheDocument())
+})
 
 test('turning on SMS reveals the Twilio fields and a test action', async () => {
   const { calls } = fakeNotifications()

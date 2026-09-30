@@ -204,6 +204,124 @@ async def test_a_field_left_out_of_the_patch_is_left_alone(client):
     assert body["resend_api_key_set"] is True
 
 
+async def test_configuring_mailgun_sets_it_up_without_ever_returning_the_key(client):
+    await as_admin(client)
+
+    resp = await client.patch(
+        NOTIFICATIONS,
+        json={
+            "email_sender": "mailgun",
+            "mailgun_domain": "mail.cedar.example",
+            "mailgun_region": "eu",
+            "mailgun_from_address": "hello@cedar.example",
+            "mailgun_api_key": "key-live-super-secret",
+        },
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["email_sender"] == "mailgun"
+    assert body["mailgun_domain"] == "mail.cedar.example"
+    assert body["mailgun_region"] == "eu"
+    assert body["mailgun_from_address"] == "hello@cedar.example"
+    assert body["mailgun_api_key_set"] is True
+    assert "mailgun_api_key" not in body
+    assert "key-live-super-secret" not in resp.text
+    # Not ready yet: configured is not verified.
+    assert body["email_ready"] is False
+
+    events = await audit("business.notification_settings_updated")
+    assert events[-1] == {
+        "changed": [
+            "email_sender",
+            "mailgun_domain",
+            "mailgun_region",
+            "mailgun_api_key_encrypted",
+            "mailgun_from_address",
+        ]
+    }
+    assert "key-live-super-secret" not in str(events)
+
+
+async def test_rotating_the_mailgun_key_resets_the_verified_timestamp(client, sent_emails):
+    await as_admin(client)
+    await client.patch(
+        NOTIFICATIONS,
+        json={
+            "email_sender": "mailgun",
+            "mailgun_domain": "mail.cedar.example",
+            "mailgun_region": "us",
+            "mailgun_from_address": "hello@cedar.example",
+            "mailgun_api_key": "key-live",
+        },
+    )
+    verified = await client.post(f"{NOTIFICATIONS}/test-email", json={"to": "owner@cedar.example"})
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["mailgun_verified_at"] is not None
+
+    resp = await client.patch(NOTIFICATIONS, json={"mailgun_api_key": "key-live-rotated"})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["mailgun_verified_at"] is None
+    assert resp.json()["email_ready"] is False
+
+
+async def test_sending_a_test_email_through_mailgun_verifies_it(client, sent_emails):
+    await as_admin(client)
+    await client.patch(
+        NOTIFICATIONS,
+        json={
+            "email_sender": "mailgun",
+            "mailgun_domain": "mail.cedar.example",
+            "mailgun_region": "us",
+            "mailgun_from_address": "hello@cedar.example",
+            "mailgun_api_key": "key-live",
+        },
+    )
+
+    resp = await client.post(f"{NOTIFICATIONS}/test-email", json={"to": "owner@cedar.example"})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["mailgun_verified_at"] is not None
+    assert body["email_ready"] is True
+    assert len(sent_emails) == 1
+    assert sent_emails[0].to == "owner@cedar.example"
+
+    events = await audit("business.notification_email_verified")
+    assert events[-1] == {"email_sender": "mailgun"}
+
+
+async def test_a_field_left_out_of_a_mailgun_patch_is_left_alone(client):
+    await as_admin(client)
+    await client.patch(
+        NOTIFICATIONS,
+        json={
+            "email_sender": "mailgun",
+            "mailgun_domain": "mail.cedar.example",
+            "mailgun_region": "us",
+            "mailgun_from_address": "hello@cedar.example",
+            "mailgun_api_key": "key-live",
+        },
+    )
+
+    resp = await client.patch(NOTIFICATIONS, json={"mailgun_from_address": "new@cedar.example"})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["mailgun_from_address"] == "new@cedar.example"
+    assert body["mailgun_domain"] == "mail.cedar.example"
+    assert body["mailgun_api_key_set"] is True
+
+
+async def test_mailgun_region_is_validated(client):
+    await as_admin(client)
+
+    resp = await client.patch(NOTIFICATIONS, json={"mailgun_region": "ca"})
+
+    assert resp.status_code == 422, resp.text
+
+
 async def test_configuring_smtp_and_twilio_and_reminder_intervals(client):
     await as_admin(client)
 

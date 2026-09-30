@@ -21,6 +21,7 @@ from notifications.credentials import encrypt_credential
 from notifications.providers import (
     ConsoleProvider,
     EmailAttachment,
+    MailgunProvider,
     PermanentDeliveryError,
     ResendProvider,
     SmtpProvider,
@@ -365,6 +366,175 @@ def test_smtp_send_email_is_unaffected_when_no_attachments_are_given():
     assert not _FakeSMTP.instances[0].sent.is_multipart()
 
 
+# --- MailgunProvider (#115) -----------------------------------------------------------------
+
+
+def test_mailgun_posts_a_basic_authenticated_form_to_the_us_host_by_default():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"id": "<abc@mailgun>"})
+
+    provider = MailgunProvider(
+        api_key="key-test",
+        domain="mail.cedar.example",
+        region="us",
+        from_address="hello@cedar.example",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    provider.send_email(to="client@example.com", subject="Hi", text="body", html="<p>body</p>")
+
+    assert len(seen) == 1
+    request = seen[0]
+    assert str(request.url) == "https://api.mailgun.net/v3/mail.cedar.example/messages"
+    assert request.headers["authorization"].startswith("Basic ")
+    decoded = base64.b64decode(request.headers["authorization"].removeprefix("Basic ")).decode()
+    assert decoded == "api:key-test"
+    assert request.headers["content-type"] == "application/x-www-form-urlencoded"
+    from urllib.parse import parse_qs
+
+    fields = parse_qs(request.content.decode())
+    assert fields == {
+        "from": ["hello@cedar.example"],
+        "to": ["client@example.com"],
+        "subject": ["Hi"],
+        "text": ["body"],
+        "html": ["<p>body</p>"],
+    }
+
+
+def test_mailgun_uses_the_eu_host_for_the_eu_region():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"id": "<abc@mailgun>"})
+
+    provider = MailgunProvider(
+        api_key="key-test",
+        domain="mail.cedar.example",
+        region="eu",
+        from_address="hello@cedar.example",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    provider.send_email(to="client@example.com", subject="Hi", text="body")
+
+    assert str(seen[0].url) == "https://api.eu.mailgun.net/v3/mail.cedar.example/messages"
+
+
+def test_mailgun_omits_html_when_none():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"id": "abc"})
+
+    provider = MailgunProvider(
+        api_key="k",
+        domain="d.example",
+        region="us",
+        from_address="a@b.example",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    provider.send_email(to="c@d.example", subject="s", text="t")
+
+    from urllib.parse import parse_qs
+
+    assert "html" not in parse_qs(seen[0].content.decode())
+
+
+def test_mailgun_attaches_a_file_by_its_own_multipart_field():
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"id": "abc"})
+
+    provider = MailgunProvider(
+        api_key="k",
+        domain="d.example",
+        region="us",
+        from_address="a@b.example",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    provider.send_email(
+        to="c@d.example",
+        subject="s",
+        text="t",
+        attachments=[EmailAttachment(filename="invoice-1.pdf", content=b"%PDF-1.7 body")],
+    )
+
+    body = seen[0].content
+    assert b'name="attachment"' in body
+    assert b"invoice-1.pdf" in body
+    assert b"%PDF-1.7 body" in body
+
+
+def test_mailgun_raises_permanently_on_a_401():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"message": "Forbidden"})
+
+    provider = MailgunProvider(
+        api_key="bad",
+        domain="d.example",
+        region="us",
+        from_address="a@b.example",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(PermanentDeliveryError):
+        provider.send_email(to="c@d.example", subject="s", text="t")
+
+
+def test_mailgun_raises_permanently_on_a_400_validation_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"message": "'to' parameter is missing"})
+
+    provider = MailgunProvider(
+        api_key="k",
+        domain="d.example",
+        region="us",
+        from_address="a@b.example",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(PermanentDeliveryError):
+        provider.send_email(to="c@d.example", subject="s", text="t")
+
+
+def test_mailgun_classifies_a_429_exactly_like_the_existing_classifier_does():
+    # `is_permanent_status` treats every 4xx as permanent, 429 included (see the parametrized
+    # `test_is_permanent_status_is_true_for_every_4xx` below, which already pins this for
+    # Resend/Twilio) — Mailgun reuses that same classifier rather than special-casing 429, so
+    # this pins that a rate limit is classified identically here, not retried differently.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, json={"message": "rate limited"})
+
+    provider = MailgunProvider(
+        api_key="k",
+        domain="d.example",
+        region="us",
+        from_address="a@b.example",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(PermanentDeliveryError):
+        provider.send_email(to="c@d.example", subject="s", text="t")
+
+
+def test_mailgun_raises_transiently_on_a_5xx():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"message": "upstream unavailable"})
+
+    provider = MailgunProvider(
+        api_key="k",
+        domain="d.example",
+        region="us",
+        from_address="a@b.example",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        provider.send_email(to="c@d.example", subject="s", text="t")
+
+
 # --- get_provider: tenant selection --------------------------------------------------------
 
 
@@ -425,6 +595,41 @@ def test_get_provider_builds_an_smtp_provider_from_the_business_row(database, mo
     assert provider._host == "smtp.example.com"
     assert provider._port == 2525
     assert provider._password == "s3cret"
+
+
+def test_get_provider_builds_a_mailgun_provider_from_the_business_row(database, monkeypatch):
+    from core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "notification_provider", "unused-in-production")
+    business = _business(
+        email_sender="mailgun",
+        mailgun_api_key_encrypted=encrypt_credential("key-live"),
+        mailgun_domain="mail.cedar.example",
+        mailgun_region="eu",
+        mailgun_from_address="hello@cedar.example",
+    )
+    provider = get_provider(business)
+
+    assert isinstance(provider, MailgunProvider)
+    assert provider._api_key == "key-live"
+    assert provider._domain == "mail.cedar.example"
+    assert provider._region == "eu"
+    assert provider._from_address == "hello@cedar.example"
+
+
+def test_get_provider_defaults_mailgun_region_to_us_when_unset(database, monkeypatch):
+    from core.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "notification_provider", "unused-in-production")
+    business = _business(
+        email_sender="mailgun",
+        mailgun_api_key_encrypted=encrypt_credential("key-live"),
+        mailgun_domain="mail.cedar.example",
+        mailgun_from_address="hello@cedar.example",
+    )
+    provider = get_provider(business)
+
+    assert provider._region == "us"
 
 
 def test_get_provider_reaches_the_tenant_sender_even_at_the_shipped_console_default(
@@ -503,6 +708,26 @@ def test_email_ready_for_smtp_requires_the_verified_timestamp():
         smtp_host="smtp.example.com",
         smtp_from_address="hello@cedar.example",
         smtp_verified_at=None,
+    )
+    assert email_ready(unverified) is False
+
+
+def test_email_ready_for_mailgun_requires_the_verified_timestamp():
+    verified = _business(
+        email_sender="mailgun",
+        mailgun_api_key_encrypted="sealed",
+        mailgun_domain="mail.cedar.example",
+        mailgun_from_address="hello@cedar.example",
+        mailgun_verified_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    assert email_ready(verified) is True
+
+    unverified = _business(
+        email_sender="mailgun",
+        mailgun_api_key_encrypted="sealed",
+        mailgun_domain="mail.cedar.example",
+        mailgun_from_address="hello@cedar.example",
+        mailgun_verified_at=None,
     )
     assert email_ready(unverified) is False
 
