@@ -289,6 +289,13 @@ class Business(Base):
     # it is always on, gated only by `customers.view`.
     demo_mode: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
 
+    # --- onboarding checklist (#116, spec #113; `settings/onboarding_routes.py`) -----------
+    # Set once, by an Admin-Mode "Dismiss" action — shared by every administrator, since it
+    # lives on the one business row rather than per-user state. NULL means the checklist still
+    # renders on Home; the separate "emails go to the server log" banner ignores this column
+    # entirely (spec: independent of dismissal).
+    onboarding_dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
 
 class AuditEvent(Base):
     """Append-only: who did what, and when (ADR-0002).

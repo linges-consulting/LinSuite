@@ -503,6 +503,17 @@ export function stubApi({
       }
       // An instance with nobody on its books yet; a test with clients answers via `respond`.
       if (url.startsWith('/api/customers?')) return Response.json({ customers: [], total: 0 })
+      // #116: every step already done and dismissed, so Home's checklist and email banner stay
+      // out of every test that isn't specifically about onboarding — those answer this URL
+      // themselves via `respond`, which is checked before this fallback runs.
+      if (url === '/api/admin/onboarding') {
+        return Response.json({
+          steps: (
+            ['business', 'hours', 'tax', 'services', 'staff', 'email', 'branding'] as const
+          ).map((key) => ({ key, done: true, optional: key === 'branding' })),
+          dismissed_at: '2026-01-01T00:00:00Z',
+        })
+      }
       return Response.json({ status: 'ok', database: 'ok' })
     }),
   )
