@@ -21,8 +21,15 @@ afterEach(() => vi.unstubAllGlobals())
  * went on showing "Switch to Admin Mode to do this", because the refusal was cached and
  * nothing had asked the server again. Changing mode changes what the server will answer, so
  * everything fetched under the old mode is stale by definition.
+ *
+ * #114 (spec #113 Staff Mode section) closed the specific hole this test found a different
+ * way: `/settings` is now a whole Admin-only route (`RequireAdminMode` in `App.tsx`), so
+ * `SettingsPage` never mounts — and never fetches anything to cache a refusal from — while
+ * the session is in Staff Mode. What is left to prove is the same user-facing promise the
+ * title always meant: entering Admin Mode brings the panel up on its own, no reload and no
+ * second click, whichever mechanism gets it there.
  */
-test('entering Admin Mode re-asks for what Staff Mode was refused', async () => {
+test('entering Admin Mode brings Settings up on its own, with no reload', async () => {
   let elevated = false
   const session = () => ({
     id: 'u1',
@@ -76,10 +83,14 @@ test('entering Admin Mode re-asks for what Staff Mode was refused', async () => 
     </ThemeProvider>,
   )
 
-  // Refused first: the window is not open.
-  expect(await screen.findByText(/Switch to Admin Mode/, {}, { timeout: 5_000 })).toBeInTheDocument()
+  // Refused first: the window is not open, so the route guard is what shows — never
+  // `SettingsPage` itself, and so never a fetch to cache a refusal from.
+  expect(await screen.findByText('This area needs Admin Mode', {}, { timeout: 5_000 })).toBeInTheDocument()
 
-  await user.click(await screen.findByRole('button', { name: /Switch mode/ }))
+  // The guard page's own switcher plus the shell header's — either gets there, so the first
+  // one found is as good as any.
+  const [switcher] = await screen.findAllByRole('button', { name: /Switch mode/ })
+  await user.click(switcher)
   await user.click(await screen.findByRole('menuitem', { name: /Admin Mode/ }))
 
   // The panel returns on its own — no reload, no second click.

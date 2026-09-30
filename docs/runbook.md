@@ -415,14 +415,28 @@ trust their own CA.
 Do this only after the business's outgoing email is actually configured and verified — DMARC
 has nothing meaningful to enforce until SPF/DKIM alignment exists to check.
 
-1. In LinSuite, Settings → Notifications: set the sender to Resend, set
-   `resend_from_address` to an address at the domain you're about to configure (e.g.
+1. In LinSuite, Settings → Notifications: set the sender to Resend (or Mailgun — #115, below),
+   set the sender's from address to one at the domain you're about to configure (e.g.
    `notifications@<clinic-domain>`), and use the in-app "send test email" action — this is
-   what sets `businesses.resend_domain_verified_at`.
-2. In Resend's own dashboard, add and verify that sending domain. Resend gives you the SPF and
-   DKIM DNS records to add at your DNS host; add exactly what it shows and wait for it to show
-   verified there too — this step is what actually makes SPF/DKIM pass, not the in-app test
-   send.
+   what sets `businesses.resend_domain_verified_at`/`businesses.mailgun_verified_at`.
+2. **Resend**: in Resend's own dashboard, add and verify that sending domain. Resend gives you
+   the SPF and DKIM DNS records to add at your DNS host; add exactly what it shows and wait for
+   it to show verified there too — this step is what actually makes SPF/DKIM pass, not the
+   in-app test send.
+
+   **Mailgun** (#115 — the HTTP-based sender for a host, like DigitalOcean, that blocks
+   outbound SMTP): in Mailgun's dashboard, add the sending domain and pick the same region
+   (US or EU) chosen in Settings → Notifications — an EU domain only verifies against the EU
+   host. Mailgun gives you its own SPF and DKIM records for that domain; add exactly what it
+   shows:
+   ```
+   <clinic-domain>.              IN TXT  "v=spf1 include:mailgun.org ~all"
+   krs._domainkey.<clinic-domain>. IN TXT  "k=rsa; p=<Mailgun's own public key value>"
+   ```
+   (Mailgun's console shows the DKIM selector — usually `krs` or `mg` — and the exact public
+   key value for your domain; copy those, don't guess them.) If the sending domain already has
+   an SPF record for another sender, add `include:mailgun.org` to the existing record rather
+   than creating a second `TXT` at the bare domain — a domain may only have one SPF record.
 3. Add a DMARC record, starting at `p=none` (monitor only — nothing is rejected or quarantined,
    but you start collecting aggregate reports of who is and isn't passing alignment):
    ```

@@ -10,7 +10,6 @@ import {
   Pencil,
   Plus,
   SearchX,
-  ShieldCheck,
   ShieldOff,
   TriangleAlert,
   UserRound,
@@ -73,6 +72,7 @@ import {
   type Visit,
 } from '@/lib/api'
 import { useSession } from '@/lib/auth'
+import { useCan } from '@/lib/capability-gate'
 import { formatPhone } from '@/lib/phone'
 import { invalidateScheduling } from '@/lib/query-client'
 import { COMPLIANCE, CUSTOMER_PROFILE as PROFILE, CUSTOMERS } from '@/lib/query-keys'
@@ -355,7 +355,9 @@ export function ClientPage() {
   const { id = '' } = useParams()
   const { user } = useSession()
   const canEdit = user?.capabilities.includes('customers.manage') ?? false
-  const canAudit = user?.capabilities.includes('audit.view') ?? false
+  // Administrative (#114, spec #113 Staff Mode section): absent outright in Staff Mode,
+  // rather than a card that asks the visitor to switch — `useCan` folds both checks into one.
+  const canAudit = useCan('audit.view')
   const canSendForms = user?.capabilities.includes('forms.issue') ?? false
   const canViewForms = user?.capabilities.includes('forms.view') ?? false
   const canViewNotes = user?.capabilities.includes('notes.view') ?? false
@@ -363,8 +365,7 @@ export function ClientPage() {
   // #97/#95: front-desk billing read, same capability as Billing and Sell — never Admin Mode.
   const canViewBilling = user?.capabilities.includes('billing.view') ?? false
   // An Admin Mode capability: offered only while the window is open, never as a refusal.
-  const canErase =
-    (user?.capabilities.includes('customers.erase') ?? false) && user?.mode === 'admin'
+  const canErase = useCan('customers.erase')
   const [editing, setEditing] = useState(false)
   const [erasing, setErasing] = useState(false)
   const formsCard = useRef<ClientFormsCardHandle>(null)
@@ -643,7 +644,7 @@ export function ClientPage() {
             )}
           </section>
 
-          {canAudit && <AccessHistory customerId={id} adminMode={user?.mode === 'admin'} />}
+          {canAudit && <AccessHistory customerId={id} />}
         </>
       )}
     </div>
@@ -939,19 +940,18 @@ const OPENED: Record<string, string> = {
 
 /**
  * Who opened this record, when, as what and from where (ADR-0002 §6). Shown to holders of
- * `audit.view` only — hidden otherwise, like Settings in the nav — and asked for only in
- * Admin Mode: the capability is an administrative one, and a Staff Mode request would be
- * a refusal the card can predict. The date range is the server's (`from`/`to`, business-
- * local, 90 days by default), so the inputs show whatever range was actually applied.
+ * `audit.view` only, and only in Admin Mode — the caller's `useCan` already folds both checks
+ * into whether this renders at all (#114, spec #113 Staff Mode section: absent, never a card
+ * asking for a mode switch). The date range is the server's (`from`/`to`, business-local, 90
+ * days by default), so the inputs show whatever range was actually applied.
  */
-function AccessHistory({ customerId, adminMode }: { customerId: string; adminMode: boolean }) {
+function AccessHistory({ customerId }: { customerId: string }) {
   const [range, setRange] = useState<{ from?: string; to?: string }>({})
   const [page, setPage] = useState(1)
   const report = useQuery({
     queryKey: [...ACCESS_LOG, customerId, range.from, range.to, page],
     queryFn: () =>
       fetchAccessLog(customerId, { ...range, page, page_size: ACCESS_PAGE_SIZE }),
-    enabled: adminMode,
     placeholderData: keepPreviousData,
   })
   const from = range.from ?? report.data?.from ?? ''
@@ -970,52 +970,45 @@ function AccessHistory({ customerId, adminMode }: { customerId: string; adminMod
         <CardTitle className="text-base font-medium">
           <h2>Access history</h2>
         </CardTitle>
-        {adminMode && (
-          <div className="flex items-end gap-2">
-            <div className="grid gap-1">
-              <Label htmlFor="access-from" className="text-xs text-muted-foreground">
-                From
-              </Label>
-              <Input
-                id="access-from"
-                type="date"
-                className="w-40"
-                value={from}
-                max={to || undefined}
-                onChange={(e) => choose({ from: e.target.value })}
-              />
-            </div>
-            <div className="grid gap-1">
-              <Label htmlFor="access-to" className="text-xs text-muted-foreground">
-                To
-              </Label>
-              <Input
-                id="access-to"
-                type="date"
-                className="w-40"
-                value={to}
-                min={from || undefined}
-                onChange={(e) => choose({ to: e.target.value })}
-              />
-            </div>
-            <ExportControl
-              label="Export CSV"
-              requestExport={() =>
-                requestAccessLogExport(customerId, { from: from || undefined, to: to || undefined })
-              }
-              pollExport={(exportId) => fetchAccessLogExportStatus(customerId, exportId)}
-              downloadExport={(exportId) => downloadAccessLogExport(customerId, exportId)}
+        <div className="flex items-end gap-2">
+          <div className="grid gap-1">
+            <Label htmlFor="access-from" className="text-xs text-muted-foreground">
+              From
+            </Label>
+            <Input
+              id="access-from"
+              type="date"
+              className="w-40"
+              value={from}
+              max={to || undefined}
+              onChange={(e) => choose({ from: e.target.value })}
             />
           </div>
-        )}
+          <div className="grid gap-1">
+            <Label htmlFor="access-to" className="text-xs text-muted-foreground">
+              To
+            </Label>
+            <Input
+              id="access-to"
+              type="date"
+              className="w-40"
+              value={to}
+              min={from || undefined}
+              onChange={(e) => choose({ to: e.target.value })}
+            />
+          </div>
+          <ExportControl
+            label="Export CSV"
+            requestExport={() =>
+              requestAccessLogExport(customerId, { from: from || undefined, to: to || undefined })
+            }
+            pollExport={(exportId) => fetchAccessLogExportStatus(customerId, exportId)}
+            downloadExport={(exportId) => downloadAccessLogExport(customerId, exportId)}
+          />
+        </div>
       </CardHeader>
       <CardContent>
-        {!adminMode ? (
-          <p className="flex items-center gap-2 text-muted-foreground">
-            <ShieldCheck className="size-4" aria-hidden />
-            Switch to Admin Mode to see who has opened this record.
-          </p>
-        ) : report.isPending ? (
+        {report.isPending ? (
           <Skeleton className="h-40 w-full" />
         ) : report.isError ? (
           <p role="alert" className="text-destructive">

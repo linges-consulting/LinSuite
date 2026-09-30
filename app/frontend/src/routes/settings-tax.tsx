@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { MoreHorizontal, Pencil, Plus, Power, PowerOff } from 'lucide-react'
+import { CheckCircle2, MoreHorizontal, Pencil, Plus, Power, PowerOff, TriangleAlert } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { Field, Form, FormError } from '@/components/form'
@@ -26,19 +26,29 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import {
   addTaxComponentRate,
   ApiError,
+  confirmTax,
   createTaxComponent,
   fetchProvinces,
   fetchTaxComponents,
+  fetchTaxStatus,
   updateTaxComponent,
   type TaxComponent,
+  type TaxStatus,
 } from '@/lib/api'
-import { TAX_COMPONENTS } from '@/lib/query-keys'
+import { ONBOARDING, TAX_COMPONENTS, TAX_STATUS } from '@/lib/query-keys'
 
-// Basis points, the `Staff.commission_rate_*_bp` convention (CLAUDE.md) — a screen thinks in
-// percent, the wire thinks in basis points. Copied from `settings-staff.tsx` rather than
-// shared: two lines, and the two screens have no other reason to import from one another.
-const percent = (basisPoints: number) => Math.round(basisPoints) / 100
-const basisPoints = (percentage: string) => Math.round(Number(percentage || 0) * 100)
+// Parts per million (#119) — 1% is 10_000 ppm, so a tax rate can hold four decimal places of
+// a percent exactly (QST's 9.975%). A screen thinks in percent; the wire thinks in ppm. Unlike
+// `settings-staff.tsx`'s `commission_rate_*_bp` fields, a tax rate is never whole-basis-point
+// only, so this pair is not shared with that screen's own bp-scaled `percent`/`basisPoints`.
+/** A stored rate exactly: a ppm is a ten-thousandth of a percent, so four decimals show any
+ *  rate with nothing rounded away (5, 9.975, 1.2345). Integer maths, not `toFixed`. */
+const percent = (ratePpm: number) => {
+  const whole = Math.trunc(ratePpm / 10_000)
+  const fraction = String(ratePpm % 10_000).padStart(4, '0').replace(/0+$/, '')
+  return fraction ? `${whole}.${fraction}` : String(whole)
+}
+const ratePpm = (percentage: string) => Math.round(Number(percentage || 0) * 10_000)
 
 /**
  * Settings → Billing → Tax: the components a catalog item can be taxed with (GST, PST, HST…)
@@ -53,6 +63,7 @@ const basisPoints = (percentage: string) => Math.round(Number(percentage || 0) *
 export function TaxSettingsPanel() {
   const components = useQuery({ queryKey: TAX_COMPONENTS, queryFn: fetchTaxComponents })
   const provinces = useQuery({ queryKey: ['provinces'], queryFn: fetchProvinces, staleTime: Infinity })
+  const status = useQuery({ queryKey: TAX_STATUS, queryFn: fetchTaxStatus })
   const [creating, setCreating] = useState(false)
   const [editing, setEditing] = useState<TaxComponent | null>(null)
   const [ratingId, setRatingId] = useState<string | null>(null)
@@ -70,6 +81,8 @@ export function TaxSettingsPanel() {
 
   return (
     <div className="flex flex-col gap-4">
+      {status.data && <TaxPrefillBanner status={status.data} />}
+
       <div className="flex flex-wrap items-center justify-between gap-4">
         <p className="max-w-3xl text-sm text-muted-foreground">
           GST, HST, PST and the like, effective-dated so a rate change never rewrites a
@@ -127,6 +140,64 @@ export function TaxSettingsPanel() {
   )
 }
 
+/** Tax pre-fill (#118): "Looks right" once, plus the province-change/newer-rate prompt.
+ *  Neither ever changes a component on its own — a save through the table above, or nothing,
+ *  is the only way a rate moves (spec #113: "nothing changes automatically"). */
+function TaxPrefillBanner(props: { status: TaxStatus }) {
+  const { status } = props
+  const queryClient = useQueryClient()
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: TAX_STATUS })
+    // Confirming can flip the onboarding checklist's tax step (#116).
+    queryClient.invalidateQueries({ queryKey: ONBOARDING })
+  }
+
+  const confirm = useMutation({
+    mutationFn: confirmTax,
+    onSuccess: () => {
+      toast.success('Tax setup confirmed')
+      refresh()
+    },
+    onError: (error) => toast.error(error.message),
+  })
+
+  const needsConfirmation = status.prefilled && !status.confirmed_at
+  const needsPrompt = status.province_changed || status.newer_rate_available
+
+  if (!needsConfirmation && !needsPrompt) return null
+
+  return (
+    <div className="flex flex-col gap-3">
+      {needsConfirmation && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/40 p-4">
+          <div className="flex items-start gap-2">
+            <CheckCircle2 className="mt-0.5 size-4 text-muted-foreground" aria-hidden />
+            <p className="text-sm text-muted-foreground">
+              These tax components were filled in automatically from your business's province.
+              Review them, then confirm.
+            </p>
+          </div>
+          <Button size="sm" disabled={confirm.isPending} onClick={() => confirm.mutate()}>
+            {confirm.isPending ? 'Confirming…' : 'Looks right'}
+          </Button>
+        </div>
+      )}
+      {needsPrompt && (
+        <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-4">
+          <TriangleAlert className="mt-0.5 size-4 text-amber-600" aria-hidden />
+          <p className="text-sm">
+            {status.province_changed
+              ? "Your business's province has changed since these components were set up."
+              : 'The official rate table has a newer rate than what is configured here.'}{' '}
+            Nothing has changed automatically — review the components below and update them
+            yourself if needed.
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function TaxComponentLine(props: {
   component: TaxComponent
   provinceName?: string
@@ -160,10 +231,10 @@ function TaxComponentLine(props: {
         )}
       </TableCell>
       <TableCell>
-        {component.current_rate_bp === null ? (
+        {component.current_rate_ppm === null ? (
           <span className="text-muted-foreground">Not yet in effect</span>
         ) : (
-          `${percent(component.current_rate_bp)}%`
+          `${percent(component.current_rate_ppm)}%`
         )}
       </TableCell>
       <TableCell>
@@ -233,7 +304,7 @@ function TaxComponentDialog(props: {
             code: code.trim(),
             name: name.trim(),
             province: province || null,
-            rate_bp: basisPoints(rate),
+            rate_ppm: ratePpm(rate),
             effective_from: effectiveFrom,
           }),
     onSuccess: (component) => {
@@ -307,13 +378,17 @@ function TaxComponentDialog(props: {
 
           {!existing && (
             <>
-              <Field label="Rate" htmlFor="tax-rate" hint="Percent, e.g. 5 for 5%.">
+              <Field
+                label="Rate"
+                htmlFor="tax-rate"
+                hint="Percent, up to four decimals — 5 for 5%, 9.975 for 9.975%."
+              >
                 <Input
                   id="tax-rate"
                   type="number"
                   min={0}
                   max={100}
-                  step={0.01}
+                  step={0.0001}
                   className="w-32"
                   value={rate}
                   onChange={(e) => setRate(e.target.value)}
@@ -357,7 +432,7 @@ function TaxRateDialog(props: { component: TaxComponent; onClose: () => void }) 
   const add = useMutation({
     mutationFn: () =>
       addTaxComponentRate(props.component.id, {
-        rate_bp: basisPoints(rate),
+        rate_ppm: ratePpm(rate),
         effective_from: effectiveFrom,
       }),
     onSuccess: (component) => {
@@ -391,7 +466,7 @@ function TaxRateDialog(props: { component: TaxComponent; onClose: () => void }) 
           <TableBody>
             {rates.map((r) => (
               <TableRow key={r.id}>
-                <TableCell>{percent(r.rate_bp)}%</TableCell>
+                <TableCell>{percent(r.rate_ppm)}%</TableCell>
                 <TableCell>{r.effective_from}</TableCell>
                 <TableCell>{r.effective_to ?? 'Current'}</TableCell>
               </TableRow>
@@ -400,13 +475,17 @@ function TaxRateDialog(props: { component: TaxComponent; onClose: () => void }) 
         </Table>
 
         <Form onSubmit={() => add.mutate()}>
-          <Field label="New rate" htmlFor="new-rate-value" hint="Percent, e.g. 5 for 5%.">
+          <Field
+            label="New rate"
+            htmlFor="new-rate-value"
+            hint="Percent, up to four decimals — 5 for 5%, 9.975 for 9.975%."
+          >
             <Input
               id="new-rate-value"
               type="number"
               min={0}
               max={100}
-              step={0.01}
+              step={0.0001}
               className="w-32"
               value={rate}
               onChange={(e) => setRate(e.target.value)}

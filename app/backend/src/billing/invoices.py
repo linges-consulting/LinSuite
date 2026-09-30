@@ -109,7 +109,7 @@ class InvoiceLineDiscountOut(BaseModel):
 
 class InvoiceLineTaxOut(BaseModel):
     component_code: str
-    rate_bp: int
+    rate_ppm: int
     amount_cents: int
 
 
@@ -250,7 +250,7 @@ def _line_out(
         ],
         taxes=[
             InvoiceLineTaxOut(
-                component_code=t.component_code, rate_bp=t.rate_bp, amount_cents=t.amount_cents
+                component_code=t.component_code, rate_ppm=t.rate_ppm, amount_cents=t.amount_cents
             )
             for t in line.taxes
         ],
@@ -368,7 +368,7 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
     except LineConflict as error:
         raise HTTPException(status_code=409, detail=error.detail) from error
 
-    components_by_code = {c.code: c.rate_bp for c in priced_bill.pool}
+    components_by_code = {c.code: c.rate_ppm for c in priced_bill.pool}
     overridden = priced_bill.overridden
     # Review R5: under an override the lines carry the distributed amounts, so the invoice's
     # billed tax and total are those lines summed — reconciling to the cent.
@@ -486,7 +486,7 @@ async def issue_invoice(bill_id: uuid.UUID, actor: BillViewer, db: SessionDep) -
                 InvoiceLineTax(
                     invoice_line_id=invoice_line.id,
                     component_code=code,
-                    rate_bp=components_by_code.get(code, 0),
+                    rate_ppm=components_by_code.get(code, 0),
                     amount_cents=amount_cents,
                 )
             )

@@ -75,6 +75,7 @@ from scheduling.staff import router as staff_router
 from scheduling.time_off import router as time_off_router
 from settings.images import FAVICON_MAX_BYTES, LOGO_MAX_BYTES
 from settings.notifications_routes import router as notification_settings_router
+from settings.onboarding_routes import router as onboarding_router
 from settings.routes import public as branding_router
 from settings.routes import router as business_router
 
@@ -303,6 +304,7 @@ api.include_router(public_forms_router)
 api.include_router(public_booking_router)
 api.include_router(business_router)
 api.include_router(notification_settings_router)
+api.include_router(onboarding_router)
 api.include_router(branding_router)
 # Settings → Packages & bundles (#60): prepaid credit definitions (`billing.manage`, Admin
 # Mode). Definitions only — no purchase flow yet.

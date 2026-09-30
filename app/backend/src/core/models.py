@@ -75,8 +75,12 @@ class Business(Base):
             name="ck_businesses_retention_profile",
         ),
         CheckConstraint(
-            "email_sender IS NULL OR email_sender IN ('resend', 'smtp')",
+            "email_sender IS NULL OR email_sender IN ('resend', 'smtp', 'mailgun')",
             name="ck_businesses_email_sender",
+        ),
+        CheckConstraint(
+            "mailgun_region IS NULL OR mailgun_region IN ('us', 'eu')",
+            name="ck_businesses_mailgun_region",
         ),
         CheckConstraint(
             "cancellation_cutoff_hours >= 0", name="ck_businesses_cancellation_cutoff_hours"
@@ -184,6 +188,19 @@ class Business(Base):
     # test send that succeeded, so it is named for what it actually records.
     smtp_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # --- notification email sender: Mailgun (M7, #115; `notifications/providers.py`) --------
+    # A third `email_sender` choice, over Mailgun's HTTP messages API — the reason it exists at
+    # all is that DigitalOcean blocks outbound SMTP on new droplets, so an HTTP-based sender is
+    # the one that actually works there. Same encryption/verification shape as Resend above:
+    # `mailgun_api_key_encrypted` under `NOTIFICATION_CREDENTIAL_KEY`, `mailgun_verified_at` set
+    # only by a successful test send. `mailgun_region` picks the API host: Mailgun's EU accounts
+    # only work against the EU host, never the US one.
+    mailgun_api_key_encrypted: Mapped[str | None] = mapped_column(Text)
+    mailgun_domain: Mapped[str | None] = mapped_column(String(255))
+    mailgun_region: Mapped[str | None] = mapped_column(String(2))
+    mailgun_from_address: Mapped[str | None] = mapped_column(String(320))
+    mailgun_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     # --- notification SMS sender (Phase 12 Task 3, #11; `notifications/providers.py`) -------
     # Off by default: unlike email (which degrades to `console`), SMS is opt-in per tenant —
     # tech-stack §6 treats it as an adapter nobody gets until they ask and supply credentials.
@@ -271,6 +288,22 @@ class Business(Base):
     # Phone lookup itself (the real feature CLAUDE.md's CTI note promises) needs none of this;
     # it is always on, gated only by `customers.view`.
     demo_mode: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+
+    # --- onboarding checklist (#116, spec #113; `settings/onboarding_routes.py`) -----------
+    # Set once, by an Admin-Mode "Dismiss" action — shared by every administrator, since it
+    # lives on the one business row rather than per-user state. NULL means the checklist still
+    # renders on Home; the separate "emails go to the server log" banner ignores this column
+    # entirely (spec: independent of dismissal).
+    onboarding_dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # --- tax pre-fill confirmation (#118, spec #113 "Tax pre-fill") ------------------------
+    # Set once, by an Admin-Mode "Looks right" on the Tax step (`billing/tax_routes.py`). NULL
+    # means either nobody has confirmed yet, or the business has no pre-filled components to
+    # confirm (a fresh instance with no province saved yet). `settings/onboarding_routes.py`'s
+    # `_tax_done` treats this OR any `tax_components.origin = 'manual'` row as done — see that
+    # column's own docstring in `billing/models.py` for why the second case is the simplest
+    # correct reading of "already configured tax by hand."
+    tax_confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AuditEvent(Base):

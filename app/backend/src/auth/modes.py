@@ -29,12 +29,16 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import Depends
+from sqlalchemy import select
 
-from auth.models import User
+from auth.models import ADMIN_CAPABILITY, User
 from auth.session import ClaimsDep, CurrentUser
+from core.audit import record_event
 from core.config import get_settings
+from core.db import SessionDep
 from core.errors import ADMIN_MODE_REQUIRED as _ADMIN_MODE_REQUIRED_CODE
 from core.errors import Forbidden
+from core.models import Business
 from core.redis import get_redis
 
 STAFF_MODE = "staff"
@@ -143,3 +147,77 @@ async def require_admin_mode(claims: ClaimsDep, user: CurrentUser) -> User:
 
 
 AdminUser = Annotated[User, Depends(require_admin_mode)]
+
+
+# --- the one-shot first-run exception (#117, spec #113) ------------------------------------
+#
+# Spec #113: a fresh install's owner signs in, enrols the second factor the default policy
+# demands of an administrator, and lands in Admin Mode on Home — without typing the password
+# a second time thirty seconds after typing it the first. Everywhere else, Admin Mode costs a
+# password (PRD §1); this is the one narrow, deliberately-scoped exception to that rule.
+
+_FRESH_LOGIN_PREFIX = "session:fresh_login:"
+# Long enough to read a QR code and type the six digits it shows; short enough that a cookie
+# stolen even a few minutes after the real sign-in has already missed the window.
+FRESH_LOGIN_MINUTES = 15
+
+
+def fresh_login_key(jti: str) -> str:
+    return _FRESH_LOGIN_PREFIX + jti
+
+
+async def mark_fresh_login(jti: str) -> None:
+    """Called once, from `auth/login.py::login`, at the instant a password is verified —
+    never anywhere else, and never reset by anything that happens afterwards (an MFA code, a
+    mode switch, an `/auth/me` poll). It stays an honest record of one fact only: a password
+    was typed for this session, this recently. That is the one fact
+    `try_first_run_admin_grant` is allowed to trust, and the only reason it can trust it is
+    that nothing else can set this key.
+    """
+    await get_redis().setex(fresh_login_key(jti), FRESH_LOGIN_MINUTES * 60, "1")
+
+
+async def try_first_run_admin_grant(claims: dict, user: User, db: SessionDep) -> bool:
+    """The one-shot, narrowly-scoped exception to "Admin Mode always costs a password".
+
+    Called from exactly one place: `auth/mfa_routes.py::_complete_enrolment`, and only when
+    the enrolment that just finished is the one the business's policy *forced* on this
+    account (never a voluntary enrolment from the Security page — that is a different act by
+    a session already doing whatever it likes in whichever mode it was already in). Every one
+    of the following has to hold, and each is doing real work against "an old or stolen
+    session must not skip the password":
+
+    - `mark_fresh_login` was called for this `jti` inside *this* login, and its short TTL has
+      not run out. An old session — one alive longer than `FRESH_LOGIN_MINUTES`, which is the
+      shape "stolen cookie, used later" takes — has no key here at all, whatever else is true
+      about it. There is no way to acquire this key except by supplying the password to
+      `POST /auth/login` a few minutes ago.
+    - The key is consumed (`GETDEL`) the instant it is read, so this fires at most once per
+      login, even though it is reachable from more than one kind of enrolment (an
+      authenticator app or an emailed code).
+    - The account actually holds `admin` — there is no second mode to grant otherwise.
+    - The business has not dismissed onboarding. This is what stops the rule from quietly
+      becoming a standing way to skip the password on a mature installation: the moment setup
+      is declared finished, this door is shut for that business for good, even for a key that
+      has not yet expired.
+
+    A session that fails any one of these is refused exactly as it always was — a live grant
+    is never opened without `auth/login.py::_reauthenticate` seeing the actual password.
+    """
+    fresh = bool(await get_redis().getdel(fresh_login_key(claims["jti"])))
+    if not fresh or ADMIN_CAPABILITY not in user.capabilities:
+        return False
+    dismissed_at = await db.scalar(select(Business.onboarding_dismissed_at).where(Business.id == 1))
+    if dismissed_at is not None:
+        return False
+    await grant_admin(claims)
+    await set_mode(claims, ADMIN_MODE)
+    record_event(
+        db,
+        "mode.auto_admin_first_run",
+        target_type="session",
+        target_id=claims["jti"],
+        actor_user_id=user.id,
+        metadata={"email": user.email},
+    )
+    return True

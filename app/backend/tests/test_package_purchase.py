@@ -181,7 +181,7 @@ async def make_tax_component(client, **overrides) -> dict:
         "code": "gst",
         "name": "GST",
         "province": None,
-        "rate_bp": 500,
+        "rate_ppm": 50_000,
         "effective_from": "2024-01-01",
     }
     body.update(overrides)
@@ -399,7 +399,7 @@ async def test_purchase_freezes_the_computed_expiry_date(client):
 async def test_purchase_is_taxed_the_same_way_a_service_line_is(client):
     await as_admin(client)
     massage = await make_service(client)
-    await make_tax_component(client, rate_bp=500)
+    await make_tax_component(client, rate_ppm=50_000)
     package = await make_package(
         client,
         [{"service_id": massage["id"], "credits": 5}],

@@ -950,7 +950,7 @@ export type NotificationTemplate = {
 }
 
 export type NotificationSettings = {
-  email_sender: 'resend' | 'smtp' | null
+  email_sender: 'resend' | 'smtp' | 'mailgun' | null
   /** Read straight off `notifications/providers.py::email_ready` — the one fact the banner is
    *  built from, never inferred here from which fields happen to be filled in. */
   email_ready: boolean
@@ -964,6 +964,12 @@ export type NotificationSettings = {
   smtp_from_address: string | null
   smtp_password_set: boolean
   smtp_verified_at: string | null
+  // --- Mailgun sender (#115) — a third choice, same write-only-secret shape as Resend/SMTP ---
+  mailgun_domain: string | null
+  mailgun_region: 'us' | 'eu' | null
+  mailgun_from_address: string | null
+  mailgun_api_key_set: boolean
+  mailgun_verified_at: string | null
   sms_enabled: boolean
   sms_ready: boolean
   twilio_account_sid: string | null
@@ -990,7 +996,7 @@ export type NotificationSettings = {
  *  never means retyping the others. `email_sender: 'none'` is the explicit clear; omitting
  *  the field (as every other field can) means "leave it as it is". */
 export type NotificationSettingsChange = Partial<{
-  email_sender: 'resend' | 'smtp' | 'none'
+  email_sender: 'resend' | 'smtp' | 'mailgun' | 'none'
   resend_from_address: string | null
   resend_api_key: string
   smtp_host: string | null
@@ -998,6 +1004,10 @@ export type NotificationSettingsChange = Partial<{
   smtp_username: string | null
   smtp_password: string
   smtp_from_address: string | null
+  mailgun_domain: string | null
+  mailgun_region: 'us' | 'eu'
+  mailgun_api_key: string
+  mailgun_from_address: string | null
   sms_enabled: boolean
   twilio_account_sid: string | null
   twilio_auth_token: string
@@ -2770,7 +2780,8 @@ export async function startQueueEntry(id: string): Promise<QueueStartResult> {
 
 export type TaxRate = {
   id: string
-  rate_bp: number
+  /** Parts per million — 1% is 10_000 ppm, so QST's 9.975% is exactly 99_750 (#119). */
+  rate_ppm: number
   effective_from: string
   /** Null: still in effect. Never edited once closed — a new rate always adds a row. */
   effective_to: string | null
@@ -2789,18 +2800,21 @@ export type TaxComponent = {
   rates: TaxRate[]
   /** The rate in effect today, in the business's own timezone. Null if the earliest rate is
    *  still in the future. */
-  current_rate_bp: number | null
+  current_rate_ppm: number | null
   /** A hint only: whether this business's own province would pick this component up
    *  (#57 acceptance criterion 1). Which components actually apply to one catalog item is a
    *  later ticket's job. */
   applicable_to_business: boolean
+  /** `'manual'` (an administrator created it) or `'prefill'` (#118: created the moment the
+   *  business's province was first saved). Read-only — see `TaxStatus` for what this drives. */
+  origin: 'manual' | 'prefill'
 }
 
 export type TaxComponentDraft = {
   code: string
   name: string
   province: string | null
-  rate_bp: number
+  rate_ppm: number
   effective_from: string
 }
 
@@ -2827,10 +2841,34 @@ export async function updateTaxComponent(
 
 export async function addTaxComponentRate(
   id: string,
-  rate: { rate_bp: number; effective_from: string },
+  rate: { rate_ppm: number; effective_from: string },
 ): Promise<TaxComponent> {
   const res = await send('POST', `/api/admin/billing/tax-components/${id}/rates`, rate)
   if (!res.ok) throw await failure(res, 'Could not add the new rate')
+  return res.json()
+}
+
+/** Tax pre-fill (#118): whether there is anything to confirm, and the two conditions that show
+ *  a prompt instead of an automatic change — the province moved since pre-fill ran, or the
+ *  built-in table now lists a different current rate than a pre-filled component has. */
+export type TaxStatus = {
+  confirmed_at: string | null
+  prefilled: boolean
+  province_changed: boolean
+  newer_rate_available: boolean
+}
+
+export async function fetchTaxStatus(): Promise<TaxStatus> {
+  const res = await fetch('/api/admin/billing/tax-status')
+  if (!res.ok) throw await failure(res, 'Could not load the tax confirmation status')
+  return res.json()
+}
+
+/** The Tax step's "Looks right". Always succeeds when called (no precondition) — the panel
+ *  only shows the button when `TaxStatus.prefilled` is true and `confirmed_at` is not set. */
+export async function confirmTax(): Promise<TaxStatus> {
+  const res = await post('/api/admin/billing/tax-confirmation', {})
+  if (!res.ok) throw await failure(res, 'Could not confirm the tax setup')
   return res.json()
 }
 
@@ -3151,7 +3189,7 @@ export type InvoiceLineDiscount = {
 
 export type InvoiceLineTax = {
   component_code: string
-  rate_bp: number
+  rate_ppm: number
   amount_cents: number
 }
 
@@ -3931,4 +3969,34 @@ export function stockConflict(error: unknown): { name: string; available: number
     error.message,
   )
   return match ? { name: match[1], available: Number(match[2]) } : null
+}
+
+/** The seven checklist steps (#116, spec #113): business, hours, tax, services, staff, email,
+ *  branding — in that fixed order, each `done` computed server-side. `branding` is the only
+ *  one `optional`. */
+export type OnboardingStepKey =
+  | 'business'
+  | 'hours'
+  | 'tax'
+  | 'services'
+  | 'staff'
+  | 'email'
+  | 'branding'
+export type OnboardingStep = { key: OnboardingStepKey; done: boolean; optional: boolean }
+export type OnboardingStatus = { steps: OnboardingStep[]; dismissed_at: string | null }
+
+/** Admin Mode, `admin` capability only — a 403 means either is missing (`useCan('admin')` is
+ *  what decides whether to even ask). */
+export async function fetchOnboardingStatus(): Promise<OnboardingStatus> {
+  const res = await fetch('/api/admin/onboarding')
+  if (!res.ok) throw await failure(res, 'Could not load the setup checklist')
+  return res.json()
+}
+
+/** Shared by every administrator (spec user story 9): dismissing sets one timestamp on the
+ *  business row, not per-account state. */
+export async function dismissOnboarding(): Promise<OnboardingStatus> {
+  const res = await post('/api/admin/onboarding/dismiss', {})
+  if (!res.ok) throw await failure(res, 'Could not dismiss the checklist')
+  return res.json()
 }

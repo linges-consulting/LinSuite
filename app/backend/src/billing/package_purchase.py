@@ -228,7 +228,7 @@ async def purchase_package(
         computed_tax_total_cents=line_tax.tax_cents,
         computed_grand_total_cents=line_tax.total_cents,
         tax_totals_by_component=line_tax.component_cents,
-        tax_rates_by_component={c.code: c.rate_bp for c in resolved_components},
+        tax_rates_by_component={c.code: c.rate_ppm for c in resolved_components},
         tax_convention=definition.tax_convention,
         grand_total_cents=line_tax.total_cents,
         issued_by=actor.id,

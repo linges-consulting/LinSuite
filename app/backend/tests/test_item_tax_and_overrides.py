@@ -68,8 +68,8 @@ async def wipe_issued_rows_after(claimed_instance):  # noqa: F811 — runs after
             await owner.execute(text(f"DELETE FROM {table}"))
 
 
-GST = ComponentRate("GST", 500)
-PST = ComponentRate("PST", 700)
+GST = ComponentRate("GST", 50_000)
+PST = ComponentRate("PST", 70_000)
 LOW, HIGH = uuid.UUID(int=1), uuid.UUID(int=2)
 
 
@@ -152,8 +152,15 @@ async def bc_business_with_gst_and_pst(client) -> None:
     await as_admin(client)
     resp = await client.put("/api/admin/business", json={"name": "Cedar Lane", "province": "BC"})
     assert resp.status_code == 200, resp.text
-    await make_tax_component(client, code="gst", name="GST", province=None, rate_bp=500)
-    await make_tax_component(client, code="pst", name="PST", province="BC", rate_bp=700)
+    # #118 pre-fills BC's own GST/PST the moment the province is saved on a business with no
+    # components yet — this file wants its own hand-built rates instead, so clear whatever
+    # pre-fill just created before building the exact fixture these tests expect.
+    async with session_scope() as db:
+        await db.execute(text("DELETE FROM tax_component_rates"))
+        await db.execute(text("DELETE FROM tax_components"))
+        await db.commit()
+    await make_tax_component(client, code="gst", name="GST", province=None, rate_ppm=50_000)
+    await make_tax_component(client, code="pst", name="PST", province="BC", rate_ppm=70_000)
 
 
 async def commission_bases(invoice_id: str) -> list[int]:
@@ -216,12 +223,12 @@ async def test_gst_yes_pst_no_on_a_service_is_honoured_and_frozen(client):
     invoice = await issue_bill(client, bill_id)
 
     [line] = invoice["lines"]
-    assert [(t["component_code"], t["rate_bp"], t["amount_cents"]) for t in line["taxes"]] == [
-        ("GST", 500, 500)
+    assert [(t["component_code"], t["rate_ppm"], t["amount_cents"]) for t in line["taxes"]] == [
+        ("GST", 50_000, 500)
     ]
     assert invoice["tax_totals_by_component"] == {"GST": 500}
     assert invoice["grand_total_cents"] == 10500
-    assert invoice["tax_rates_by_component"] == {"GST": 500, "PST": 700}
+    assert invoice["tax_rates_by_component"] == {"GST": 50_000, "PST": 70_000}
 
 
 async def test_a_catalog_item_cannot_toggle_an_unknown_component(client):
@@ -291,9 +298,9 @@ async def test_a_retail_sale_is_taxed_and_discounted_and_frozen_at_issue(client)
     assert (line["discount_cents"], line["tax_cents"], line["line_total_cents"]) == (400, 432, 4032)
     [frozen] = line["discounts"]
     assert (frozen["percentage_bp"], frozen["resolved_amount_cents"]) == (1000, 400)
-    assert {t["component_code"]: (t["rate_bp"], t["amount_cents"]) for t in line["taxes"]} == {
-        "GST": (500, 180),
-        "PST": (700, 252),
+    assert {t["component_code"]: (t["rate_ppm"], t["amount_cents"]) for t in line["taxes"]} == {
+        "GST": (50_000, 180),
+        "PST": (70_000, 252),
     }
     assert invoice["grand_total_cents"] == 4032
     assert invoice["outstanding_cents"] == 4032
@@ -301,7 +308,7 @@ async def test_a_retail_sale_is_taxed_and_discounted_and_frozen_at_issue(client)
     # Later definition/rate edits never reach the issued invoice.
     async with session_scope() as db:
         await db.execute(text("UPDATE discounts SET percentage_bp = 5000"))
-        await db.execute(text("UPDATE tax_component_rates SET rate_bp = 1000"))
+        await db.execute(text("UPDATE tax_component_rates SET rate_ppm = 100000"))
         await db.execute(text("UPDATE product_variants SET tax_component_keys = '[]'"))
         await db.commit()
     again = await client.get(f"{RETAIL_INVOICES}/{invoice['id']}")

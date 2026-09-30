@@ -43,7 +43,11 @@ export function AppShell() {
   // they hold no capability for still deserves a heading over the refusal.
   const title =
     NAV.find((n) => pathname.startsWith(n.to))?.label ??
-    (pathname.startsWith('/security') ? 'Security' : 'Home')
+    (pathname.startsWith('/security')
+      ? 'Security'
+      : pathname.startsWith('/setup-checklist')
+        ? 'Get your business ready'
+        : 'Home')
 
   return (
     <CallEventSourceProvider>

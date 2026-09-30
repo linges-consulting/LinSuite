@@ -91,7 +91,7 @@ function fakeServer(account: Row = ADMIN_ACCOUNT) {
           province: null,
           active: true,
           rates: [],
-          current_rate_bp: 500,
+          current_rate_ppm: 50_000,
           applicable_to_business: true,
         })
         return Response.json({ tax_components: [component('t1', 'GST', 'GST')] })
@@ -198,23 +198,30 @@ describe('the mode and capability gate', () => {
     expect(await screen.findByText('10-Session Massage Pack')).toBeInTheDocument()
   })
 
-  it('is refused in Staff Mode even when the account holds billing.manage', async () => {
+  // #114 (spec #113 Staff Mode section): the placeholder is gone — the panel renders nothing
+  // at all rather than a paragraph explaining why.
+  it('renders nothing in Staff Mode even when the account holds billing.manage', async () => {
     fakeServer({ ...ADMIN_ACCOUNT, mode: 'staff' })
     const user = userEvent.setup()
     renderSettings()
     await openPackages(user)
 
-    expect(await screen.findByText('Switch to Admin Mode to manage packages.')).toBeInTheDocument()
-    expect(screen.queryByText('10-Session Massage Pack')).not.toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.queryByText('10-Session Massage Pack')).not.toBeInTheDocument(),
+    )
+    expect(screen.queryByText(/Admin Mode/)).not.toBeInTheDocument()
   })
 
-  it('is refused to an account without billing.manage, even in Admin Mode', async () => {
+  it('renders nothing for an account without billing.manage, even in Admin Mode', async () => {
     fakeServer({ ...ADMIN_ACCOUNT, capabilities: ['catalog.manage'] })
     const user = userEvent.setup()
     renderSettings()
     await openPackages(user)
 
-    expect(await screen.findByText('Switch to Admin Mode to manage packages.')).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.queryByText('10-Session Massage Pack')).not.toBeInTheDocument(),
+    )
+    expect(screen.queryByText(/Admin Mode/)).not.toBeInTheDocument()
   })
 })
 

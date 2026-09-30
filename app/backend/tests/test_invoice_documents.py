@@ -23,6 +23,7 @@ from sqlalchemy import text
 from billing.documents import (
     _money,
     _plus_years,
+    _rate,
     receipt_number,
     receipt_status,
     render_invoice_html,
@@ -553,6 +554,19 @@ def test_money_is_formatted_from_integer_cents():
     assert _money(10**15 + 1, "$") == "$10,000,000,000,000.01"  # no float rounding
 
 
+def test_rate_is_formatted_from_ppm_with_trailing_zeros_trimmed():
+    """#119: a receipt's own tax-rate display, in parts per million now, not basis points."""
+    assert _rate(50_000) == "5"  # not "5.00" or "5.000"
+    assert _rate(70_000) == "7"
+    assert _rate(130_000) == "13"
+    assert _rate(99_750) == "9.975"  # QST, exact
+    assert _rate(0) == "0"
+    # Whatever an administrator stored is what the receipt prints: every ppm is a whole
+    # ten-thousandth of a percent, so four decimals show any rate exactly, never truncated.
+    assert _rate(12_345) == "1.2345"
+    assert _rate(1) == "0.0001"
+
+
 def test_an_overridden_invoice_prints_the_billed_tax_not_the_computed_one():
     invoice = Invoice(
         invoice_number=3,
@@ -626,7 +640,10 @@ def _transient_receipt_fixtures(*, retention_profile: str):
         line_total_cents=13560,
         taxes=[
             InvoiceLineTax(
-                invoice_line_id=uuid.uuid4(), component_code="GST", rate_bp=500, amount_cents=600
+                invoice_line_id=uuid.uuid4(),
+                component_code="GST",
+                rate_ppm=50_000,
+                amount_cents=600,
             ),
         ],
     )

@@ -188,7 +188,7 @@ class RetailInvoiceLineDiscountOut(BaseModel):
 
 class RetailInvoiceLineTaxOut(BaseModel):
     component_code: str
-    rate_bp: int
+    rate_ppm: int
     amount_cents: int
 
 
@@ -490,7 +490,7 @@ async def _invoice_out(db: SessionDep, invoice: RetailInvoice) -> RetailInvoiceO
                 taxes=[
                     RetailInvoiceLineTaxOut(
                         component_code=t.component_code,
-                        rate_bp=t.rate_bp,
+                        rate_ppm=t.rate_ppm,
                         amount_cents=t.amount_cents,
                     )
                     for t in line.taxes
@@ -778,7 +778,7 @@ async def issue_retail_sale(
 
     priced_lines, pool = await _price_sale(db, sale, await _selection(db, sale.id))
     priced_by_line = {p.line.id: p for p in priced_lines}
-    rates = {c.code: c.rate_bp for c in pool}
+    rates = {c.code: c.rate_ppm for c in pool}
     tax_totals = invoice_tax_totals([p.priced.tax for p in priced_lines])
     tax_total_cents = sum(tax_totals.values())
     grand_total_cents = sum(p.priced.tax.total_cents for p in priced_lines)
@@ -906,7 +906,7 @@ async def issue_retail_sale(
                 RetailInvoiceLineTax(
                     retail_invoice_line_id=invoice_line.id,
                     component_code=code,
-                    rate_bp=rates.get(code, 0),
+                    rate_ppm=rates.get(code, 0),
                     amount_cents=amount_cents,
                 )
             )

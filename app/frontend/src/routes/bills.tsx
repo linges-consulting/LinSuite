@@ -40,7 +40,7 @@ import {
   releaseInlineAdmin,
   requestBillOverride,
 } from '@/lib/api'
-import { useSession } from '@/lib/auth'
+import { useCan } from '@/lib/capability-gate'
 import { dollarsToCents, money } from '@/lib/money'
 import { BILL, DRAFT_BILLS, INLINE_ADMIN, OVERRIDE_REQUESTS } from '@/lib/query-keys'
 
@@ -295,8 +295,9 @@ export function BillReviewPage() {
  */
 function BillAuthorityCard({ billId, bill }: { billId: string; bill: Bill }) {
   const queryClient = useQueryClient()
-  const { user } = useSession()
-  const canDecide = user?.capabilities?.includes('billing.manage') ?? false
+  // Administrative (#114, spec #113 Staff Mode section): the buttons below are absent, not
+  // merely disabled, for a session holding `billing.manage` while it is in Staff Mode.
+  const canDecide = useCan('billing.manage')
 
   const requests = useQuery({
     queryKey: [...OVERRIDE_REQUESTS, billId],

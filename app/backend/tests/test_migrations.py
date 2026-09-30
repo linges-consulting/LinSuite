@@ -16,6 +16,12 @@ from sqlalchemy import text
 
 from core.db import session_scope
 from tests.conftest import BACKEND_DIR
+from tests.test_bill_review import as_admin, complete_a_visit, make_tax_component
+from tests.test_invoice_issue import (  # noqa: F401 — autouse fixture
+    INVOICES,
+    claimed_instance,
+    issue_url,
+)
 
 TABLE = "audit_access_log"
 FUNCTION = "audit_access_log_append_only"
@@ -405,3 +411,85 @@ async def test_migration_0069_migrates_existing_commission_export_rows_and_round
 
     await _upgrade_to("head")
     assert await _report_exports_shape() == (True, 0)
+
+
+async def _rate_columns_present() -> tuple[bool, bool, bool]:
+    """(`tax_component_rates` has `rate_ppm`, `invoice_line_taxes` has `rate_ppm`,
+    `retail_invoice_line_taxes` has `rate_ppm`) — `False` for a column means the table still
+    has the pre-#119 `rate_bp` instead."""
+    async with session_scope() as db:
+        present = []
+        for table in ("tax_component_rates", "invoice_line_taxes", "retail_invoice_line_taxes"):
+            present.append(
+                bool(
+                    await db.scalar(
+                        text(
+                            "SELECT count(*) > 0 FROM information_schema.columns "
+                            "WHERE table_name = :t AND column_name = 'rate_ppm'"
+                        ),
+                        {"t": table},
+                    )
+                )
+            )
+        return tuple(present)
+
+
+async def test_migration_0076_converts_rates_ppm_and_preserves_an_issued_invoice(client):
+    """#119: every stored tax rate moves from basis points to parts per million, ×100. Proven
+    against a real, already-issued invoice (through the ordinary `client` HTTP flow, the same
+    one every other billing S1 test uses) rather than a hand-built row: downgrading to 0075
+    puts `tax_component_rates`/`invoice_line_taxes` back in their pre-#119 shape (`rate_bp`,
+    divided by 100 — exact, since every value here originated as a whole basis point ×100);
+    re-running 0076's own `upgrade()` must multiply them back ×100 and leave the invoice's
+    cents amounts — never touched by either direction — bit for bit identical."""
+    assert await _rate_columns_present() == (True, True, True)
+
+    await as_admin(client)
+    tax = await make_tax_component(client, code="gst", rate_ppm=50_000)  # a clean 5%, 500 bp
+    bill_id, _ = await complete_a_visit(client, price_cents=10_000, tax_component_keys=["GST"])
+    issued = await client.post(issue_url(bill_id), json={})
+    assert issued.status_code == 201, issued.text
+    invoice_id = issued.json()["id"]
+
+    async def snapshot() -> dict:
+        resp = await client.get(f"{INVOICES}/{invoice_id}")
+        assert resp.status_code == 200, resp.text
+        return resp.json()
+
+    before = await snapshot()
+    assert before["tax_rates_by_component"] == {"GST": 50_000}
+    assert before["lines"][0]["taxes"] == [
+        {"component_code": "GST", "rate_ppm": 50_000, "amount_cents": 500}
+    ]
+
+    await _downgrade_to("0075")
+    assert await _rate_columns_present() == (False, False, False)
+
+    async with session_scope() as db:
+        component_rate_bp = await db.scalar(
+            text("SELECT rate_bp FROM tax_component_rates WHERE component_id = :id"),
+            {"id": tax["id"]},
+        )
+        line_rate_bp = await db.scalar(
+            text(
+                "SELECT t.rate_bp FROM invoice_line_taxes t "
+                "JOIN invoice_lines l ON l.id = t.invoice_line_id "
+                "WHERE l.invoice_id = :i"
+            ),
+            {"i": invoice_id},
+        )
+    # Exact: 50_000 ppm was always `500 bp * 100`, so dividing back by 100 loses nothing.
+    assert (component_rate_bp, line_rate_bp) == (500, 500)
+
+    await _upgrade_to("head")
+    assert await _rate_columns_present() == (True, True, True)
+
+    async with session_scope() as db:
+        component_rate_ppm = await db.scalar(
+            text("SELECT rate_ppm FROM tax_component_rates WHERE component_id = :id"),
+            {"id": tax["id"]},
+        )
+    assert component_rate_ppm == 50_000
+
+    after = await snapshot()
+    assert after == before  # cents and rates alike, bit for bit identical to before the round trip

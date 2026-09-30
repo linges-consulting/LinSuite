@@ -81,6 +81,8 @@ export const NOTE_APPOINTMENTS = ['note-appointments'] as const
 export const QUEUE = ['queue'] as const
 /** Settings → Billing → Tax: components and their effective-dated rates (#57). */
 export const TAX_COMPONENTS = ['tax-components'] as const
+/** Tax pre-fill (#118): confirmation state and the province-change / newer-rate prompt. */
+export const TAX_STATUS = ['tax-status'] as const
 /** Bill review (#63): the draft-bill list, and one bill (id after) with its lines, eligible
  *  discounts and tax — recomputed by the server on every read/apply, never cached stale
  *  across a discount toggle. */
@@ -135,3 +137,6 @@ export const PACKAGE_PURCHASE = ['package-purchase'] as const
 /** The Transfer dialog's own warning (#111): the current holder's upcoming appointments for
  *  a purchase's covered services, id after. */
 export const PACKAGE_TRANSFER_UPCOMING = ['package-transfer-upcoming'] as const
+/** The "Get your business ready" checklist and its dismissal (#116): seven steps, each
+ *  computed server-side, and the shared dismissal timestamp. */
+export const ONBOARDING = ['onboarding'] as const

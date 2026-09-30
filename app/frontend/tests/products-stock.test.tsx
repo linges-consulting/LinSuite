@@ -150,15 +150,15 @@ describe('capability and mode gating', () => {
     expect(screen.queryByRole('menuitem', { name: 'Adjust stock' })).not.toBeInTheDocument()
   })
 
-  it('withholds both in Staff Mode even when the account holds both capabilities', async () => {
+  // #114 (spec #113 Staff Mode section): `/settings` is now a whole Admin-only route
+  // (`RequireAdminMode` in `App.tsx`), so a Staff Mode visit never reaches the Products tab —
+  // or Receive/Adjust — at all, rather than reaching it and finding the two menu items absent.
+  it('withholds all of Settings, Products included, in Staff Mode', async () => {
     fakeServer({ mode: 'staff' })
-    const user = userEvent.setup()
     renderApp('/settings')
-    await openProducts(user)
-    await openActions(user, '500ml')
 
-    expect(screen.queryByRole('menuitem', { name: 'Receive stock' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('menuitem', { name: 'Adjust stock' })).not.toBeInTheDocument()
+    expect(await screen.findByText('This area needs Admin Mode')).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Products' })).not.toBeInTheDocument()
   })
 
   it('offers only the one capability actually held', async () => {

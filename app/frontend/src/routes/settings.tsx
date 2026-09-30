@@ -1,3 +1,4 @@
+import { useSearchParams } from 'react-router'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { BrandingPanel } from '@/routes/settings-branding'
 import { BusinessPanel } from '@/routes/settings-business'
@@ -14,6 +15,31 @@ import { SecurityPanel } from '@/routes/settings-security'
 import { StaffPanel } from '@/routes/settings-staff'
 import { TaxSettingsPanel } from '@/routes/settings-tax'
 
+/** Every tab this page can open on. Kept as one list so `?tab=` has something to validate
+ *  against — the onboarding checklist (#116) links here as `/settings?tab=<key>`, and an
+ *  unrecognised or missing value falls back to Business rather than rendering nothing. */
+const TAB_VALUES = [
+  'business',
+  'branding',
+  'roles',
+  'staff',
+  'resources',
+  'services',
+  'products',
+  'packages',
+  'tax',
+  'forms',
+  'notes',
+  'closures',
+  'notifications',
+  'security',
+] as const
+type TabValue = (typeof TAB_VALUES)[number]
+
+function isTabValue(value: string | null): value is TabValue {
+  return TAB_VALUES.includes(value as TabValue)
+}
+
 /**
  * Everything about the business itself (PRD §1, §7).
  *
@@ -24,10 +50,22 @@ import { TaxSettingsPanel } from '@/routes/settings-tax'
  * Every panel needs Admin Mode. Nothing here hides itself when the window lapses; the panels
  * surface the server's refusal instead, because a screen that empties on expiry looks broken
  * rather than locked.
+ *
+ * **The open tab lives in `?tab=`** (#116), not only in local state: the onboarding checklist
+ * links straight to the tab a step belongs to (`/settings?tab=tax`), and a reload of that link
+ * has to land on the same tab rather than snapping back to Business.
  */
 export function SettingsPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const requested = searchParams.get('tab')
+  const tab: TabValue = isTabValue(requested) ? requested : 'business'
+
   return (
-    <Tabs defaultValue="business" className="gap-4">
+    <Tabs
+      value={tab}
+      onValueChange={(value) => setSearchParams({ tab: value }, { replace: true })}
+      className="gap-4"
+    >
       <TabsList className="h-auto flex-wrap justify-start">
         <TabsTrigger value="business">Business</TabsTrigger>
         <TabsTrigger value="branding">Branding</TabsTrigger>

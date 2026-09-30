@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Navigate, Route, Routes } from 'react-router'
 import { AppShell } from '@/components/app-shell'
+import { RequireAdminMode } from '@/components/require-admin-mode'
 import { fetchSetupStatus } from '@/lib/api'
 import { useSession } from '@/lib/auth'
 import { useApplyBranding } from '@/lib/branding'
@@ -25,6 +26,7 @@ import { SchedulePage } from '@/routes/schedule'
 import { SecurityPage } from '@/routes/security'
 import { SellPage } from '@/routes/sell'
 import { SettingsPage } from '@/routes/settings'
+import { SetupChecklistStepPage } from '@/routes/setup-checklist'
 import { SetupPage } from '@/routes/setup'
 
 /**
@@ -69,13 +71,17 @@ export default function App() {
   )
 }
 
-function AppRoutes() {
-  const { data: setup, isPending: setupPending } = useQuery({
+function useSetupStatus() {
+  return useQuery({
     queryKey: ['setup-status'],
     queryFn: fetchSetupStatus,
     staleTime: Infinity,
     retry: false,
   })
+}
+
+function AppRoutes() {
+  const { data: setup, isPending: setupPending } = useSetupStatus()
   const { user, isPending: sessionPending } = useSession()
 
   // Nothing renders until both answers are in — an unclaimed instance must not flash the
@@ -83,19 +89,6 @@ function AppRoutes() {
   if (setupPending || sessionPending) return null
 
   const toSetup = <Navigate to="/setup" replace />
-  const gate = setup?.required ? (
-    toSetup
-  ) : !user ? (
-    <Navigate to="/login" replace />
-  ) : user.mfa.pending ? (
-    <Navigate to="/mfa" replace />
-  ) : user.must_change_password ? (
-    <Navigate to="/change-password" replace />
-  ) : user.mfa.enrolment_required ? (
-    <Navigate to="/mfa/enrol" replace />
-  ) : (
-    <AppShell />
-  )
   // An unclaimed instance has no accounts yet, so signing in — or resetting a password
   // there is no account for — is not an option either.
   const anonymous = (element: React.ReactNode) =>
@@ -148,30 +141,12 @@ function AppRoutes() {
           )
         }
       />
-      <Route
-        path="/mfa/enrol"
-        element={
-          setup?.required ? (
-            toSetup
-          ) : !user ? (
-            <Navigate to="/login" replace />
-          ) : user.must_change_password ? (
-            // The server's `enrolling_user` refuses every endpoint on this screen with
-            // `password_change_required` while a change is owed, so rendering it would be a
-            // dead end: a QR code that cannot be confirmed, on a screen with no way out.
-            // The order here is the server's order.
-            <Navigate to="/change-password" replace />
-          ) : user.mfa.pending ? (
-            <Navigate to="/mfa" replace />
-          ) : (
-            // Unlike the other gate screens this one is also reachable by choice, from the
-            // Security page — so it renders whether or not the policy is demanding it, and
-            // only its copy and its way out change (`gated`).
-            <MfaEnrolPage gated={user.mfa.enrolment_required} />
-          )
-        }
-      />
-      <Route element={gate}>
+      {/* Reads the session itself on whatever render React Router gives it, rather than a
+          `gated` value `AppRoutes` computed ahead of time and passed down already decided —
+          see `MfaEnrolRoute`'s own docstring below for why that distinction is load-bearing
+          here specifically. */}
+      <Route path="/mfa/enrol" element={<MfaEnrolRoute />} />
+      <Route element={<Gate />}>
         <Route index element={<HomePage />} />
         <Route path="schedule" element={<SchedulePage />} />
         <Route path="queue" element={<QueuePage />} />
@@ -184,10 +159,85 @@ function AppRoutes() {
             declaration order — a literal `invoices` segment never matches `:id`. */}
         <Route path="bills/invoices/:id" element={<InvoiceViewPage />} />
         <Route path="bills/:id" element={<BillReviewPage />} />
-        <Route path="reports" element={<ReportsPage />} />
-        <Route path="settings" element={<SettingsPage />} />
+        <Route
+          path="reports"
+          element={
+            <RequireAdminMode>
+              <ReportsPage />
+            </RequireAdminMode>
+          }
+        />
+        <Route
+          path="settings"
+          element={
+            <RequireAdminMode>
+              <SettingsPage />
+            </RequireAdminMode>
+          }
+        />
         <Route path="security" element={<SecurityPage />} />
+        {/* The checklist's own focused step pages (#117, spec #113). Gated inside the page
+            itself (`useCan('admin')`) rather than `RequireAdminMode` here — see that file's
+            docstring — so it lives in the same route group as everything else that needs a
+            live session, without needing that wrapper too. */}
+        <Route path="setup-checklist/:step" element={<SetupChecklistStepPage />} />
       </Route>
     </Routes>
   )
+}
+
+/**
+ * The gate for everything behind the shell (`/`, `/schedule`, `/settings`, ...) — and
+ * `/mfa/enrol` below it — read the session themselves, fresh, on whatever render React
+ * Router gives them, rather than being handed a `<Navigate>`/`gated` value `AppRoutes`
+ * computed ahead of time and passed down as an already-decided element.
+ *
+ * That distinction is load-bearing, not tidiness: `routes/mfa-enrol.tsx`'s `EnrolmentDone`
+ * awaits a session refetch and then renders `<Navigate to="/">` the instant that promise
+ * settles — a *microtask*. TanStack Query's own notification to `AppRoutes`'s `useSession()`
+ * is scheduled on a macrotask (`notifyManager`'s default `setTimeout(fn, 0)`), so that
+ * `<Navigate>` can fire, and `<Routes>` can re-match the new location against the route
+ * elements `AppRoutes` built on its *previous* render — while the session still owed the
+ * enrolment — before `AppRoutes` itself has re-rendered to see the answer that refetch
+ * already put in the cache. The bounce that produces sends the browser straight back to
+ * `/mfa/enrol` with a stale `gated` prop and a freshly remounted `MfaEnrolPage`, its
+ * recovery-codes screen gone.
+ *
+ * A component here, instead of a value computed once by `AppRoutes`, re-reads the cache the
+ * moment React Router mounts or re-renders it — via `useSession()`'s `getOptimisticResult()`,
+ * which always reflects the query's current state, never a value memoized against whichever
+ * notification last fired — so it is fresh regardless of what triggered this render, closing
+ * the window a purely data-driven parent render cannot.
+ */
+function Gate() {
+  const { data: setup } = useSetupStatus()
+  const { user } = useSession()
+  if (setup?.required) return <Navigate to="/setup" replace />
+  if (!user) return <Navigate to="/login" replace />
+  if (user.mfa.pending) return <Navigate to="/mfa" replace />
+  if (user.must_change_password) return <Navigate to="/change-password" replace />
+  if (user.mfa.enrolment_required) return <Navigate to="/mfa/enrol" replace />
+  return <AppShell />
+}
+
+/** See `Gate`'s docstring above — this is the exact route a stale `Gate` bounce sends the
+ *  browser back to, so it needs the same fix: its own live read, not a `gated` value that can
+ *  be as stale as the bounce that got it here. */
+function MfaEnrolRoute() {
+  const { data: setup } = useSetupStatus()
+  const { user } = useSession()
+  if (setup?.required) return <Navigate to="/setup" replace />
+  if (!user) return <Navigate to="/login" replace />
+  if (user.must_change_password) {
+    // The server's `enrolling_user` refuses every endpoint on this screen with
+    // `password_change_required` while a change is owed, so rendering it would be a dead
+    // end: a QR code that cannot be confirmed, on a screen with no way out. The order here
+    // is the server's order.
+    return <Navigate to="/change-password" replace />
+  }
+  if (user.mfa.pending) return <Navigate to="/mfa" replace />
+  // Unlike `Gate`'s screens this one is also reachable by choice, from the Security page —
+  // so it renders whether or not the policy is demanding it, and only its copy and its way
+  // out change (`gated`).
+  return <MfaEnrolPage gated={user.mfa.enrolment_required} />
 }
