@@ -281,20 +281,31 @@ async def test_email_step_flips_only_after_a_successful_test_send(client, sent_e
     assert step((await client.get(ONBOARDING)).json(), "email")["done"] is True
 
 
+SENDER_CONFIGS = {
+    "resend": {
+        "email_sender": "resend",
+        "resend_from_address": "hello@cedar.example",
+        "resend_api_key": "re_live_key",
+    },
+    "mailgun": {
+        "email_sender": "mailgun",
+        "mailgun_from_address": "hello@cedar.example",
+        "mailgun_domain": "mg.cedar.example",
+        "mailgun_region": "us",
+        "mailgun_api_key": "key-live",
+    },
+}
+
+
+@pytest.mark.parametrize("sender", sorted(SENDER_CONFIGS))
 async def test_email_step_goes_undone_again_after_a_later_test_send_fails(
-    client, sent_emails, fail_next_send
+    client, sent_emails, fail_next_send, sender
 ):
     """The gap #116 closes: a sender verified once must not keep reading as done once its
-    most recent test send has actually failed."""
+    most recent test send has actually failed — for every sender, Mailgun (#115) included."""
     await as_admin(client)
-    await client.patch(
-        NOTIFICATIONS,
-        json={
-            "email_sender": "resend",
-            "resend_from_address": "hello@cedar.example",
-            "resend_api_key": "re_live_key",
-        },
-    )
+    configured = await client.patch(NOTIFICATIONS, json=SENDER_CONFIGS[sender])
+    assert configured.status_code == 200, configured.text
     verified = await client.post(f"{NOTIFICATIONS}/test-email", json={"to": "owner@cedar.example"})
     assert verified.status_code == 200, verified.text
     assert step((await client.get(ONBOARDING)).json(), "email")["done"] is True

@@ -508,6 +508,15 @@ async def update_notification_settings(
     return _settings_out(business, await _templates(db))
 
 
+# Each email sender's "its most recent test send succeeded" field — one map, so the success and
+# failure paths of the test send can never disagree about which sender they touch.
+_VERIFIED_AT = {
+    "resend": "resend_domain_verified_at",
+    "smtp": "smtp_verified_at",
+    "mailgun": "mailgun_verified_at",
+}
+
+
 @router.post("/business/notifications/test-email")
 async def send_test_email(
     payload: TestEmailRequest, admin: AdminCapability, db: SessionDep
@@ -530,21 +539,13 @@ async def send_test_email(
         # #116: the most recent test send failed, so a prior success no longer speaks for this
         # sender — the same invalidation a credential edit already does in the PATCH above,
         # applied to "credentials unchanged but the send itself failed" too.
-        if business.email_sender == "resend" and business.resend_domain_verified_at is not None:
-            business.resend_domain_verified_at = None
-            await db.commit()
-        elif business.email_sender == "smtp" and business.smtp_verified_at is not None:
-            business.smtp_verified_at = None
+        verified_field = _VERIFIED_AT[business.email_sender]
+        if getattr(business, verified_field) is not None:
+            setattr(business, verified_field, None)
             await db.commit()
         raise HTTPException(400, f"The test email could not be sent: {error}") from error
 
-    now = datetime.now(UTC)
-    if business.email_sender == "resend":
-        business.resend_domain_verified_at = now
-    elif business.email_sender == "mailgun":
-        business.mailgun_verified_at = now
-    else:
-        business.smtp_verified_at = now
+    setattr(business, _VERIFIED_AT[business.email_sender], datetime.now(UTC))
     record_event(
         db,
         "business.notification_email_verified",
