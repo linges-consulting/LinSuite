@@ -164,7 +164,7 @@ const patches = (calls: Call[]) =>
 async function openNotifications() {
   const user = userEvent.setup()
   renderApp('/settings')
-  await user.click(await screen.findByRole('tab', { name: 'Notifications' }))
+  await user.click(await screen.findByRole('button', { name: 'Notifications' }))
   return user
 }
 
@@ -264,7 +264,7 @@ test('a background Admin Mode lapse does not lose a half-typed Mailgun draft', a
     const { server } = fakeNotifications()
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime })
     renderApp('/settings')
-    await user.click(await screen.findByRole('tab', { name: 'Notifications' }))
+    await user.click(await screen.findByRole('button', { name: 'Notifications' }))
 
     await user.click(await screen.findByRole('combobox', { name: 'Sender' }))
     await user.click(await screen.findByRole('option', { name: 'Mailgun' }))

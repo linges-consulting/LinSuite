@@ -172,7 +172,7 @@ function renderSettings() {
 }
 
 async function openPackages(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('tab', { name: 'Packages' }))
+  await user.click(await screen.findByRole('button', { name: 'Packages' }))
 }
 
 async function openActions(user: ReturnType<typeof userEvent.setup>, name: string) {

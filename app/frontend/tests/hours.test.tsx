@@ -191,13 +191,13 @@ function renderSettings() {
 }
 
 async function openHours(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('tab', { name: 'Staff' }))
+  await user.click(await screen.findByRole('button', { name: 'Staff' }))
   await user.click(await screen.findByRole('button', { name: `Actions for ${MEMBER.email}` }))
   await user.click(await screen.findByRole('menuitem', { name: 'Hours' }))
 }
 
 async function openTimeOff(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('tab', { name: 'Staff' }))
+  await user.click(await screen.findByRole('button', { name: 'Staff' }))
   await user.click(await screen.findByRole('button', { name: `Actions for ${MEMBER.email}` }))
   await user.click(await screen.findByRole('menuitem', { name: 'Time off' }))
 }
@@ -470,7 +470,7 @@ describe('time off', () => {
 
 describe('closures', () => {
   async function openClosures(user: ReturnType<typeof userEvent.setup>) {
-    await user.click(await screen.findByRole('tab', { name: 'Closures' }))
+    await user.click(await screen.findByRole('button', { name: 'Closures' }))
   }
 
   it('imports the statutory holidays for the year on screen', async () => {

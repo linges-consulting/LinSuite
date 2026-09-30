@@ -217,7 +217,7 @@ function renderStaff() {
 
 /** Settings opens on Business; the Staff panel is a tab away. */
 async function openStaff(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('tab', { name: 'Staff' }))
+  await user.click(await screen.findByRole('button', { name: 'Staff' }))
 }
 
 /** The row's actions live behind one menu, so every action opens it first. */

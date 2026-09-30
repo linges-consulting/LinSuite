@@ -18,7 +18,7 @@ const ADMIN = { signedIn: true, dualRole: true, adminWindowMs: 15 * 60_000 }
 
 async function openBusiness() {
   const user = userEvent.setup()
-  await user.click(await screen.findByRole('tab', { name: 'Business' }))
+  await user.click(await screen.findByRole('button', { name: 'Business profile' }))
   return user
 }
 

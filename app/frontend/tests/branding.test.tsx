@@ -105,7 +105,7 @@ test('a cache this version cannot read is dropped rather than re-applied every l
 
 async function openBranding() {
   const user = userEvent.setup()
-  await user.click(await screen.findByRole('tab', { name: 'Branding' }))
+  await user.click(await screen.findByRole('button', { name: 'Branding' }))
   return user
 }
 

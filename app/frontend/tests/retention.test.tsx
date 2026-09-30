@@ -54,7 +54,7 @@ const patches = (calls: Call[]) => calls.filter((c) => c.url === SECURITY && c.m
 async function openSecurity() {
   const user = userEvent.setup()
   renderApp('/settings')
-  await user.click(await screen.findByRole('tab', { name: 'Security' }))
+  await user.click(await screen.findByRole('button', { name: 'Security' }))
   return user
 }
 

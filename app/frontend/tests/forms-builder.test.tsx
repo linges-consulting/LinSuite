@@ -123,7 +123,7 @@ function renderSettings() {
 }
 
 async function openBuilder(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('tab', { name: 'Forms' }))
+  await user.click(await screen.findByRole('button', { name: 'Forms' }))
   await user.click(await screen.findByRole('button', { name: 'Edit Prenatal intake' }))
   await screen.findByRole('button', { name: 'Save draft' })
 }
@@ -289,7 +289,7 @@ describe('the list', () => {
     const server = fakeServer(template([]))
     const user = userEvent.setup()
     renderSettings()
-    await user.click(await screen.findByRole('tab', { name: 'Forms' }))
+    await user.click(await screen.findByRole('button', { name: 'Forms' }))
 
     await user.click(await screen.findByRole('button', { name: 'New form' }))
     const dialog = await screen.findByRole('dialog')
@@ -314,7 +314,7 @@ describe('the list', () => {
     fakeServer(template([], { latest_version: 2, retired_at: '2026-09-22T12:00:00Z' }))
     const user = userEvent.setup()
     renderSettings()
-    await user.click(await screen.findByRole('tab', { name: 'Forms' }))
+    await user.click(await screen.findByRole('button', { name: 'Forms' }))
 
     const row = (await screen.findByText('Prenatal intake')).closest('tr')!
     expect(within(row).getByText('Intake')).toBeInTheDocument()
@@ -392,7 +392,7 @@ describe('retiring', () => {
     const server = fakeServer(template([], { latest_version: 1 }))
     const user = userEvent.setup()
     renderSettings()
-    await user.click(await screen.findByRole('tab', { name: 'Forms' }))
+    await user.click(await screen.findByRole('button', { name: 'Forms' }))
 
     await user.click(await screen.findByRole('button', { name: 'Actions for Prenatal intake' }))
     await user.click(await screen.findByRole('menuitem', { name: 'Retire' }))
@@ -414,7 +414,7 @@ describe('retiring', () => {
     const server = fakeServer(template([], { latest_version: 1 }))
     const user = userEvent.setup()
     renderSettings()
-    await user.click(await screen.findByRole('tab', { name: 'Forms' }))
+    await user.click(await screen.findByRole('button', { name: 'Forms' }))
     await user.click(await screen.findByRole('button', { name: 'Actions for Prenatal intake' }))
     await user.click(await screen.findByRole('menuitem', { name: 'Retire' }))
 
