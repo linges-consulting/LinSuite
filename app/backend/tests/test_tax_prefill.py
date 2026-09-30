@@ -89,7 +89,7 @@ async def create_component(client, **overrides) -> dict:
         "code": "custom",
         "name": "My Own Tax",
         "province": None,
-        "rate_bp": 100,
+        "rate_ppm": 10_000,
         "effective_from": date(2020, 1, 1).isoformat(),
     }
     body.update(overrides)
@@ -114,9 +114,9 @@ async def test_saving_a_province_creates_exactly_its_components(client):
 
     by_code = {c["code"]: c for c in await components(client)}
     assert set(by_code) == {"GST", "PST"}
-    assert by_code["GST"]["rates"][0]["rate_bp"] == 500
+    assert by_code["GST"]["rates"][0]["rate_ppm"] == 50_000
     assert by_code["GST"]["rates"][0]["effective_from"] == "2008-01-01"
-    assert by_code["PST"]["rates"][0]["rate_bp"] == 700
+    assert by_code["PST"]["rates"][0]["rate_ppm"] == 70_000
     assert by_code["PST"]["rates"][0]["effective_from"] == "2013-04-01"
     assert by_code["GST"]["province"] == "BC"
     assert by_code["PST"]["province"] == "BC"
@@ -132,7 +132,7 @@ async def test_ontario_gets_only_hst(client):
 
     created = await components(client)
     assert [c["code"] for c in created] == ["HST"]
-    assert created[0]["rates"][0]["rate_bp"] == 1300
+    assert created[0]["rates"][0]["rate_ppm"] == 130_000
 
 
 async def test_quebec_gets_gst_and_qst(client):
@@ -142,7 +142,7 @@ async def test_quebec_gets_gst_and_qst(client):
 
     by_code = {c["code"]: c for c in await components(client)}
     assert set(by_code) == {"GST", "QST"}
-    assert by_code["QST"]["rates"][0]["rate_bp"] == 998
+    assert by_code["QST"]["rates"][0]["rate_ppm"] == 99_750  # exact, #119
 
 
 # --- idempotence: a second save, or a later province change, creates nothing ----------------

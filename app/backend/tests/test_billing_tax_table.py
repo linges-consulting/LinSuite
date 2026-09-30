@@ -12,38 +12,39 @@ def test_gst_provinces_get_five_percent_federal_gst():
     codes = {c.code for c, _ in resolved}
     assert "GST" in codes
     gst_rate = next(r for c, r in resolved if c.code == "GST")
-    assert gst_rate.rate_bp == 500
+    assert gst_rate.rate_ppm == 50_000
 
 
 def test_ontario_gets_only_hst_thirteen_percent():
     resolved = components_for_province("ON", date(2026, 1, 1))
-    assert [(c.code, r.rate_bp) for c, r in resolved] == [("HST", 1300)]
+    assert [(c.code, r.rate_ppm) for c, r in resolved] == [("HST", 130000)]
 
 
 def test_bc_gets_gst_and_pst():
     resolved = components_for_province("BC", date(2026, 1, 1))
-    assert sorted((c.code, r.rate_bp) for c, r in resolved) == [("GST", 500), ("PST", 700)]
+    assert sorted((c.code, r.rate_ppm) for c, r in resolved) == [("GST", 50000), ("PST", 70000)]
 
 
 def test_quebec_gets_gst_and_qst():
     resolved = components_for_province("QC", date(2026, 1, 1))
-    assert sorted((c.code, r.rate_bp) for c, r in resolved) == [("GST", 500), ("QST", 998)]
+    # QST is exact at 99_750 ppm (9.975%) — #119, no rounding to 99_800 (9.98%) any more.
+    assert sorted((c.code, r.rate_ppm) for c, r in resolved) == [("GST", 50000), ("QST", 99750)]
 
 
 def test_manitoba_gets_gst_and_rst():
     resolved = components_for_province("MB", date(2026, 1, 1))
-    assert sorted((c.code, r.rate_bp) for c, r in resolved) == [("GST", 500), ("RST", 700)]
+    assert sorted((c.code, r.rate_ppm) for c, r in resolved) == [("GST", 50000), ("RST", 70000)]
 
 
 def test_saskatchewan_gets_gst_and_pst():
     resolved = components_for_province("SK", date(2026, 1, 1))
-    assert sorted((c.code, r.rate_bp) for c, r in resolved) == [("GST", 500), ("PST", 600)]
+    assert sorted((c.code, r.rate_ppm) for c, r in resolved) == [("GST", 50000), ("PST", 60000)]
 
 
 def test_nb_nl_pe_get_fifteen_percent_hst():
     for province in ("NB", "NL", "PE"):
         resolved = components_for_province(province, date(2026, 1, 1))
-        assert [(c.code, r.rate_bp) for c, r in resolved] == [("HST", 1500)]
+        assert [(c.code, r.rate_ppm) for c, r in resolved] == [("HST", 150000)]
 
 
 # --- date boundaries: Nova Scotia's 2025-04-01 rate cut ---------------------------------
@@ -51,15 +52,15 @@ def test_nb_nl_pe_get_fifteen_percent_hst():
 
 def test_nova_scotia_is_fifteen_percent_before_the_cut():
     resolved = components_for_province("NS", date(2025, 3, 31))
-    assert [(c.code, r.rate_bp, r.effective_from) for c, r in resolved] == [
-        ("HST", 1500, date(2010, 7, 1))
+    assert [(c.code, r.rate_ppm, r.effective_from) for c, r in resolved] == [
+        ("HST", 150000, date(2010, 7, 1))
     ]
 
 
 def test_nova_scotia_is_fourteen_percent_on_and_after_the_cut():
     resolved = components_for_province("NS", date(2025, 4, 1))
-    assert [(c.code, r.rate_bp, r.effective_from) for c, r in resolved] == [
-        ("HST", 1400, date(2025, 4, 1))
+    assert [(c.code, r.rate_ppm, r.effective_from) for c, r in resolved] == [
+        ("HST", 140000, date(2025, 4, 1))
     ]
 
 
@@ -71,12 +72,12 @@ def test_rate_as_of_returns_none_before_the_table_starts():
 def test_territories_get_gst_only():
     for territory in ("NT", "NU", "YT"):
         resolved = components_for_province(territory, date(2026, 1, 1))
-        assert [(c.code, r.rate_bp) for c, r in resolved] == [("GST", 500)]
+        assert [(c.code, r.rate_ppm) for c, r in resolved] == [("GST", 50000)]
 
 
 def test_alberta_gets_gst_only():
     resolved = components_for_province("AB", date(2026, 1, 1))
-    assert [(c.code, r.rate_bp) for c, r in resolved] == [("GST", 500)]
+    assert [(c.code, r.rate_ppm) for c, r in resolved] == [("GST", 50000)]
 
 
 def test_find_component_returns_none_for_a_province_not_covered():

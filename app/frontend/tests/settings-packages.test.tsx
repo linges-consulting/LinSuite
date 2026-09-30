@@ -91,7 +91,7 @@ function fakeServer(account: Row = ADMIN_ACCOUNT) {
           province: null,
           active: true,
           rates: [],
-          current_rate_bp: 500,
+          current_rate_ppm: 50_000,
           applicable_to_business: true,
         })
         return Response.json({ tax_components: [component('t1', 'GST', 'GST')] })

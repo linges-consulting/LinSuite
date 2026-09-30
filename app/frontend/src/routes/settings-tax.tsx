@@ -37,11 +37,15 @@ import {
 } from '@/lib/api'
 import { ONBOARDING, TAX_COMPONENTS, TAX_STATUS } from '@/lib/query-keys'
 
-// Basis points, the `Staff.commission_rate_*_bp` convention (CLAUDE.md) — a screen thinks in
-// percent, the wire thinks in basis points. Copied from `settings-staff.tsx` rather than
-// shared: two lines, and the two screens have no other reason to import from one another.
-const percent = (basisPoints: number) => Math.round(basisPoints) / 100
-const basisPoints = (percentage: string) => Math.round(Number(percentage || 0) * 100)
+// Parts per million (#119) — 1% is 10_000 ppm, so a tax rate can hold three decimal places of
+// a percent exactly (QST's 9.975%). A screen thinks in percent; the wire thinks in ppm. Unlike
+// `settings-staff.tsx`'s `commission_rate_*_bp` fields, a tax rate is never whole-basis-point
+// only, so this pair is not shared with that screen's own bp-scaled `percent`/`basisPoints`.
+const percent = (ratePpm: number) => {
+  const text = (ratePpm / 10_000).toFixed(3)
+  return text.includes(".") ? text.replace(/0+$/, "").replace(/\.$/, "") : text
+}
+const ratePpm = (percentage: string) => Math.round(Number(percentage || 0) * 10_000)
 
 /**
  * Settings → Billing → Tax: the components a catalog item can be taxed with (GST, PST, HST…)
@@ -224,10 +228,10 @@ function TaxComponentLine(props: {
         )}
       </TableCell>
       <TableCell>
-        {component.current_rate_bp === null ? (
+        {component.current_rate_ppm === null ? (
           <span className="text-muted-foreground">Not yet in effect</span>
         ) : (
-          `${percent(component.current_rate_bp)}%`
+          `${percent(component.current_rate_ppm)}%`
         )}
       </TableCell>
       <TableCell>
@@ -297,7 +301,7 @@ function TaxComponentDialog(props: {
             code: code.trim(),
             name: name.trim(),
             province: province || null,
-            rate_bp: basisPoints(rate),
+            rate_ppm: ratePpm(rate),
             effective_from: effectiveFrom,
           }),
     onSuccess: (component) => {
@@ -371,13 +375,17 @@ function TaxComponentDialog(props: {
 
           {!existing && (
             <>
-              <Field label="Rate" htmlFor="tax-rate" hint="Percent, e.g. 5 for 5%.">
+              <Field
+                label="Rate"
+                htmlFor="tax-rate"
+                hint="Percent, up to three decimals — 5 for 5%, 9.975 for 9.975%."
+              >
                 <Input
                   id="tax-rate"
                   type="number"
                   min={0}
                   max={100}
-                  step={0.01}
+                  step={0.001}
                   className="w-32"
                   value={rate}
                   onChange={(e) => setRate(e.target.value)}
@@ -421,7 +429,7 @@ function TaxRateDialog(props: { component: TaxComponent; onClose: () => void }) 
   const add = useMutation({
     mutationFn: () =>
       addTaxComponentRate(props.component.id, {
-        rate_bp: basisPoints(rate),
+        rate_ppm: ratePpm(rate),
         effective_from: effectiveFrom,
       }),
     onSuccess: (component) => {
@@ -455,7 +463,7 @@ function TaxRateDialog(props: { component: TaxComponent; onClose: () => void }) 
           <TableBody>
             {rates.map((r) => (
               <TableRow key={r.id}>
-                <TableCell>{percent(r.rate_bp)}%</TableCell>
+                <TableCell>{percent(r.rate_ppm)}%</TableCell>
                 <TableCell>{r.effective_from}</TableCell>
                 <TableCell>{r.effective_to ?? 'Current'}</TableCell>
               </TableRow>
@@ -464,13 +472,17 @@ function TaxRateDialog(props: { component: TaxComponent; onClose: () => void }) 
         </Table>
 
         <Form onSubmit={() => add.mutate()}>
-          <Field label="New rate" htmlFor="new-rate-value" hint="Percent, e.g. 5 for 5%.">
+          <Field
+            label="New rate"
+            htmlFor="new-rate-value"
+            hint="Percent, up to three decimals — 5 for 5%, 9.975 for 9.975%."
+          >
             <Input
               id="new-rate-value"
               type="number"
               min={0}
               max={100}
-              step={0.01}
+              step={0.001}
               className="w-32"
               value={rate}
               onChange={(e) => setRate(e.target.value)}

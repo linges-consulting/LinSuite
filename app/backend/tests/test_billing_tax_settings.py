@@ -91,7 +91,7 @@ def draft(**overrides) -> dict:
         "code": "gst",
         "name": "GST",
         "province": None,
-        "rate_bp": 500,
+        "rate_ppm": 50_000,
         "effective_from": date(2024, 1, 1).isoformat(),
     }
     body.update(overrides)
@@ -126,15 +126,15 @@ async def events() -> list[str]:
 async def test_creating_a_federal_component_with_its_first_rate(client):
     await as_admin(client)
 
-    created = await make(client, code="gst", name="GST", province=None, rate_bp=500)
+    created = await make(client, code="gst", name="GST", province=None, rate_ppm=50_000)
 
     assert created["code"] == "GST"  # normalised upper
     assert created["province"] is None
     assert created["active"] is True
     assert len(created["rates"]) == 1
-    assert created["rates"][0]["rate_bp"] == 500
+    assert created["rates"][0]["rate_ppm"] == 50_000
     assert created["rates"][0]["effective_to"] is None
-    assert created["current_rate_bp"] == 500
+    assert created["current_rate_ppm"] == 50_000
     assert "billing.tax_component_created" in await events()
 
 
@@ -158,7 +158,7 @@ async def test_unknown_province_is_refused(client):
 async def test_rate_above_one_hundred_percent_is_refused(client):
     await as_admin(client)
 
-    resp = await create(client, code="pst", rate_bp=10_001)
+    resp = await create(client, code="pst", rate_ppm=1_000_001)
 
     assert resp.status_code == 422, resp.text
 
@@ -169,7 +169,7 @@ async def test_a_future_dated_rate_has_no_current_rate_yet(client):
 
     created = await make(client, code="gst", effective_from=future)
 
-    assert created["current_rate_bp"] is None
+    assert created["current_rate_ppm"] is None
 
 
 # --- jurisdiction -----------------------------------------------------------------------
@@ -240,21 +240,21 @@ async def test_updating_an_unknown_component_is_a_404(client):
 async def test_adding_a_rate_closes_the_previously_open_one(client):
     await as_admin(client)
     component = await make(
-        client, code="gst", rate_bp=500, effective_from=date(2024, 1, 1).isoformat()
+        client, code="gst", rate_ppm=50_000, effective_from=date(2024, 1, 1).isoformat()
     )
 
     resp = await client.post(
         f"{TAX_COMPONENTS}/{component['id']}/rates",
-        json={"rate_bp": 600, "effective_from": date(2025, 1, 1).isoformat()},
+        json={"rate_ppm": 60_000, "effective_from": date(2025, 1, 1).isoformat()},
     )
 
     assert resp.status_code == 201, resp.text
     body = resp.json()
     assert len(body["rates"]) == 2
     old, new = body["rates"]
-    assert old["rate_bp"] == 500
+    assert old["rate_ppm"] == 50_000
     assert old["effective_to"] == "2025-01-01"
-    assert new["rate_bp"] == 600
+    assert new["rate_ppm"] == 60_000
     assert new["effective_to"] is None
     assert "billing.tax_component_rate_added" in await events()
 
@@ -262,12 +262,12 @@ async def test_adding_a_rate_closes_the_previously_open_one(client):
 async def test_a_rate_that_does_not_start_after_the_open_one_is_refused(client):
     await as_admin(client)
     component = await make(
-        client, code="gst", rate_bp=500, effective_from=date(2024, 6, 1).isoformat()
+        client, code="gst", rate_ppm=50_000, effective_from=date(2024, 6, 1).isoformat()
     )
 
     resp = await client.post(
         f"{TAX_COMPONENTS}/{component['id']}/rates",
-        json={"rate_bp": 600, "effective_from": date(2024, 1, 1).isoformat()},
+        json={"rate_ppm": 60_000, "effective_from": date(2024, 1, 1).isoformat()},
     )
 
     assert resp.status_code == 422, resp.text
@@ -275,7 +275,7 @@ async def test_a_rate_that_does_not_start_after_the_open_one_is_refused(client):
     listed = await client.get(TAX_COMPONENTS)
     [only] = [c for c in listed.json()["tax_components"] if c["id"] == component["id"]]
     assert len(only["rates"]) == 1
-    assert only["rates"][0]["rate_bp"] == 500
+    assert only["rates"][0]["rate_ppm"] == 50_000
 
 
 # --- capability gate ----------------------------------------------------------------------

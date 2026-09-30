@@ -250,7 +250,7 @@ async def test_completion_redeems_one_credit_and_the_draft_line_is_prepaid(clien
             "code": "gst",
             "name": "GST",
             "province": None,
-            "rate_bp": 500,
+            "rate_ppm": 50_000,
             "effective_from": "2024-01-01",
         },
     )

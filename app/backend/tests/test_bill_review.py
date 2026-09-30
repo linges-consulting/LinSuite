@@ -216,7 +216,7 @@ async def make_tax_component(client, **overrides) -> dict:
         "code": "gst",
         "name": "GST",
         "province": None,
-        "rate_bp": 500,
+        "rate_ppm": 50_000,
         "effective_from": date(2024, 1, 1).isoformat(),
     }
     body.update(overrides)
@@ -428,8 +428,9 @@ async def test_tax_is_included_using_the_business_own_province_and_todays_rate(c
         "/api/admin/business", json={"name": "Cedar Lane Clinic", "province": "ON"}
     )
     assert business.status_code == 200, business.text
-    await make_tax_component(client, code="gst", province=None, rate_bp=500)  # federal, 5%
-    await make_tax_component(client, code="qst", province="QC", rate_bp=975)  # a different province
+    await make_tax_component(client, code="gst", province=None, rate_ppm=50_000)  # federal, 5%
+    # a different province
+    await make_tax_component(client, code="qst", province="QC", rate_ppm=97_500)
     bill_id, _ = await complete_a_visit(
         client, price_cents=10000, tax_component_keys=["gst", "qst"]
     )
@@ -448,7 +449,7 @@ async def test_tax_is_included_using_the_business_own_province_and_todays_rate(c
 
 async def test_tax_is_computed_on_the_discounted_amount(client):
     await as_admin(client)
-    await make_tax_component(client, code="gst", province=None, rate_bp=500)
+    await make_tax_component(client, code="gst", province=None, rate_ppm=50_000)
     bill_id, _ = await complete_a_visit(client, price_cents=10000, tax_component_keys=["GST"])
     discount = await make_discount(client, percentage_bp=1000)  # 10% off -> 9000
 
@@ -467,7 +468,7 @@ async def test_a_tax_component_with_no_rate_covering_today_is_skipped(client):
         client,
         code="future",
         province=None,
-        rate_bp=500,
+        rate_ppm=50_000,
         effective_from=(date.today() + timedelta(days=30)).isoformat(),
     )
     bill_id, _ = await complete_a_visit(client, price_cents=10000)

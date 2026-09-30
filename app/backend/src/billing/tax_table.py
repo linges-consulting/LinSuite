@@ -11,20 +11,11 @@ spec's own list (#113, #118): GST 5% (AB, BC, MB, NT, NU, QC, SK, YT); HST 13% (
 NL, PE), 14% in NS from 2025-04-01 (15% before); BC PST 7%; SK PST 6%; MB RST 7%; QC QST
 9.975%.
 
-**One exception, not a discrepancy: QST cannot be stored as the exact 9.975% Revenu Québec
-quotes.** `billing/models.py::TaxComponentRate.rate_bp` is an `Integer` (basis points, CLAUDE.md
-convention — `MAX_TAX_RATE_BP`), and 9.975% is 997.5 basis points, which no integer column can
-hold exactly. This is not new: the existing admin CRUD (`billing/tax_routes.py`) could never
-have taken an exact 9.975% either, pre-fill or not. Rounded half-up to 998 bp (9.98%), the same
-rounding rule `billing/tax.py` already uses for money — a half-cent-per-hundred-dollars
-overstatement versus the legal rate, negligible against the per-line cent rounding that already
-happens on every invoice. `TaxComponent.active` is left on either way: the business is
-responsible for its own rates once created (CLAUDE.md: "the vendor does not warrant the
-pre-filled values"), and this file's own module docstring records the imprecision that causes
-it.
-# ponytail: rate_bp is whole basis points only; a true fractional rate (QST's 9.975%) rounds to
-# the nearest one. Upgrade path if that becomes a problem: widen `rate_bp` to tenths of a basis
-# point everywhere `billing/tax.py` divides by `BASIS_POINTS`, not just here.
+**QST is exact.** `billing/models.py::TaxComponentRate.rate_ppm` is an `Integer` in parts per
+million (`MAX_TAX_RATE_PPM`, #119) — 9.975% is exactly 99_750 ppm, no rounding needed. Before
+#119 this table (and the existing admin CRUD, `billing/tax_routes.py`) could only store whole
+basis points, which rounded QST's legal rate to 9.98%; the ppm scale removes that discrepancy
+entirely.
 
 **Out of scope (spec #113):** tax outside Canada, and automatic updates for an existing
 tenant's own components when a rate in this table changes — the table only changes in a
@@ -43,7 +34,7 @@ class TableRate:
     `effective_from`) is simply the one in force until a future release appends another."""
 
     effective_from: Date
-    rate_bp: int
+    rate_ppm: int
 
 
 @dataclass(frozen=True)
@@ -60,7 +51,7 @@ CANADIAN_TAX_COMPONENTS: tuple[TableComponent, ...] = (
         code="GST",
         name="GST",
         provinces=frozenset({"AB", "BC", "MB", "NT", "NU", "QC", "SK", "YT"}),
-        rates=(TableRate(Date(2008, 1, 1), 500),),
+        rates=(TableRate(Date(2008, 1, 1), 50_000),),
         source=(
             'Canada Revenue Agency, "Charge and collect the GST/HST — Which rate to charge", '
             "https://www.canada.ca/en/revenue-agency/services/tax/businesses/topics/"
@@ -72,7 +63,7 @@ CANADIAN_TAX_COMPONENTS: tuple[TableComponent, ...] = (
         code="HST",
         name="HST",
         provinces=frozenset({"ON"}),
-        rates=(TableRate(Date(2010, 7, 1), 1300),),
+        rates=(TableRate(Date(2010, 7, 1), 130_000),),
         source=(
             'Canada Revenue Agency / Ontario Ministry of Finance, "Harmonized Sales Tax", '
             "https://www.ontario.ca/document/harmonized-sales-tax-hst — 13% since 2010-07-01 "
@@ -83,7 +74,7 @@ CANADIAN_TAX_COMPONENTS: tuple[TableComponent, ...] = (
         code="HST",
         name="HST",
         provinces=frozenset({"NB", "NL"}),
-        rates=(TableRate(Date(2016, 7, 1), 1500),),
+        rates=(TableRate(Date(2016, 7, 1), 150_000),),
         source=(
             'Canada Revenue Agency, "New Brunswick and Newfoundland and Labrador HST rate '
             'increases", https://www.canada.ca/en/revenue-agency/services/forms-publications/'
@@ -96,7 +87,7 @@ CANADIAN_TAX_COMPONENTS: tuple[TableComponent, ...] = (
         code="HST",
         name="HST",
         provinces=frozenset({"PE"}),
-        rates=(TableRate(Date(2016, 10, 1), 1500),),
+        rates=(TableRate(Date(2016, 10, 1), 150_000),),
         source=(
             "Canada Gazette, SOR/2016-212, https://gazette.gc.ca/rp-pr/p2/2016/2016-07-27/html/"
             "sor-dors212-eng.html — Prince Edward Island HST 14% to 15% effective 2016-10-01 "
@@ -108,8 +99,8 @@ CANADIAN_TAX_COMPONENTS: tuple[TableComponent, ...] = (
         name="HST",
         provinces=frozenset({"NS"}),
         rates=(
-            TableRate(Date(2010, 7, 1), 1500),
-            TableRate(Date(2025, 4, 1), 1400),
+            TableRate(Date(2010, 7, 1), 150_000),
+            TableRate(Date(2025, 4, 1), 140_000),
         ),
         source=(
             "Canada Revenue Agency GST/HST rate table and Government of Nova Scotia budget "
@@ -122,7 +113,7 @@ CANADIAN_TAX_COMPONENTS: tuple[TableComponent, ...] = (
         code="PST",
         name="BC PST",
         provinces=frozenset({"BC"}),
-        rates=(TableRate(Date(2013, 4, 1), 700),),
+        rates=(TableRate(Date(2013, 4, 1), 70_000),),
         source=(
             'Province of British Columbia, "B.C. provincial sales tax (PST)", '
             "https://www2.gov.bc.ca/gov/content/taxes/sales-taxes/pst — 7% general rate, in "
@@ -133,7 +124,7 @@ CANADIAN_TAX_COMPONENTS: tuple[TableComponent, ...] = (
         code="PST",
         name="SK PST",
         provinces=frozenset({"SK"}),
-        rates=(TableRate(Date(2017, 3, 23), 600),),
+        rates=(TableRate(Date(2017, 3, 23), 60_000),),
         source=(
             'Government of Saskatchewan, "Provincial Sales Tax", '
             "https://www.saskatchewan.ca/business/taxes-licensing-and-reporting/"
@@ -145,7 +136,7 @@ CANADIAN_TAX_COMPONENTS: tuple[TableComponent, ...] = (
         code="RST",
         name="MB RST",
         provinces=frozenset({"MB"}),
-        rates=(TableRate(Date(2019, 7, 1), 700),),
+        rates=(TableRate(Date(2019, 7, 1), 70_000),),
         source=(
             'Government of Manitoba, "Retail Sales Tax", '
             "https://www.gov.mb.ca/finance/taxation/taxes/retail.html — 7% since 2019-07-01 "
@@ -156,13 +147,13 @@ CANADIAN_TAX_COMPONENTS: tuple[TableComponent, ...] = (
         code="QST",
         name="QST",
         provinces=frozenset({"QC"}),
-        # 9.975% is 997.5bp; rounded half-up to 998bp — see the module docstring.
-        rates=(TableRate(Date(2013, 1, 1), 998),),
+        rates=(TableRate(Date(2013, 1, 1), 99_750),),  # 9.975%, exact in ppm
         source=(
             'Revenu Québec, "Basic Rules for Applying the GST/HST and QST — Tables of GST and '
             'QST Rates", https://www.revenuquebec.ca/en/businesses/consumption-taxes/'
             "gsthst-and-qst/basic-rules-for-applying-the-gsthst-and-qst/tables-of-gst-and-"
-            "qst-rates/ — 9.975% since 2013-01-01, stored here as 998bp (checked 2026-09-29)"
+            "qst-rates/ — 9.975% since 2013-01-01, stored here as 99_750 ppm, exact "
+            "(checked 2026-09-29)"
         ),
     ),
 )

@@ -26,8 +26,8 @@ const GST = {
   name: 'Goods and Services Tax',
   province: 'BC',
   active: true,
-  rates: [{ id: 'r1', rate_bp: 500, effective_from: '2008-01-01', effective_to: null }],
-  current_rate_bp: 500,
+  rates: [{ id: 'r1', rate_ppm: 50_000, effective_from: '2008-01-01', effective_to: null }],
+  current_rate_ppm: 50_000,
   applicable_to_business: true,
   origin: 'prefill' as const,
 }
@@ -174,5 +174,87 @@ describe('tax pre-fill confirmation', () => {
 
     await screen.findByText('No tax components yet.')
     expect(screen.queryByRole('button', { name: 'Looks right' })).not.toBeInTheDocument()
+  })
+})
+
+// --- #119: rate_ppm, not basis points ------------------------------------------------------
+
+const QST = {
+  id: 'c2',
+  code: 'QST',
+  name: 'Quebec Sales Tax',
+  province: 'QC',
+  active: true,
+  rates: [{ id: 'r2', rate_ppm: 99_750, effective_from: '2013-01-01', effective_to: null }],
+  current_rate_ppm: 99_750,
+  applicable_to_business: false,
+  origin: 'manual' as const,
+}
+
+describe('tax rate display and input', () => {
+  it('shows a whole rate with no trailing zeros and a fractional rate to three decimals', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url === '/api/admin/billing/tax-components') {
+          return Response.json({ tax_components: [GST, QST] })
+        }
+        if (url === '/api/admin/billing/tax-status') {
+          return Response.json({
+            confirmed_at: '2026-01-01T00:00:00Z',
+            prefilled: false,
+            province_changed: false,
+            newer_rate_available: false,
+          })
+        }
+        if (url === '/api/admin/business/provinces') return Response.json(PROVINCES)
+        return Response.json({}, { status: 404 })
+      }),
+    )
+
+    renderPanel()
+
+    expect(await screen.findByText('5%')).toBeInTheDocument() // not "5.000%"
+    expect(await screen.findByText('9.975%')).toBeInTheDocument() // QST, exact
+  })
+
+  it('accepts 9.975 and round-trips it as exactly 99_750 ppm, never basis points', async () => {
+    let created: { rate_ppm: number } | undefined
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        if (url === '/api/admin/billing/tax-components' && method === 'GET') {
+          return Response.json({ tax_components: created ? [QST] : [] })
+        }
+        if (url === '/api/admin/billing/tax-components' && method === 'POST') {
+          created = JSON.parse(init!.body as string)
+          return Response.json({ ...QST, rates: [{ ...QST.rates[0], rate_ppm: created!.rate_ppm }] })
+        }
+        if (url === '/api/admin/billing/tax-status') {
+          return Response.json({
+            confirmed_at: null,
+            prefilled: false,
+            province_changed: false,
+            newer_rate_available: false,
+          })
+        }
+        if (url === '/api/admin/business/provinces') return Response.json(PROVINCES)
+        return Response.json({}, { status: 404 })
+      }),
+    )
+
+    const user = userEvent.setup()
+    renderPanel()
+
+    await user.click(await screen.findByRole('button', { name: 'Add tax component' }))
+    await user.type(screen.getByLabelText('Code'), 'qst')
+    await user.type(screen.getByLabelText('Name'), 'QST')
+    await user.clear(screen.getByLabelText('Rate'))
+    await user.type(screen.getByLabelText('Rate'), '9.975')
+    await user.click(screen.getByRole('button', { name: 'Add component' }))
+
+    await waitFor(() => expect(created).toBeDefined())
+    expect(created!.rate_ppm).toBe(99_750)
   })
 })

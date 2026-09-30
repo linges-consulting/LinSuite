@@ -2780,7 +2780,8 @@ export async function startQueueEntry(id: string): Promise<QueueStartResult> {
 
 export type TaxRate = {
   id: string
-  rate_bp: number
+  /** Parts per million — 1% is 10_000 ppm, so QST's 9.975% is exactly 99_750 (#119). */
+  rate_ppm: number
   effective_from: string
   /** Null: still in effect. Never edited once closed — a new rate always adds a row. */
   effective_to: string | null
@@ -2799,7 +2800,7 @@ export type TaxComponent = {
   rates: TaxRate[]
   /** The rate in effect today, in the business's own timezone. Null if the earliest rate is
    *  still in the future. */
-  current_rate_bp: number | null
+  current_rate_ppm: number | null
   /** A hint only: whether this business's own province would pick this component up
    *  (#57 acceptance criterion 1). Which components actually apply to one catalog item is a
    *  later ticket's job. */
@@ -2813,7 +2814,7 @@ export type TaxComponentDraft = {
   code: string
   name: string
   province: string | null
-  rate_bp: number
+  rate_ppm: number
   effective_from: string
 }
 
@@ -2840,7 +2841,7 @@ export async function updateTaxComponent(
 
 export async function addTaxComponentRate(
   id: string,
-  rate: { rate_bp: number; effective_from: string },
+  rate: { rate_ppm: number; effective_from: string },
 ): Promise<TaxComponent> {
   const res = await send('POST', `/api/admin/billing/tax-components/${id}/rates`, rate)
   if (!res.ok) throw await failure(res, 'Could not add the new rate')
@@ -3188,7 +3189,7 @@ export type InvoiceLineDiscount = {
 
 export type InvoiceLineTax = {
   component_code: string
-  rate_bp: number
+  rate_ppm: number
   amount_cents: number
 }
 

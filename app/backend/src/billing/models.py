@@ -55,7 +55,7 @@ instead of a column on the component, following the effective-dating shape CLAUD
 for: "Rates are effective-dated data; invoices snapshot them." Editing a rate in place would
 retroactively change every already-issued invoice's numbers the moment #65 starts snapshotting
 them — this table exists so that never happens: a rate change is always a new
-`TaxComponentRate` row, never an `UPDATE` of `rate_bp` on an old one.
+`TaxComponentRate` row, never an `UPDATE` of `rate_ppm` on an old one.
 
 **Jurisdiction, not hardcoding.** `province` ties a component to the field
 `core/models.py::Business` already reserved for this ("the field a later rate table joins
@@ -339,10 +339,12 @@ class DiscountEligibleItem(Base):
     discount: Mapped[Discount] = relationship(back_populates="eligible_items")
 
 
-# The `Staff.commission_rate_*_bp` convention (CLAUDE.md, scheduling/models.py): integer
-# basis points, 10000 the ceiling. A tax rate above 100% is a typo, the same reasoning
-# `MAX_BASIS_POINTS` there already gives for a commission rate.
-MAX_TAX_RATE_BP = 10_000
+# Parts per million, not the `Staff.commission_rate_*_bp` convention's basis points
+# (CLAUDE.md, scheduling/models.py) — a tax rate needs three decimal places of a percent
+# (QST's 9.975%), which no whole-basis-point integer can hold exactly (#119). 1_000_000 the
+# ceiling: a tax rate above 100% is a typo, the same reasoning `MAX_BASIS_POINTS` gives for a
+# commission rate, just on the finer scale.
+MAX_TAX_RATE_PPM = 1_000_000
 
 
 class TaxComponent(Base):
@@ -386,7 +388,7 @@ class TaxComponentRate(Base):
     __tablename__ = "tax_component_rates"
     __table_args__ = (
         CheckConstraint(
-            f"rate_bp BETWEEN 0 AND {MAX_TAX_RATE_BP}", name="ck_tax_component_rates_bp"
+            f"rate_ppm BETWEEN 0 AND {MAX_TAX_RATE_PPM}", name="ck_tax_component_rates_ppm"
         ),
         CheckConstraint(
             "effective_to IS NULL OR effective_to > effective_from",
@@ -407,7 +409,7 @@ class TaxComponentRate(Base):
     component_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("tax_components.id", ondelete="CASCADE")
     )
-    rate_bp: Mapped[int] = mapped_column(Integer)
+    rate_ppm: Mapped[int] = mapped_column(Integer)
     effective_from: Mapped[Date] = mapped_column(DateColumn)
     # NULL = still in effect (open-ended). See the module docstring: a new rate closes this
     # one rather than replacing it, so an invoice snapshot taken while this was current keeps
@@ -731,9 +733,9 @@ class BillOverrideRequest(Base):
 #   or basis change on the definition can never rewrite an already-earned commission.
 # - `InvoiceLineTax` — one row per tax component that taxed that line, `component_code` a
 #   frozen `Text` copy (not an FK to `tax_components.id` — independence from the live table is
-#   the point), `rate_bp` the exact resolved rate `compute_bill`'s own `applicable_components` (and
-#   under it, `tax.py::resolve_rate_bp`) used, `amount_cents` the component's contribution to
-#   that line (`LineTax.component_cents[code]`). A component at `rate_bp == 0` still gets a row,
+#   the point), `rate_ppm` the exact resolved rate `compute_bill`'s own `applicable_components` (and
+#   under it, `tax.py::resolve_rate_ppm`) used, `amount_cents` the component's contribution to
+#   that line (`LineTax.component_cents[code]`). A component at `rate_ppm == 0` still gets a row,
 #   the same "never dropped, just zero" rule `tax.py::LineTax` already states for itself.
 #
 # **The override total, reported alongside, never conflated** (mirrors `BillOut`'s own shape):
@@ -893,7 +895,7 @@ class Invoice(Base):
     # Review R1/R5 (migration 0065; pre-0065 rows keep the defaults). `tax_totals_by_component`
     # is the tax actually billed — under an override, the distributed per-line rows summed —
     # while `computed_*` stay the pre-override numbers. `tax_rates_by_component` is every
-    # component's resolved `rate_bp` at issue. `tax_convention` is set only for a package-
+    # component's resolved `rate_ppm` at issue. `tax_convention` is set only for a package-
     # purchase invoice (service lines carry their own). Guarded by `invoices_tax_snapshot_frozen`.
     tax_rates_by_component: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     tax_convention: Mapped[str | None] = mapped_column(String(16))
@@ -1011,20 +1013,20 @@ class InvoiceLineDiscount(Base):
 class InvoiceLineTax(Base):
     """One tax component's frozen contribution to one line — `component_code` is a frozen
     `Text` copy of `TaxComponent.code`, never an FK to `tax_components.id` (module section
-    above: independence from the live table is the point). `rate_bp` is the exact resolved
-    rate `tax.py::resolve_rate_bp` returned at issue; `amount_cents` is that component's own
+    above: independence from the live table is the point). `rate_ppm` is the exact resolved
+    rate `tax.py::resolve_rate_ppm` returned at issue; `amount_cents` is that component's own
     share (`tax.py::LineTax.component_cents[code]`)."""
 
     __tablename__ = "invoice_line_taxes"
     __table_args__ = (
-        CheckConstraint("rate_bp BETWEEN 0 AND 10000", name="ck_invoice_line_taxes_rate_bp"),
+        CheckConstraint("rate_ppm BETWEEN 0 AND 1000000", name="ck_invoice_line_taxes_rate_ppm"),
     )
 
     invoice_line_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("invoice_lines.id", ondelete="CASCADE"), primary_key=True
     )
     component_code: Mapped[str] = mapped_column(String(16), primary_key=True)
-    rate_bp: Mapped[int] = mapped_column(Integer)
+    rate_ppm: Mapped[int] = mapped_column(Integer)
     amount_cents: Mapped[int] = mapped_column(Integer)
 
 
@@ -2110,14 +2112,14 @@ class RetailInvoiceLineDiscount(Base):
 class RetailInvoiceLineTax(Base):
     __tablename__ = "retail_invoice_line_taxes"
     __table_args__ = (
-        CheckConstraint("rate_bp BETWEEN 0 AND 10000", name="ck_retail_invoice_line_taxes_rate"),
+        CheckConstraint("rate_ppm BETWEEN 0 AND 1000000", name="ck_retail_invoice_line_taxes_rate"),
     )
 
     retail_invoice_line_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("retail_invoice_lines.id", ondelete="CASCADE"), primary_key=True
     )
     component_code: Mapped[str] = mapped_column(String(16), primary_key=True)
-    rate_bp: Mapped[int] = mapped_column(Integer)
+    rate_ppm: Mapped[int] = mapped_column(Integer)
     amount_cents: Mapped[int] = mapped_column(Integer)
 
 

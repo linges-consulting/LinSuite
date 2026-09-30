@@ -50,7 +50,7 @@ async def prefill_if_eligible(
             origin="prefill",
         )
         component.rates = [
-            TaxComponentRate(rate_bp=rate.rate_bp, effective_from=rate.effective_from)
+            TaxComponentRate(rate_ppm=rate.rate_ppm, effective_from=rate.effective_from)
         ]
         db.add(component)
         created_codes.append(table_component.code)

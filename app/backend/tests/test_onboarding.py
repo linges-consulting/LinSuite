@@ -196,7 +196,7 @@ async def test_tax_step_flips_once_an_active_component_has_a_rate(client):
             "code": "gst",
             "name": "GST",
             "province": None,
-            "rate_bp": 500,
+            "rate_ppm": 50_000,
             "effective_from": date(2024, 1, 1).isoformat(),
         },
     )
