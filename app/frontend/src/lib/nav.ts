@@ -10,6 +10,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import type { User } from '@/lib/api'
+import { ADMIN_MODE_CAPABILITIES } from '@/lib/capability-gate'
 
 export type NavItem = {
   to: string
@@ -87,10 +88,21 @@ export const NAV: NavItem[] = [
  * The entries this account should be offered. `flags` carries the business-setting gates
  * (just `queueEnabled` today) — omitted entirely hides every `requiresFlag` entry, which is
  * the safe default while that answer is still loading.
+ *
+ * An entry every one of whose `anyOf` capabilities `useCan`'s own registry (#114, spec #113
+ * Staff Mode section) marks administrative is offered only in Admin Mode — Settings and
+ * Reports today. A mixed entry (none exist yet) would stay visible on capability alone, the
+ * same as it always has, since holding a non-administrative one is enough reason to link it.
  */
 export function navFor(user: User | null, flags: { queueEnabled?: boolean } = {}): NavItem[] {
   return NAV.filter((item) => {
     if (item.anyOf && !item.anyOf.some((c) => user?.capabilities?.includes(c))) return false
+    if (
+      item.anyOf?.every((c) => ADMIN_MODE_CAPABILITIES.has(c)) &&
+      user?.mode !== 'admin'
+    ) {
+      return false
+    }
     if (item.requiresFlag && !flags[item.requiresFlag]) return false
     return true
   })

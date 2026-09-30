@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { MoreHorizontal, PackageOpen, Pencil, Plus, Power, PowerOff, ShieldCheck, X } from 'lucide-react'
+import { MoreHorizontal, PackageOpen, Pencil, Plus, Power, PowerOff, X } from 'lucide-react'
 import { useState } from 'react'
 import { toast } from 'sonner'
 import { EmptyState } from '@/components/empty-state'
@@ -54,19 +54,14 @@ import { PACKAGE_DEFINITIONS, SERVICES } from '@/lib/query-keys'
  * administrative capability — refused server-side outside Admin Mode regardless of who holds
  * it. `useCan` is the one gate: an account without the capability, or holding it but not in
  * Admin Mode right now, never even asks the list endpoint (spec #95's "absent, never
- * disabled" rule), and sees why instead of a table that never loads.
+ * disabled" rule) — and, per spec #113's Staff Mode section, sees nothing here at all rather
+ * than an explanation of why (this whole screen sits behind `Settings`, which itself renders
+ * nothing but the mode switcher's page outside Admin Mode — see `RequireAdminMode`).
  */
 export function PackagesPanel() {
   const canManage = useCan('billing.manage')
 
-  if (!canManage) {
-    return (
-      <p className="flex items-center gap-2 text-muted-foreground">
-        <ShieldCheck className="size-4" aria-hidden />
-        Switch to Admin Mode to manage packages.
-      </p>
-    )
-  }
+  if (!canManage) return null
 
   return <PackagesTable />
 }

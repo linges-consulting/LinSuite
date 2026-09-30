@@ -161,11 +161,17 @@ test('an account holding only billing.manage sees only the Package liability tab
   expect(screen.queryByRole('tab', { name: 'Commission' })).not.toBeInTheDocument()
 })
 
-test('holding the capability outside Admin Mode shows neither tab', async () => {
+// #114 (spec #113 Staff Mode section): `/reports` is a whole Admin-only route now, guarded by
+// `RequireAdminMode` in `App.tsx` — a Staff Mode visit never reaches `ReportsPage` at all, so
+// it shows the shared needs-Admin-Mode page (with the mode switcher) rather than its own
+// capability-flavoured empty state.
+test('opening Reports in Staff Mode shows the needs-Admin-Mode page instead of the tabs', async () => {
   reportsStub(['commission.view', 'billing.manage'], 'staff')
   renderApp('/reports')
 
-  expect(await screen.findByText('Switch to Admin Mode')).toBeInTheDocument()
+  expect(await screen.findByText('This area needs Admin Mode')).toBeInTheDocument()
+  // The shell's own header switcher plus the guard page's — both are the same control.
+  expect(screen.getAllByLabelText(/Switch mode/).length).toBeGreaterThan(0)
   expect(screen.queryByRole('tab', { name: 'Commission' })).not.toBeInTheDocument()
   expect(screen.queryByRole('tab', { name: 'Package liability' })).not.toBeInTheDocument()
 })

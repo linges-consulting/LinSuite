@@ -15,11 +15,18 @@ function stubApi(health: Response) {
         // Capabilities included, because the nav is drawn from them: a fake that names a
         // role but sends no capabilities describes an account the server cannot produce,
         // and this test would then be asserting the sidebar of a user who does not exist.
+        // `mode: 'admin'` for the same reason (#114): Settings' nav entry is now hidden
+        // outside Admin Mode, and the server never omits this field.
         return Response.json({
           id: 'u1',
           email: 'owner@cedar.example',
           role: 'Administrator',
           capabilities: ['admin', 'roles.manage', 'users.manage', 'catalog.manage'],
+          mode: 'admin',
+          can_switch_modes: true,
+          admin_grant_expires_at: new Date(Date.now() + 900_000).toISOString(),
+          admin_hard_limit_at: new Date(Date.now() + 900_000).toISOString(),
+          must_change_password: false,
           mfa: NO_MFA,
         })
       // The shell test lands on /clients, which reads the (empty) list.

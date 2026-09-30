@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Navigate, Route, Routes } from 'react-router'
 import { AppShell } from '@/components/app-shell'
+import { RequireAdminMode } from '@/components/require-admin-mode'
 import { fetchSetupStatus } from '@/lib/api'
 import { useSession } from '@/lib/auth'
 import { useApplyBranding } from '@/lib/branding'
@@ -184,8 +185,22 @@ function AppRoutes() {
             declaration order — a literal `invoices` segment never matches `:id`. */}
         <Route path="bills/invoices/:id" element={<InvoiceViewPage />} />
         <Route path="bills/:id" element={<BillReviewPage />} />
-        <Route path="reports" element={<ReportsPage />} />
-        <Route path="settings" element={<SettingsPage />} />
+        <Route
+          path="reports"
+          element={
+            <RequireAdminMode>
+              <ReportsPage />
+            </RequireAdminMode>
+          }
+        />
+        <Route
+          path="settings"
+          element={
+            <RequireAdminMode>
+              <SettingsPage />
+            </RequireAdminMode>
+          }
+        />
         <Route path="security" element={<SecurityPage />} />
       </Route>
     </Routes>
