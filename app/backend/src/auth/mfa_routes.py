@@ -104,7 +104,8 @@ class EnrolmentOut(BaseModel):
 async def start_enrolment(
     payload: StartEnrolmentRequest, user: EnrollingUser, db: SessionDep
 ) -> EnrolmentOut:
-    """Mint a secret and hand back what an authenticator app needs to hold it.
+    """Hand back what an authenticator app needs to hold the candidate secret — the same
+    candidate, if this account already has one staged and unexpired.
 
     The candidate waits in Redis and the account is *not* enrolled: nothing on `users`
     changes until a code proves the app actually has the secret. Writing it to the column
@@ -112,9 +113,15 @@ async def start_enrolment(
     secret their authenticator is using, so abandoning a second enrolment would leave them
     locked out of their own account by a QR code they never scanned.
 
-    Called again, it replaces the candidate. That is the common case — the first code did
-    not scan and the page was reloaded — not an attack.
-
+    **Called again, it reuses the staged candidate rather than minting a fresh one** (#121).
+    A phone's browser routinely discards a backgrounded enrolment tab and reloads it on
+    return — the common case this endpoint sees twice is not "the first code did not scan",
+    it is "the OS dropped the tab", and minting a new secret on that reload invalidates the
+    QR code the person just scanned before they can type the six digits from it. Reusing
+    keeps the same QR live for the rest of `mfa.ENROLMENT_MINUTES`, exactly as long as it
+    would have been good for had the tab never reloaded — this does not extend that window,
+    only `stage_secret`'s own call does that. Once it expires, or once a code confirms it and
+    `forget_staged_secret` runs, the next call here mints a genuinely new one.
     **Replacing a factor that already exists costs a current code.** Everything else on this
     page is protected by the second factor; swapping the factor itself was not, which made a
     hijacked live session — a stolen cookie, a machine left unlocked — the one place an
@@ -123,8 +130,10 @@ async def start_enrolment(
     """
     await _may_replace(db, user, payload.code)
 
-    secret = mfa.new_secret()
-    await mfa.stage_secret(user, secret)
+    secret = await mfa.staged_secret(user)
+    if secret is None:
+        secret = mfa.new_secret()
+        await mfa.stage_secret(user, secret)
     business = await db.scalar(select(Business).where(Business.id == 1))
     return EnrolmentOut(
         secret=secret,

@@ -229,6 +229,52 @@ async def test_starting_a_second_enrolment_leaves_the_live_one_working(client):
     assert (await verify(client, code(secret, 1))).status_code == 200
 
 
+async def test_starting_enrolment_twice_while_staged_returns_the_same_secret(client):
+    """#121: a phone's browser routinely discards a backgrounded enrolment tab and reloads
+    it. A reload that minted a fresh secret would show a new QR code the person's already-
+    scanned authenticator entry no longer matches, so the code they read off their app a
+    moment ago stops working. Two starts, no code confirmed in between, must be the same
+    secret — and the same QR — for as long as the first one is still staged.
+    """
+    await login(client)
+
+    first = await client.post("/api/auth/mfa/enrol", json={})
+    second = await client.post("/api/auth/mfa/enrol", json={})
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["secret"] == second.json()["secret"]
+    assert first.json()["provisioning_uri"] == second.json()["provisioning_uri"]
+
+
+async def test_a_confirmed_enrolment_is_followed_by_a_genuinely_new_secret(client):
+    """Once a candidate becomes the live secret, starting again — a voluntary replacement,
+    `_may_replace`'s own business — must not hand back the secret that is already live and
+    working. `forget_staged_secret` is what clears the way for a fresh one."""
+    await login(client)
+    secret, _ = await enrol(client)
+
+    started = await client.post("/api/auth/mfa/enrol", json={"code": code(secret, 1)})
+
+    assert started.status_code == 200, started.text
+    assert started.json()["secret"] != secret
+
+
+async def test_an_expired_staged_secret_is_not_reused(client):
+    """After `mfa.ENROLMENT_MINUTES`, Redis has already dropped the key on its own; this is
+    that same state, reached into directly rather than waited for (this file's own
+    docstring) — the candidate is gone, so the next start has nothing to reuse."""
+    await login(client)
+    started = await client.post("/api/auth/mfa/enrol", json={})
+    first_secret = started.json()["secret"]
+    target = await user_id()
+    await get_redis().delete(mfa.enrolment_key(target))
+
+    again = await client.post("/api/auth/mfa/enrol", json={})
+
+    assert again.status_code == 200, again.text
+    assert again.json()["secret"] != first_secret
+
+
 async def test_the_secret_is_encrypted_at_rest_and_round_trips(client):
     await login(client)
     secret, _ = await enrol(client)

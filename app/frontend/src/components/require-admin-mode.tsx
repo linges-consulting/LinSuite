@@ -1,5 +1,5 @@
 import { ShieldCheck } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { EmptyState } from '@/components/empty-state'
 import { useSession } from '@/lib/auth'
 
@@ -27,9 +27,24 @@ export function AdminModeRequiredNotice() {
  * URL directly gets this page, pointing at the header's mode switcher (the one control that
  * gets you past it, already on screen), rather than a screen that half-loads and then refuses
  * each thing on it one at a time.
+ *
+ * **Sticky once entered.** That rule is about arriving in Staff Mode, not about losing Admin
+ * Mode after the page is already up. `auth/modes.py` slides the idle window only on an actual
+ * admin request, and nothing here makes one while the tab is backgrounded — `refetchInterval`
+ * pauses off-screen and `/auth/me` itself never slides the window (that file's own docstring).
+ * So an administrator who switches away to fetch an API key or read a code, and comes back
+ * after the window has quietly lapsed, produced a focus refetch that flips `user.mode` to
+ * `'staff'` with nothing else having changed — and unmounting `children` on that alone threw
+ * away whatever was half-typed underneath, which is exactly the "screen that empties on expiry
+ * looks broken rather than locked" `SettingsPage` already says this area must not do. Once
+ * this mount has seen Admin Mode, it keeps rendering `children` regardless of what the session
+ * says afterwards; every write is still enforced server-side (`Requires("admin")`), and a
+ * refused one surfaces through the ordinary 403 toast, not through this guard.
  */
 export function RequireAdminMode({ children }: { children: ReactNode }) {
   const { user } = useSession()
-  if (user?.mode !== 'admin') return <AdminModeRequiredNotice />
+  const [entered, setEntered] = useState(user?.mode === 'admin')
+  if (!entered && user?.mode === 'admin') setEntered(true)
+  if (!entered) return <AdminModeRequiredNotice />
   return <>{children}</>
 }
