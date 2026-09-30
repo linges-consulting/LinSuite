@@ -179,16 +179,18 @@ done
 
 ```
 LINSUITE KEY ESCROW SHEET
-==========================================================================
+====================================================================
 Tenant (business legal name): __________________________________________
 Deployment host / APP_HOST:   __________________________________________
 Date created:                 __________________________________________
 Created by (vendor operator): __________________________________________
-Witnessed by (business owner/admin): ____________________________________
+Witnessed by (business owner/admin): ______________________________
 
-Secret                          SHA-256 fingerprint (first 16 + last 16 hex chars is enough
-                                 to eyeball-compare two sheets; keep the full digest on file)
---------------------------------------------------------------------------
+Secret                    SHA-256 fingerprint
+                          (first 16 + last 16 hex chars is enough to
+                          compare two sheets by eye; keep the full
+                          digest on file)
+--------------------------------------------------------------------
 DOCUMENT_MASTER_KEY (v1: cannot be rotated — see note below)
   ____________________________________________________________________
 
@@ -216,18 +218,21 @@ PURGE_DB_PASSWORD (linsuite_purge)
 BACKUP_DB_PASSWORD (linsuite_backup)
   ____________________________________________________________________
 
-NOTE: DOCUMENT_MASTER_KEY cannot be rotated in this version of LinSuite. Losing this
-sheet's copies AND the value in .env means every document this business has ever
-stored — signed consents, chart notes, invoices — becomes permanently unreadable, even
-though the backup that contains them is otherwise perfectly healthy. Guard this sheet
-accordingly.
+NOTE: DOCUMENT_MASTER_KEY cannot be rotated in this version of
+LinSuite. Losing this sheet's copies AND the value in .env means
+every document this business has ever stored (signed consents,
+chart notes, invoices) becomes permanently unreadable, even though
+the backup that contains them is otherwise perfectly healthy.
+Guard this sheet accordingly.
 
-Business copy:  sealed in an envelope, signed across the seal by both parties, held by
-                 the business off the server (e.g. a safe, or with counsel) — never inside
-                 the LinSuite deployment itself.
-Vendor copy:    stored offline in the vendor's per-tenant password-manager vault entry,
-                 not synced to any machine with general internet access.
-==========================================================================
+Business copy: sealed in an envelope, signed across the seal by
+               both parties, held by the business off the server
+               (a safe, or with counsel), never inside the
+               LinSuite deployment itself.
+Vendor copy:   stored offline in the vendor's per-tenant
+               password-manager vault entry, not synced to any
+               machine with general internet access.
+====================================================================
 ```
 
 ## 4. On-prem TLS
