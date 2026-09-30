@@ -66,7 +66,10 @@ export function SettingsPage() {
       onValueChange={(value) => setSearchParams({ tab: value }, { replace: true })}
       className="gap-4"
     >
-      <TabsList className="h-auto flex-wrap justify-start">
+      <TabsList
+        variant="line"
+        className="h-auto flex-wrap justify-start gap-x-5 gap-y-3 [&>[data-slot=tabs-trigger]]:flex-none [&>[data-slot=tabs-trigger]]:px-0.5"
+      >
         <TabsTrigger value="business">Business</TabsTrigger>
         <TabsTrigger value="branding">Branding</TabsTrigger>
         <TabsTrigger value="roles">Roles</TabsTrigger>

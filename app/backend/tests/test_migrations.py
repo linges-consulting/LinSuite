@@ -493,3 +493,40 @@ async def test_migration_0076_converts_rates_ppm_and_preserves_an_issued_invoice
 
     after = await snapshot()
     assert after == before  # cents and rates alike, bit for bit identical to before the round trip
+
+
+async def _brand_pair() -> tuple[str, str]:
+    async with session_scope() as db:
+        row = (
+            await db.execute(text("SELECT brand_primary, brand_secondary FROM businesses"))
+        ).one()
+    return row.brand_primary, row.brand_secondary
+
+
+async def _set_brand_pair(primary: str, secondary: str) -> None:
+    async with session_scope() as db:
+        await db.execute(
+            text("UPDATE businesses SET brand_primary = :p, brand_secondary = :s"),
+            {"p": primary, "s": secondary},
+        )
+        await db.commit()
+
+
+async def test_migration_0077_moves_only_an_untouched_default_brand_pair(client):
+    """The shipped theme became Stillwater: a business still on the old default pair moves to
+    Stillwater's, one that chose its own colours keeps them, and the round trip is exact."""
+    await as_admin(client)  # a claimed instance: one `businesses` row
+    await _downgrade_to("0076")
+
+    await _set_brand_pair("#1d4ed8", "#0f766e")  # never opened Settings -> Branding
+    await _upgrade_to("0077")
+    assert await _brand_pair() == ("#1a6289", "#2f7a5c")
+
+    await _downgrade_to("0076")
+    assert await _brand_pair() == ("#1d4ed8", "#0f766e")
+
+    await _set_brand_pair("#7a3fbf", "#0f766e")  # a deliberate primary, default secondary
+    await _upgrade_to("0077")
+    assert await _brand_pair() == ("#7a3fbf", "#0f766e")
+
+    await _upgrade_to("head")

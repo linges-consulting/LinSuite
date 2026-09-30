@@ -12,7 +12,10 @@ import { InvoicesTab } from '@/routes/invoices'
 export function BillingPage() {
   return (
     <Tabs defaultValue="to-review" className="gap-4">
-      <TabsList>
+      <TabsList
+        variant="line"
+        className="h-auto justify-start gap-x-5 [&>[data-slot=tabs-trigger]]:flex-none [&>[data-slot=tabs-trigger]]:px-0.5"
+      >
         <TabsTrigger value="to-review">To review</TabsTrigger>
         <TabsTrigger value="invoices">Invoices</TabsTrigger>
       </TabsList>
