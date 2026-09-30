@@ -179,6 +179,16 @@ describe('tax pre-fill confirmation', () => {
 
 // --- #119: rate_ppm, not basis points ------------------------------------------------------
 
+const CUSTOM = {
+  ...GST,
+  id: 'c-custom',
+  code: 'LEVY',
+  name: 'Local levy',
+  rates: [{ id: 'r3', rate_ppm: 12_345, effective_from: '2026-01-01', effective_to: null }],
+  current_rate_ppm: 12_345,
+  origin: 'manual' as const,
+}
+
 const QST = {
   id: 'c2',
   code: 'QST',
@@ -192,12 +202,12 @@ const QST = {
 }
 
 describe('tax rate display and input', () => {
-  it('shows a whole rate with no trailing zeros and a fractional rate to three decimals', async () => {
+  it('shows a whole rate with no trailing zeros and a fractional rate exactly', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async (url: string) => {
         if (url === '/api/admin/billing/tax-components') {
-          return Response.json({ tax_components: [GST, QST] })
+          return Response.json({ tax_components: [GST, QST, CUSTOM] })
         }
         if (url === '/api/admin/billing/tax-status') {
           return Response.json({
@@ -216,6 +226,9 @@ describe('tax rate display and input', () => {
 
     expect(await screen.findByText('5%')).toBeInTheDocument() // not "5.000%"
     expect(await screen.findByText('9.975%')).toBeInTheDocument() // QST, exact
+    // Whatever was stored is what shows: a ppm is a ten-thousandth of a percent, so four
+    // decimals show any rate exactly — never rounded to three.
+    expect(await screen.findByText('1.2345%')).toBeInTheDocument()
   })
 
   it('accepts 9.975 and round-trips it as exactly 99_750 ppm, never basis points', async () => {

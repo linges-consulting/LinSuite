@@ -137,7 +137,7 @@ test.each(STAFF_ROUTES)('%s in Staff Mode offers no Admin-only nav entry or plac
   expect(screen.queryAllByText(ADMIN_PLACEHOLDER)).toHaveLength(0)
 })
 
-test.each(['/settings', '/reports'])(
+test.each(['/settings', '/reports', '/setup-checklist/business'])(
   '%s in Staff Mode shows the needs-Admin-Mode page instead of its own screen',
   async (path) => {
     sweepStub()

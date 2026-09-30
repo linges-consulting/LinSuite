@@ -37,13 +37,16 @@ import {
 } from '@/lib/api'
 import { ONBOARDING, TAX_COMPONENTS, TAX_STATUS } from '@/lib/query-keys'
 
-// Parts per million (#119) — 1% is 10_000 ppm, so a tax rate can hold three decimal places of
+// Parts per million (#119) — 1% is 10_000 ppm, so a tax rate can hold four decimal places of
 // a percent exactly (QST's 9.975%). A screen thinks in percent; the wire thinks in ppm. Unlike
 // `settings-staff.tsx`'s `commission_rate_*_bp` fields, a tax rate is never whole-basis-point
 // only, so this pair is not shared with that screen's own bp-scaled `percent`/`basisPoints`.
+/** A stored rate exactly: a ppm is a ten-thousandth of a percent, so four decimals show any
+ *  rate with nothing rounded away (5, 9.975, 1.2345). Integer maths, not `toFixed`. */
 const percent = (ratePpm: number) => {
-  const text = (ratePpm / 10_000).toFixed(3)
-  return text.includes(".") ? text.replace(/0+$/, "").replace(/\.$/, "") : text
+  const whole = Math.trunc(ratePpm / 10_000)
+  const fraction = String(ratePpm % 10_000).padStart(4, '0').replace(/0+$/, '')
+  return fraction ? `${whole}.${fraction}` : String(whole)
 }
 const ratePpm = (percentage: string) => Math.round(Number(percentage || 0) * 10_000)
 
@@ -378,14 +381,14 @@ function TaxComponentDialog(props: {
               <Field
                 label="Rate"
                 htmlFor="tax-rate"
-                hint="Percent, up to three decimals — 5 for 5%, 9.975 for 9.975%."
+                hint="Percent, up to four decimals — 5 for 5%, 9.975 for 9.975%."
               >
                 <Input
                   id="tax-rate"
                   type="number"
                   min={0}
                   max={100}
-                  step={0.001}
+                  step={0.0001}
                   className="w-32"
                   value={rate}
                   onChange={(e) => setRate(e.target.value)}
@@ -475,14 +478,14 @@ function TaxRateDialog(props: { component: TaxComponent; onClose: () => void }) 
           <Field
             label="New rate"
             htmlFor="new-rate-value"
-            hint="Percent, up to three decimals — 5 for 5%, 9.975 for 9.975%."
+            hint="Percent, up to four decimals — 5 for 5%, 9.975 for 9.975%."
           >
             <Input
               id="new-rate-value"
               type="number"
               min={0}
               max={100}
-              step={0.001}
+              step={0.0001}
               className="w-32"
               value={rate}
               onChange={(e) => setRate(e.target.value)}

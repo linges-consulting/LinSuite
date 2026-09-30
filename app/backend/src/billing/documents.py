@@ -194,11 +194,11 @@ def _money(cents: int, symbol: str) -> str:
 
 
 def _rate(ppm: int) -> str:
-    """A tax rate's percent, up to three decimals, trailing zeros trimmed (5, not 5.000; 9.975
-    for QST exact) — `rate_ppm` is parts per million, `10_000` ppm to a percentage point."""
+    """A tax rate's percent, exactly as stored, trailing zeros trimmed (5, not 5.0000; 9.975
+    for QST) — `rate_ppm` is parts per million, `10_000` ppm to a percentage point, so four
+    decimals show any stored rate exactly and nothing is ever truncated or rounded away."""
     whole, remainder = divmod(ppm, 10_000)
-    text = f"{whole}.{remainder:04d}"[:-1]  # four fractional digits, then drop ppm's last one
-    return text.rstrip("0").rstrip(".") or "0"
+    return f"{whole}.{remainder:04d}".rstrip("0").rstrip(".")
 
 
 def show_clinical_fields(business: Business) -> bool:

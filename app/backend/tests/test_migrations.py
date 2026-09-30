@@ -434,13 +434,13 @@ async def _rate_columns_present() -> tuple[bool, bool, bool]:
         return tuple(present)
 
 
-async def test_migration_0077_converts_rates_ppm_and_preserves_an_issued_invoice(client):
+async def test_migration_0076_converts_rates_ppm_and_preserves_an_issued_invoice(client):
     """#119: every stored tax rate moves from basis points to parts per million, ×100. Proven
     against a real, already-issued invoice (through the ordinary `client` HTTP flow, the same
     one every other billing S1 test uses) rather than a hand-built row: downgrading to 0075
     puts `tax_component_rates`/`invoice_line_taxes` back in their pre-#119 shape (`rate_bp`,
     divided by 100 — exact, since every value here originated as a whole basis point ×100);
-    re-running 0077's own `upgrade()` must multiply them back ×100 and leave the invoice's
+    re-running 0076's own `upgrade()` must multiply them back ×100 and leave the invoice's
     cents amounts — never touched by either direction — bit for bit identical."""
     assert await _rate_columns_present() == (True, True, True)
 

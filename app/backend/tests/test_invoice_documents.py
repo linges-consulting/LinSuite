@@ -561,6 +561,10 @@ def test_rate_is_formatted_from_ppm_with_trailing_zeros_trimmed():
     assert _rate(130_000) == "13"
     assert _rate(99_750) == "9.975"  # QST, exact
     assert _rate(0) == "0"
+    # Whatever an administrator stored is what the receipt prints: every ppm is a whole
+    # ten-thousandth of a percent, so four decimals show any rate exactly, never truncated.
+    assert _rate(12_345) == "1.2345"
+    assert _rate(1) == "0.0001"
 
 
 def test_an_overridden_invoice_prints_the_billed_tax_not_the_computed_one():

@@ -1,7 +1,7 @@
 """Tax rates in parts per million, not basis points (#119): QST's 9.975% is 99_750 ppm exactly,
 where it was 998 whole basis points (9.98%, an over-charge) before.
 
-Revision ID: 0077
+Revision ID: 0076
 Revises: 0075
 Create Date: 2026-09-29
 
@@ -48,7 +48,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0077"
+revision: str = "0076"
 down_revision: str | None = "0075"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
