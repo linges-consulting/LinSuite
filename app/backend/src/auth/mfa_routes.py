@@ -129,7 +129,7 @@ async def start_enrolment(
     return EnrolmentOut(
         secret=secret,
         provisioning_uri=mfa.provisioning_uri(
-            secret, user.email, business.name if business else "LinSuite"
+            secret, user.email, business.name if business else None
         ),
     )
 
