@@ -148,6 +148,49 @@ test('enrolment shows a QR code, a typeable key, and the codes exactly once', as
   expect(screen.queryByRole('list', { name: 'Recovery codes' })).not.toBeInTheDocument()
 }, 15_000)
 
+// #117, spec #113: a fresh install's owner signs in, enrols the second factor the default
+// policy demands, and lands in Admin Mode on Home — the server opens the window in the same
+// `enrol/confirm` response this fake now mirrors (`try_first_run_admin_grant`).
+test('a forced first enrolment lands the owner in Admin Mode on Home, no second password', async () => {
+  stubApi({ signedIn: true, policyOn: true, firstRunGrant: true })
+  const user = userEvent.setup()
+
+  renderApp('/')
+  await screen.findByText('Set up your second factor')
+  await user.type(await screen.findByLabelText('Code from the app'), TOTP_CODE)
+  await user.click(screen.getByRole('button', { name: 'Confirm' }))
+  await screen.findByRole('list', { name: 'Recovery codes' })
+
+  await user.click(screen.getByRole('button', { name: 'I have saved them' }))
+
+  // Home, not Security — and already in Admin Mode, with no password dialog in the way. A
+  // generous timeout for the same reason `codes exactly once` above uses one: two round
+  // trips (invalidate, then re-read the session) under whatever jsdom worker load is current.
+  expect(
+    await screen.findByText('Your workspace is ready', {}, { timeout: 12_000 }),
+  ).toBeInTheDocument()
+  expect(await screen.findByRole('navigation', { name: 'Primary' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Switch mode — currently Admin Mode' })).toBeInTheDocument()
+  expect(screen.queryByRole('dialog', { name: 'Enter Admin Mode' })).not.toBeInTheDocument()
+}, 20_000)
+
+test('a voluntary enrolment from Security stays in whichever mode it was already in', async () => {
+  stubApi({ signedIn: true, policyOn: false })
+  const user = userEvent.setup()
+
+  renderApp('/security')
+  await user.click(await screen.findByRole('link', { name: 'Set up two-factor' }))
+  await user.type(await screen.findByLabelText('Code from the app'), TOTP_CODE)
+  await user.click(screen.getByRole('button', { name: 'Confirm' }))
+  await screen.findByRole('list', { name: 'Recovery codes' })
+
+  await user.click(screen.getByRole('button', { name: 'I have saved them' }))
+
+  // Ungated, so back to Security — never granted Admin Mode on the way.
+  expect(await screen.findByText('Two-factor authentication')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Switch mode — currently Staff Mode' })).toBeInTheDocument()
+})
+
 test('a wrong confirmation code does not enrol the account', async () => {
   stubApi({ signedIn: true, policyOn: true })
   const user = userEvent.setup()

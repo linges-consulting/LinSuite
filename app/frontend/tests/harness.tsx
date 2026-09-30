@@ -137,6 +137,15 @@ type Api = {
    */
   verifiedAgoMs?: number | null
   /**
+   * Opt-in only (#117, spec #113): a *forced* TOTP or email enrolment (`policyOn`, not yet
+   * `enrolled`) also opens a live Admin Mode window, the way `try_first_run_admin_grant`
+   * does on the real server. Off by default so every other `policyOn` test keeps landing in
+   * Staff Mode exactly as it always has — an account that lands in Admin Mode pulls in
+   * `ModeSwitcher`'s countdown and `useSession`'s five-second poll, which only the one test
+   * about this feature needs running.
+   */
+  firstRunGrant?: boolean
+  /**
    * An answer the test chooses, consulted before the fake's own behaviour. It exists for the
    * refusals the fake has no state for — being throttled is the server's business, and the
    * browser only ever sees the 429 it sends back.
@@ -189,6 +198,7 @@ export function stubApi({
   policyOn = false,
   emailOtpAllowed = false,
   verifiedAgoMs = null,
+  firstRunGrant = false,
   respond,
   brandingDocument,
 }: Api = {}) {
@@ -362,10 +372,18 @@ export function stubApi({
         if (body.code !== TOTP_CODE) {
           return forbidden('invalid_mfa_code', 'That code is not right.')
         }
+        const wasForced = !enrolled && policyOn && dualRole
         enrolled = true
         method = 'totp'
         verifiedAt = Date.now()
         liveRecoveryCodes = [...FRESH_CODES]
+        // #117, spec #113: the one place the real server (`try_first_run_admin_grant`)
+        // opens an Admin Mode window with no password — a forced first enrolment, on a
+        // business this fake always treats as not having dismissed onboarding yet.
+        if (wasForced && firstRunGrant) {
+          mode = 'admin'
+          grantExpiresAt = Date.now() + ADMIN_WINDOW_MS
+        }
         return Response.json({ recovery_codes: FRESH_CODES })
       }
       if (url === '/api/auth/mfa/enrol/email') {
@@ -380,11 +398,16 @@ export function stubApi({
       }
       if (url === '/api/auth/mfa/enrol/email/confirm') {
         if (body.code !== emailedCode) return forbidden('invalid_mfa_code', 'That code is not right.')
+        const wasForced = !enrolled && policyOn && dualRole
         emailedCode = null
         enrolled = true
         method = 'email'
         verifiedAt = Date.now()
         liveRecoveryCodes = [...FRESH_CODES]
+        if (wasForced && firstRunGrant) {
+          mode = 'admin'
+          grantExpiresAt = Date.now() + ADMIN_WINDOW_MS
+        }
         return Response.json({ recovery_codes: FRESH_CODES })
       }
       if (url === '/api/auth/mfa' && (init?.method ?? 'GET') === 'GET') {

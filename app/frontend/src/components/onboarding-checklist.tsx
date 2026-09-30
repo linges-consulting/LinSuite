@@ -5,35 +5,10 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
-import { dismissOnboarding, fetchOnboardingStatus, type OnboardingStepKey } from '@/lib/api'
+import { dismissOnboarding, fetchOnboardingStatus } from '@/lib/api'
 import { useCan } from '@/lib/capability-gate'
+import { STEP_LABEL } from '@/lib/onboarding-steps'
 import { ONBOARDING } from '@/lib/query-keys'
-
-const STEP_LABEL: Record<OnboardingStepKey, string> = {
-  business: 'Business details',
-  hours: 'Opening hours',
-  tax: 'Tax',
-  services: 'Services',
-  staff: 'Staff',
-  email: 'Email sending',
-  branding: 'Branding',
-}
-
-/**
- * Where a step's own Settings tab lives (`routes/settings.tsx`'s tab values) — #117's focused
- * step pages will replace this with something that also knows Back/Next; until then, a step
- * opens the tab it belongs to. `hours` opens Staff because hours are per-staff
- * (`staff-availability.tsx`'s dialog on a staff row) — there is no business-wide hours tab.
- */
-const STEP_TAB: Record<OnboardingStepKey, string> = {
-  business: 'business',
-  hours: 'staff',
-  tax: 'tax',
-  services: 'services',
-  staff: 'staff',
-  email: 'notifications',
-  branding: 'branding',
-}
 
 /**
  * "Get your business ready" (#116, spec #113): the seven-step setup checklist, Admin Mode,
@@ -97,7 +72,7 @@ export function OnboardingChecklist() {
         <ul className="divide-y">
           {data.steps.map((s) => (
             <li key={s.key} className="flex items-center justify-between gap-3 py-2">
-              <Link to={`/settings?tab=${STEP_TAB[s.key]}`} className="flex items-center gap-2 hover:underline">
+              <Link to={`/setup-checklist/${s.key}`} className="flex items-center gap-2 hover:underline">
                 {s.done ? (
                   <CheckCircle2 className="size-4 shrink-0 text-success" aria-hidden />
                 ) : (

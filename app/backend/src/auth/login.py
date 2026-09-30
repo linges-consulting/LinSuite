@@ -210,6 +210,11 @@ async def login(payload: LoginRequest, response: Response, db: SessionDep) -> Us
     # everywhere until one is presented. The password alone is not a session.
     if user.mfa_method is not None:
         await mfa_mod.begin_pending(claims)
+    # The one fact `modes.try_first_run_admin_grant` (#117, spec #113) is ever allowed to
+    # trust: a password was typed in this exact request. Marked unconditionally — whether the
+    # first-run grant ever spends it depends on what happens afterwards (`_complete_enrolment`
+    # is the only place that reads it), never on anything decided here.
+    await modes.mark_fresh_login(issued.jti)
     record_event(
         db,
         "login.succeeded",

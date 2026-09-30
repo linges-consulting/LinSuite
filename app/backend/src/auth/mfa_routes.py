@@ -211,6 +211,13 @@ async def _complete_enrolment(
     Without that, somebody who enrolled a minute ago would be challenged again on their way
     into Admin Mode — twice inside a minute, which is the unusable policy PRD §1 rejects.
     """
+    # Read before `user.mfa_method` changes on the next line: this is "was the business's
+    # policy actually forcing this account to enrol right now", which is only ever true
+    # before the enrolment it forced has happened. A voluntary enrolment from the Security
+    # page — the account already had a choice, in whatever mode it was already using — must
+    # never reach `try_first_run_admin_grant` below; only the forced first-run kind spec #113
+    # describes does.
+    was_forced = await mfa.enrolment_required(db, user)
     user.mfa_method = method
     user.mfa_enrolled_at = datetime.now(UTC)
     if method == mfa.EMAIL:
@@ -229,6 +236,11 @@ async def _complete_enrolment(
     await db.commit()
     await mfa.forget_staged_secret(user)
     await mfa.mark_verified(claims)
+    # #117, spec #113: this is the moment a fresh install's forced enrolment finishes — the
+    # one place `try_first_run_admin_grant` gets a chance to fire, and only when `was_forced`
+    # says the business's policy is what put this account through enrolment just now.
+    if was_forced and await modes.try_first_run_admin_grant(claims, user, db):
+        await db.commit()
     mfa.notify(user.email, mfa.ENROLLED_SUBJECT, mfa.ENROLLED_MESSAGE)
     log.info("auth: %s enrolled a second factor (%s)", user.email, method)
     return RecoveryCodesOut(recovery_codes=codes)
