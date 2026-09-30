@@ -49,6 +49,13 @@ same bad shape this docstring used to warn about, just moved. SMS provider selec
 (`business.sms_enabled` + Twilio credentials, mirroring `_tenant_provider`) is Task 4/5's job;
 this module only adds the adapter and the pure `sms_ready(business)` check they call first.
 
+**`MailgunProvider` (#115)** is a third real email sender, alongside `ResendProvider`/
+`SmtpProvider`: Mailgun's messages API over `httpx` (Basic Auth, user `api`, the API key as the
+password), with a `region` choosing the US or EU API host. It exists because DigitalOcean
+blocks outbound SMTP on new droplets — an HTTP-based sender is the one that actually reaches
+the network there. Classified the same way `_raise_for_delivery` already classifies
+Resend/Twilio: a 4xx (bad key, bad payload) is permanent, a 5xx is worth another try.
+
 **`PermanentDeliveryError` (Task 4, #11)** is how a provider tells `notifications/tasks.py`
 that retrying is pointless: a 4xx from Resend/Twilio (bad address/number, revoked credentials)
 or an SMTP auth/recipient-refused error, versus a plain `Exception` for anything worth another
@@ -76,6 +83,7 @@ log = logging.getLogger(__name__)
 
 _RESEND_ENDPOINT = "https://api.resend.com/emails"
 _TWILIO_ENDPOINT = "https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
+_MAILGUN_HOSTS = {"us": "https://api.mailgun.net", "eu": "https://api.eu.mailgun.net"}
 _HTTP_TIMEOUT = 10.0
 _SMTP_TIMEOUT = 10
 _DEFAULT_SMTP_PORT = 587
@@ -292,6 +300,63 @@ class SmtpProvider:
             raise
 
 
+class MailgunProvider:
+    """Mailgun's messages API directly over `httpx` (#115) — the same no-SDK shape as
+    `ResendProvider`/`TwilioProvider`: one endpoint, a form-encoded POST, no reason to add the
+    SDK. It exists because DigitalOcean blocks outbound SMTP on new droplets, so a tenant there
+    needs an HTTP-based sender that actually reaches the network.
+
+    Basic auth with the literal username `api` and the API key as the password (Mailgun's own
+    convention, unlike Resend's bearer token). `domain` names the sending domain in the path;
+    `region` picks the US (`api.mailgun.net`) or EU (`api.eu.mailgun.net`) host — an EU account
+    only accepts mail through the EU host.
+
+    `client` is for tests only, the same injectable-transport shape `ResendProvider` uses.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        domain: str,
+        region: str,
+        from_address: str,
+        *,
+        client: httpx.Client | None = None,
+    ) -> None:
+        self._api_key = api_key
+        self._domain = domain
+        self._region = region
+        self._from_address = from_address
+        self._client = client
+
+    def send_email(
+        self,
+        to: str,
+        subject: str,
+        text: str,
+        html: str | None = None,
+        attachments: list[EmailAttachment] | None = None,
+    ) -> None:
+        host = _MAILGUN_HOSTS.get(self._region, _MAILGUN_HOSTS["us"])
+        url = f"{host}/v3/{self._domain}/messages"
+        data = {"from": self._from_address, "to": to, "subject": subject, "text": text}
+        if html is not None:
+            data["html"] = html
+        # Mailgun's own multipart field for an attachment: `attachment`, repeated once per
+        # file — unlike Resend's JSON/base64 shape, this is a plain form POST, so the raw
+        # bytes go straight in rather than being encoded first.
+        files = [
+            ("attachment", (a.filename, a.content, a.content_type)) for a in (attachments or [])
+        ]
+        auth = ("api", self._api_key)
+        if self._client is not None:
+            response = self._client.post(url, data=data, files=files or None, auth=auth)
+        else:
+            with httpx.Client(timeout=_HTTP_TIMEOUT) as owned:
+                response = owned.post(url, data=data, files=files or None, auth=auth)
+        _raise_for_delivery(response)
+
+
 class TwilioProvider:
     """Twilio's REST API directly over `httpx` (owner decision, m3.md) — one endpoint, HTTP
     Basic Auth with the account SID as username and the auth token as password, no SDK, the
@@ -333,6 +398,7 @@ PROVIDERS: dict[str, Callable[..., NotificationProvider]] = {
     "console": ConsoleProvider,
     "resend": ResendProvider,
     "smtp": SmtpProvider,
+    "mailgun": MailgunProvider,
     "twilio": TwilioProvider,
 }
 
@@ -350,6 +416,13 @@ def email_ready(business: "Business") -> bool:
         )
     if business.email_sender == "smtp":
         return bool(business.smtp_host and business.smtp_from_address and business.smtp_verified_at)
+    if business.email_sender == "mailgun":
+        return bool(
+            business.mailgun_api_key_encrypted
+            and business.mailgun_domain
+            and business.mailgun_from_address
+            and business.mailgun_verified_at
+        )
     return False
 
 
@@ -383,6 +456,13 @@ def _tenant_provider(business: "Business") -> NotificationProvider:
                 else None
             ),
             from_address=business.smtp_from_address,
+        )
+    if business.email_sender == "mailgun":
+        return PROVIDERS["mailgun"](
+            api_key=decrypt_credential(business.mailgun_api_key_encrypted or ""),
+            domain=business.mailgun_domain,
+            region=business.mailgun_region or "us",
+            from_address=business.mailgun_from_address,
         )
     raise RuntimeError(f"businesses.email_sender={business.email_sender!r} is not configured.")
 

@@ -950,7 +950,7 @@ export type NotificationTemplate = {
 }
 
 export type NotificationSettings = {
-  email_sender: 'resend' | 'smtp' | null
+  email_sender: 'resend' | 'smtp' | 'mailgun' | null
   /** Read straight off `notifications/providers.py::email_ready` — the one fact the banner is
    *  built from, never inferred here from which fields happen to be filled in. */
   email_ready: boolean
@@ -964,6 +964,12 @@ export type NotificationSettings = {
   smtp_from_address: string | null
   smtp_password_set: boolean
   smtp_verified_at: string | null
+  // --- Mailgun sender (#115) — a third choice, same write-only-secret shape as Resend/SMTP ---
+  mailgun_domain: string | null
+  mailgun_region: 'us' | 'eu' | null
+  mailgun_from_address: string | null
+  mailgun_api_key_set: boolean
+  mailgun_verified_at: string | null
   sms_enabled: boolean
   sms_ready: boolean
   twilio_account_sid: string | null
@@ -990,7 +996,7 @@ export type NotificationSettings = {
  *  never means retyping the others. `email_sender: 'none'` is the explicit clear; omitting
  *  the field (as every other field can) means "leave it as it is". */
 export type NotificationSettingsChange = Partial<{
-  email_sender: 'resend' | 'smtp' | 'none'
+  email_sender: 'resend' | 'smtp' | 'mailgun' | 'none'
   resend_from_address: string | null
   resend_api_key: string
   smtp_host: string | null
@@ -998,6 +1004,10 @@ export type NotificationSettingsChange = Partial<{
   smtp_username: string | null
   smtp_password: string
   smtp_from_address: string | null
+  mailgun_domain: string | null
+  mailgun_region: 'us' | 'eu'
+  mailgun_api_key: string
+  mailgun_from_address: string | null
   sms_enabled: boolean
   twilio_account_sid: string | null
   twilio_auth_token: string

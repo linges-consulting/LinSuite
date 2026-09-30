@@ -210,7 +210,7 @@ class NotificationSettingsOut(BaseModel):
     trigger layer (`notifications/triggers.py::dispatch`) can never disagree about whether a
     send would actually go out."""
 
-    email_sender: Literal["resend", "smtp"] | None
+    email_sender: Literal["resend", "smtp", "mailgun"] | None
     email_ready: bool
     resend_from_address: str | None
     resend_api_key_set: bool
@@ -221,6 +221,11 @@ class NotificationSettingsOut(BaseModel):
     smtp_from_address: str | None
     smtp_password_set: bool
     smtp_verified_at: datetime | None
+    mailgun_domain: str | None
+    mailgun_region: Literal["us", "eu"] | None
+    mailgun_from_address: str | None
+    mailgun_api_key_set: bool
+    mailgun_verified_at: datetime | None
     sms_enabled: bool
     sms_ready: bool
     twilio_account_sid: str | None
@@ -260,7 +265,7 @@ class NotificationSettingsChange(BaseModel):
     expressed. `"none"` is `email_sender`'s explicit clear: `null` already means "untouched", so
     turning email off needs a value of its own."""
 
-    email_sender: Literal["resend", "smtp", "none"] | None = None
+    email_sender: Literal["resend", "smtp", "mailgun", "none"] | None = None
     resend_from_address: OptionalEmail = None
     resend_api_key: str | None = None
     smtp_host: OptionalText = None
@@ -268,6 +273,10 @@ class NotificationSettingsChange(BaseModel):
     smtp_username: OptionalText = None
     smtp_password: str | None = None
     smtp_from_address: OptionalEmail = None
+    mailgun_domain: OptionalText = None
+    mailgun_region: Literal["us", "eu"] | None = None
+    mailgun_api_key: str | None = None
+    mailgun_from_address: OptionalEmail = None
     sms_enabled: bool | None = None
     twilio_account_sid: OptionalText = None
     twilio_auth_token: str | None = None
@@ -353,6 +362,11 @@ def _settings_out(
         smtp_from_address=business.smtp_from_address,
         smtp_password_set=bool(business.smtp_password_encrypted),
         smtp_verified_at=business.smtp_verified_at,
+        mailgun_domain=business.mailgun_domain,
+        mailgun_region=business.mailgun_region,  # type: ignore[arg-type]
+        mailgun_from_address=business.mailgun_from_address,
+        mailgun_api_key_set=bool(business.mailgun_api_key_encrypted),
+        mailgun_verified_at=business.mailgun_verified_at,
         sms_enabled=business.sms_enabled,
         sms_ready=sms_ready(business),
         twilio_account_sid=business.twilio_account_sid,
@@ -404,6 +418,14 @@ async def update_notification_settings(
         candidates["smtp_password_encrypted"] = encrypt_credential(payload.smtp_password)
     if payload.smtp_from_address is not None:
         candidates["smtp_from_address"] = payload.smtp_from_address
+    if payload.mailgun_domain is not None:
+        candidates["mailgun_domain"] = payload.mailgun_domain
+    if payload.mailgun_region is not None:
+        candidates["mailgun_region"] = payload.mailgun_region
+    if payload.mailgun_api_key:
+        candidates["mailgun_api_key_encrypted"] = encrypt_credential(payload.mailgun_api_key)
+    if payload.mailgun_from_address is not None:
+        candidates["mailgun_from_address"] = payload.mailgun_from_address
     if payload.sms_enabled is not None:
         candidates["sms_enabled"] = payload.sms_enabled
     if payload.twilio_account_sid is not None:
@@ -455,6 +477,14 @@ async def update_notification_settings(
     } & set(changed):
         business.smtp_verified_at = None
         changed.append("smtp_verified_at")
+    if business.mailgun_verified_at is not None and {
+        "mailgun_domain",
+        "mailgun_region",
+        "mailgun_api_key_encrypted",
+        "mailgun_from_address",
+    } & set(changed):
+        business.mailgun_verified_at = None
+        changed.append("mailgun_verified_at")
 
     if changed:
         # Field names, not values: three of these are secrets, and the rest have no reason to
@@ -496,6 +526,8 @@ async def send_test_email(
     now = datetime.now(UTC)
     if business.email_sender == "resend":
         business.resend_domain_verified_at = now
+    elif business.email_sender == "mailgun":
+        business.mailgun_verified_at = now
     else:
         business.smtp_verified_at = now
     record_event(

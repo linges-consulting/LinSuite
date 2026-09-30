@@ -30,7 +30,8 @@ import {
 } from '@/lib/api'
 import { NOTIFICATION_SETTINGS } from '@/lib/query-keys'
 
-type EmailSender = 'resend' | 'smtp' | 'none'
+type EmailSender = 'resend' | 'smtp' | 'mailgun' | 'none'
+type MailgunRegion = 'us' | 'eu'
 
 type Draft = {
   email_sender: EmailSender
@@ -41,6 +42,12 @@ type Draft = {
   smtp_username: string
   smtp_password: string
   smtp_from_address: string
+  /** Mailgun sender (#115) — a third choice next to Resend/SMTP, over its HTTP API so
+   *  DigitalOcean's blocked outbound SMTP doesn't stop delivery. */
+  mailgun_domain: string
+  mailgun_region: MailgunRegion
+  mailgun_api_key: string
+  mailgun_from_address: string
   sms_enabled: boolean
   twilio_account_sid: string
   twilio_auth_token: string
@@ -72,6 +79,10 @@ function draftFrom(data: NotificationSettings): Draft {
     smtp_username: data.smtp_username ?? '',
     smtp_password: '',
     smtp_from_address: data.smtp_from_address ?? '',
+    mailgun_domain: data.mailgun_domain ?? '',
+    mailgun_region: data.mailgun_region ?? 'us',
+    mailgun_api_key: '',
+    mailgun_from_address: data.mailgun_from_address ?? '',
     sms_enabled: data.sms_enabled,
     twilio_account_sid: data.twilio_account_sid ?? '',
     twilio_auth_token: '',
@@ -97,6 +108,9 @@ function toChange(draft: Draft): NotificationSettingsChange {
     smtp_port: draft.smtp_port ? Number(draft.smtp_port) : null,
     smtp_username: draft.smtp_username || null,
     smtp_from_address: draft.smtp_from_address || null,
+    mailgun_domain: draft.mailgun_domain || null,
+    mailgun_region: draft.mailgun_region,
+    mailgun_from_address: draft.mailgun_from_address || null,
     sms_enabled: draft.sms_enabled,
     twilio_account_sid: draft.twilio_account_sid || null,
     twilio_from_number: draft.twilio_from_number || null,
@@ -115,6 +129,7 @@ function toChange(draft: Draft): NotificationSettingsChange {
   }
   if (draft.resend_api_key) change.resend_api_key = draft.resend_api_key
   if (draft.smtp_password) change.smtp_password = draft.smtp_password
+  if (draft.mailgun_api_key) change.mailgun_api_key = draft.mailgun_api_key
   if (draft.twilio_auth_token) change.twilio_auth_token = draft.twilio_auth_token
   return change
 }
@@ -262,6 +277,7 @@ function EmailSection({ data, form, set, errors }: SectionProps) {
             <SelectItem value="none">None</SelectItem>
             <SelectItem value="resend">Resend</SelectItem>
             <SelectItem value="smtp">SMTP</SelectItem>
+            <SelectItem value="mailgun">Mailgun</SelectItem>
           </SelectContent>
         </Select>
       </Field>
@@ -353,6 +369,65 @@ function EmailSection({ data, form, set, errors }: SectionProps) {
               type="email"
               value={form.smtp_from_address}
               onChange={(e) => set({ smtp_from_address: e.target.value })}
+            />
+          </Field>
+        </>
+      )}
+
+      {form.email_sender === 'mailgun' && (
+        <>
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="Domain" htmlFor="mailgun-domain" error={errors.mailgun_domain}>
+              <Input
+                id="mailgun-domain"
+                placeholder="mail.example.com"
+                value={form.mailgun_domain}
+                onChange={(e) => set({ mailgun_domain: e.target.value })}
+              />
+            </Field>
+            <Field label="Region" htmlFor="mailgun-region">
+              <Select
+                value={form.mailgun_region}
+                onValueChange={(value) => set({ mailgun_region: value as MailgunRegion })}
+              >
+                <SelectTrigger id="mailgun-region" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="us">US</SelectItem>
+                  <SelectItem value="eu">EU</SelectItem>
+                </SelectContent>
+              </Select>
+            </Field>
+          </div>
+          <Field
+            label="API key"
+            htmlFor="mailgun-key"
+            hint={
+              data.mailgun_api_key_set
+                ? 'A key is already stored. Leave this blank to keep it, or enter a new one to replace it.'
+                : 'Not set yet.'
+            }
+          >
+            <Input
+              id="mailgun-key"
+              type="password"
+              autoComplete="new-password"
+              placeholder={data.mailgun_api_key_set ? '••••••••••••' : 'key-...'}
+              value={form.mailgun_api_key}
+              onChange={(e) => set({ mailgun_api_key: e.target.value })}
+            />
+          </Field>
+          <Field
+            label="From address"
+            htmlFor="mailgun-from"
+            error={errors.mailgun_from_address}
+          >
+            <Input
+              id="mailgun-from"
+              type="email"
+              value={form.mailgun_from_address}
+              onChange={(e) => set({ mailgun_from_address: e.target.value })}
             />
           </Field>
         </>
