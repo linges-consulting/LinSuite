@@ -57,6 +57,37 @@ Conventions used below:
 7. `docker compose up -d`.
 8. Continue at [§2 First-run setup](#2-first-run-setup).
 
+### Public VPS with Docker Compose (RackNerd and similar hosts)
+
+The base Compose file runs Vite's development server and permits plain HTTP for local/on-prem
+setup. On a public VPS, apply `infra/compose.production.yaml` as well. It builds the React app
+into a static Nginx image, keeps only Traefik's 80/443 ports published, redirects HTTP to HTTPS,
+and obtains a Let's Encrypt certificate through HTTP-01. Nginx is internal to the Compose
+network; Traefik remains the public router for both the frontend and `/api`.
+
+1. Install Docker Engine and the Compose plugin from Docker's Ubuntu repository, and clone the
+   repository at a reviewed release commit. Use a VM sized to build and run the database, API,
+   worker, scheduler, backup job, and frontend together; 2 GB RAM is too tight for live use.
+   Plan disk growth for PostgreSQL, document uploads, images, and logs.
+2. Point only the app hostname's DNS `A` record at the VPS. Leave the clinic's root, `www`, and
+   mail records untouched. Port 80 must reach Traefik for Let's Encrypt HTTP-01, and port 443
+   must reach it for users. Do not publish PostgreSQL, Redis, the API, or the frontend directly.
+   Docker-published ports can bypass UFW, so review Compose `ports:` before every deployment.
+3. Create `.env` with mode `0600`. Set `APP_HOST` to the exact hostname, `APP_BASE_URL` to its
+   `https://` URL, `ACME_EMAIL` to a monitored mailbox, and keep `COOKIE_SECURE=true`. Replace
+   every placeholder secret and escrow the encryption keys as described in §3. Configure an
+   offsite backup target as described in §6; the default `BACKUP_TARGET=local` is for tests.
+4. Validate the merged configuration, then build and start it from the repository root:
+   ```sh
+   docker compose --env-file .env -f infra/compose.yaml -f infra/compose.production.yaml config --quiet
+   docker compose --env-file .env -f infra/compose.yaml -f infra/compose.production.yaml up -d --build
+   ```
+5. Check `docker compose ps` with both `-f` flags and `--env-file .env`: `db`, `redis`, and
+   `frontend` should be healthy, and `app`, `worker`, `beat`, `backup`, and `traefik` running.
+   Verify the domain's HTTPS certificate, an HTTP-to-HTTPS redirect, and `/api/health` before
+   first-run setup (§2).
+   Complete the offsite backup and restore checks (§6–8) before entering real client data.
+
 ### On-prem
 
 1. Clone the repository onto the customer's own server the same way as above.
@@ -236,6 +267,10 @@ Vendor copy:   stored offline in the vendor's per-tenant
 ```
 
 ## 4. On-prem TLS
+
+The public-VPS production overlay in §1 uses Let's Encrypt HTTP-01 and manages its own
+certificate. This section covers deployments using the base Compose file and their on-prem
+certificate choices.
 
 Decide which of these three applies, in this order:
 
