@@ -7,6 +7,7 @@ import { CancelConfirm } from '@/components/calendar/cancel-confirm'
 import { Grid } from '@/components/calendar/grid'
 import { OverrideConfirm } from '@/components/calendar/override-confirm'
 import { PackagePicker } from '@/components/calendar/package-picker'
+import { PractitionersPicker } from '@/components/calendar/practitioners-picker'
 import { SlotButtons } from '@/components/calendar/slot-buttons'
 import type { Change, Column, Prefill } from '@/components/calendar/types'
 import { ClassificationBadge } from '@/components/classification-badge'
@@ -68,6 +69,7 @@ import { useBranding } from '@/lib/branding'
 import { clock, today, weekdayLabel } from '@/lib/calendar/format'
 import { describeRules, whyNotOverride } from '@/lib/calendar/overrides'
 import { addDays, localDate } from '@/lib/calendar/pixels'
+import { usePractitionerSelection } from '@/lib/calendar/practitioners'
 import { formatPhone } from '@/lib/phone'
 import { invalidateScheduling } from '@/lib/query-client'
 import { APPOINTMENTS, AVAILABILITY, CATALOG, CUSTOMERS, ROSTER, SCHEDULE } from '@/lib/query-keys'
@@ -108,7 +110,6 @@ export function SchedulePage() {
   const navigate = useNavigate()
   const [chosen, setChosen] = useState<string | null>(null)
   const [view, setView] = useState<'day' | 'week'>('day')
-  const [staffFilter, setStaffFilter] = useState<string>(EVERYONE)
   const [booking, setBooking] = useState<Prefill | 'blank' | null>(null)
   // The phone lookup's and the screen-pop panel's quick-book shortcut (Phase 14, #16): a
   // customer handed over via router state, not a query param — it is already the full
@@ -129,11 +130,16 @@ export function SchedulePage() {
     { appointment: Appointment; credits: PackageCredit[] } | null
   >(null)
   const roster = useQuery({ queryKey: ROSTER, queryFn: fetchRoster })
-  const ownStaffId = roster.data?.find((m) => m.user_id === user?.id)?.id ?? null
+  const rosterData = roster.data ?? []
+  const ownStaffId = rosterData.find((m) => m.user_id === user?.id)?.id ?? null
+  const { practitioners, selected, setSelected } = usePractitionerSelection(rosterData, user?.id)
   // Until the zone is known there is no "today" to ask for.
   const date = chosen ?? (zone ? today(zone) : null)
   const range = date ? (view === 'day' ? [date, date] : weekOf(date)) : null
-  const filter = view === 'week' && staffFilter !== EVERYONE ? staffFilter : undefined
+  // One practitioner picked (the common case — a practitioner's own column, or the week
+  // view's per-person mode): the server narrows the read. More than one: the server has no
+  // way to ask for a subset, so the full read is filtered on the client below.
+  const filter = selected.size === 1 ? [...selected][0] : undefined
   const key = range ? [...SCHEDULE, range[0], range[1], filter ?? null, showCancelled] : SCHEDULE
   const schedule = useQuery({
     queryKey: key,
@@ -242,7 +248,16 @@ export function SchedulePage() {
   const data = schedule.data!
   const todayDate = today(data.timezone)
   const shift = (days: number) => setChosen(addDays(date, days))
-  const columns = columnsFor(view, data, range, todayDate, filter ?? null)
+  const rosterIds = new Set(rosterData.map((m) => m.id))
+  const columns = columnsFor(view, data, range, todayDate, filter ?? null, selected, rosterIds)
+  // Day view never needs this: an unselected person's appointments have no column to land
+  // in. The week view draws every appointment for the date into one shared column, so a
+  // server read that came back unfiltered (more than one practitioner picked) is narrowed
+  // here instead.
+  const gridSchedule: Schedule =
+    view === 'week' && !filter
+      ? { ...data, appointments: data.appointments.filter((a) => selected.has(a.staff.id)) }
+      : data
 
   return (
     <div className="flex flex-col gap-4">
@@ -280,21 +295,12 @@ export function SchedulePage() {
               <TabsTrigger value="week">Week</TabsTrigger>
             </TabsList>
           </Tabs>
-          {view === 'week' && (
-            <Select value={staffFilter} onValueChange={setStaffFilter}>
-              <SelectTrigger aria-label="Staff member" className="w-44">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={EVERYONE}>Everyone</SelectItem>
-                {(roster.data ?? []).map((m) => (
-                  <SelectItem key={m.id} value={m.id}>
-                    {m.display_name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          )}
+          <PractitionersPicker
+            practitioners={practitioners}
+            selected={selected}
+            ownId={ownStaffId}
+            onChange={setSelected}
+          />
           <label className="flex items-center gap-1.5 text-sm text-muted-foreground">
             <Checkbox
               checked={showCancelled}
@@ -317,7 +323,7 @@ export function SchedulePage() {
         />
       ) : (
         <Grid
-          schedule={data}
+          schedule={gridSchedule}
           columns={columns}
           canManage={canManage}
           onCreate={setBooking}
@@ -423,9 +429,6 @@ type PendingMove = MoveVariables & { rules: OverrideRule[] }
  *  booking group. */
 type CancelTarget = { kind: 'appointment'; appointment: Appointment } | { kind: 'group'; groupId: string }
 
-/** Radix refuses an empty `SelectItem` value; ids are UUIDs, so nothing collides with this. */
-const EVERYONE = 'everyone'
-
 /** The grid's instants carry milliseconds, the server's do not; the moment is the same. */
 const sameInstant = (a: string, b: string) => new Date(a).getTime() === new Date(b).getTime()
 
@@ -440,7 +443,13 @@ function weekOf(date: string): [string, string] {
 /**
  * The column axis. Day view: the staff working that day, or with something on it, in roster
  * order — and everybody when nobody is, so an unconfigured week is a dimmed grid rather than
- * a blank one. Week view: the seven dates.
+ * a blank one — narrowed to the Practitioners picker's selection. Week view: the seven dates.
+ *
+ * **The picker never hides somebody who still has a card here.** `rosterIds` is the active
+ * roster (what the picker offers); a staff id outside it is somebody deactivated since —
+ * their column stays, the way it always has (`scheduling/schedule.py`'s own reason for
+ * keeping a deactivated person's column), because the picker cannot be asked to pick back in
+ * a person it never lists.
  */
 function columnsFor(
   view: 'day' | 'week',
@@ -448,6 +457,8 @@ function columnsFor(
   range: string[],
   todayDate: string,
   staffFilter: string | null,
+  selectedIds: Set<string>,
+  rosterIds: Set<string>,
 ): Column[] {
   if (view === 'week') {
     return Array.from({ length: 7 }, (_, i) => addDays(range[0], i)).map((date) => {
@@ -468,7 +479,8 @@ function columnsFor(
   for (const a of schedule.appointments) {
     if (localDate(new Date(a.starts_at), schedule.timezone) === date) working.add(a.staff.id)
   }
-  const staff = working.size > 0 ? schedule.staff.filter((s) => working.has(s.id)) : schedule.staff
+  const candidates = working.size > 0 ? schedule.staff.filter((s) => working.has(s.id)) : schedule.staff
+  const staff = candidates.filter((s) => selectedIds.has(s.id) || !rosterIds.has(s.id))
   return staff.map((s) => ({
     key: s.id,
     date,

@@ -210,7 +210,7 @@ function renderSettings() {
 }
 
 async function openProducts(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('tab', { name: 'Products' }))
+  await user.click(await screen.findByRole('button', { name: 'Products' }))
   await screen.findByText('Shampoo')
 }
 

@@ -744,6 +744,7 @@ async def test_the_roster_every_scheduler_reads_is_active_staff_in_column_order(
         "dark_hex",
         "sort_order",
         "user_id",
+        "is_practitioner",
     }
 
 

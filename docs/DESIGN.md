@@ -85,10 +85,15 @@ Weight carries hierarchy: 600 titles, 500 labels/nav, 400 body. No display sizes
 
 ## Tabs
 
-- **Page-level sections** (Settings, Billing, Reports) use the shadcn Tabs `line` variant: natural-width
-  labels, muted when inactive, a foreground underline on the active one.
-- **In-page toggles and second-level tabs** (Schedule's Day/Week, Settings → Resources' Spaces/Equipment)
-  keep the default segmented pill, so a control never looks like navigation and underlines never nest.
+- **Page-level sections** (Billing, Reports) use the shadcn Tabs `line` variant: natural-width
+  labels, muted when inactive, a foreground underline on the active one. **Settings is the
+  exception**: fourteen sections stopped fitting one row, so it uses the collapsible Settings
+  sidebar (`components/settings-sidebar.tsx`) instead — see Layout below.
+- **In-page toggles** (Schedule's Day/Week) keep the default segmented pill, so a control never
+  looks like navigation.
+- **Sub-page tabs** — a page's own second-level tabs, including Settings → Resources'
+  Spaces/Equipment — use the `line` variant too: they are still page-level navigation, just
+  nested one level under a sidebar item or a top-level tab.
 
 ## Spacing, radius, elevation
 
@@ -103,11 +108,22 @@ Sidebar 240px (`w-60`) with brand mark + name, primary nav (icon + label, active
 overlay drawer below `md` with a `bg-black/50` scrim. Top bar: page `h1` left, actions right. Content in `<main>`.
 One primary action per screen. Destructive actions sit apart from primary ones and confirm first.
 
+**Settings' own sidebar** (`settings-sidebar.tsx`) is a second, nested rail beside the panel
+content — not the app shell's primary sidebar, and not the shadcn `Sidebar` primitive (its
+`SidebarProvider`/cookie and full-bleed layout assumptions are built for the one app-level
+sidebar; a second instance nested inside a page fights both). Built from `Collapsible` +
+`Button` + `Tooltip` instead: a toggle collapses the whole rail to icons-only with tooltips,
+each section collapses independently via `Collapsible`, and both states persist to
+`localStorage` per device (try/catch around every access — it is a convenience, never
+load-bearing). Below `md` it becomes a native `<select>` grouped by section rather than a
+second drawer/sheet implementation next to the app shell's own.
+
 ## Components
 
 shadcn/ui (Radix, `radix-nova` preset) in `src/components/ui/` — vendored, edit freely but keep the API.
 Installed: button, input, label, card, dialog, dropdown-menu, table, sonner (toasts), tabs, badge, skeleton,
-popover, command (+ its input-group/textarea dependencies — the searchable-list half of a combobox).
+popover, command (+ its input-group/textarea dependencies — the searchable-list half of a combobox),
+collapsible, tooltip.
 Add more with `npx shadcn@latest add <name>` from `app/frontend`. The generator writes
 `import { cn } from "cn"` — repoint it at `@/lib/utils` and do **not** install the `cn`
 package to make the error go away: it is a real package (the CLI's own dependency) that
