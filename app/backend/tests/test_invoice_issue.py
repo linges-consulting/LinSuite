@@ -313,7 +313,7 @@ async def test_issuing_with_a_current_approved_override_uses_the_override_total(
 
 async def test_an_issued_invoice_never_changes_when_live_definitions_change_afterward(client):
     await as_admin(client)
-    tax = await make_tax_component(client, rate_bp=500)
+    tax = await make_tax_component(client, rate_ppm=50_000)
     bill_id, service_id = await complete_a_visit(
         client, price_cents=10000, tax_component_keys=["GST"]
     )
@@ -339,7 +339,7 @@ async def test_an_issued_invoice_never_changes_when_live_definitions_change_afte
             {"id": discount["id"]},
         )
         await db.execute(
-            text("UPDATE tax_component_rates SET rate_bp = 9999 WHERE component_id = :id"),
+            text("UPDATE tax_component_rates SET rate_ppm = 999900 WHERE component_id = :id"),
             {"id": tax["id"]},
         )
         await db.commit()
@@ -416,7 +416,7 @@ TRIGGERS = {
 _NOOP_SET = {
     "invoice_lines": "price_cents = price_cents",
     "invoice_line_discounts": "discount_name = discount_name",
-    "invoice_line_taxes": "rate_bp = rate_bp",
+    "invoice_line_taxes": "rate_ppm = rate_ppm",
 }
 
 

@@ -5,14 +5,20 @@ same split `tests/test_classification.py` uses for `customers/classification.py`
 follows m4.md's own list for this ground: inclusive/exclusive entry, multiple independent
 components, exempt components, effective-date boundaries, half-cent rounding, line-versus-
 total reconciliation.
+
+`rate_ppm` is parts per million (#119): 1% is 10_000 ppm, so a rate that used to be `N` whole
+basis points is `N * 100` ppm — `test_ppm_scale_matches_old_bp_results_exactly` below proves
+every whole-bp rate (5%, 7%, 13%, 15%) still produces the identical cents on the new scale, and
+`test_qst_is_exact_at_the_new_scale` proves the one rate that whole basis points could never
+hold exactly (QST, 9.975%) now can.
 """
 
 from datetime import date
 
-from billing.tax import ComponentRate, compute_line_tax, invoice_tax_totals, resolve_rate_bp
+from billing.tax import ComponentRate, compute_line_tax, invoice_tax_totals, resolve_rate_ppm
 
-GST = ComponentRate("GST", 500)  # 5%
-PST = ComponentRate("PST", 700)  # 7%, BC's own rate — GST yes, PST also yes here
+GST = ComponentRate("GST", 50_000)  # 5%, in ppm (100x the old bp value)
+PST = ComponentRate("PST", 70_000)  # 7%, BC's own rate — GST yes, PST also yes here
 EXEMPT = ComponentRate("PST", 0)  # explicitly listed, but zero: never inferred, always stated
 
 
@@ -40,7 +46,7 @@ def test_exclusive_half_up_rounding():
     # 333 cents * 15% = 49.95 -> half-up to 50, not 49 (banker's rounding would give 50 too,
     # but 332 * 15% = 49.8 would round to 50 either way; this value is chosen so ROUND_HALF_UP
     # and ROUND_HALF_EVEN would actually disagree at the *next* cent: 330 * 15% = 49.5 exactly).
-    fifteen_pct = ComponentRate("VAT", 1500)
+    fifteen_pct = ComponentRate("VAT", 150_000)  # 15%, in ppm
     line = compute_line_tax(330, [fifteen_pct], "exclusive")
     assert line.component_cents == {"VAT": 50}  # 49.5 rounds up, never down or to even
     assert line.total_cents == 380
@@ -131,38 +137,76 @@ def test_invoice_tax_totals_empty():
     assert invoice_tax_totals([]) == {}
 
 
-# --- resolve_rate_bp: effective-date boundaries -----------------------------------------
+# --- resolve_rate_ppm: effective-date boundaries -----------------------------------------
 
 
-def test_resolve_rate_bp_within_a_range():
-    history = [(date(2024, 1, 1), date(2025, 1, 1), 500)]
-    assert resolve_rate_bp(history, date(2024, 6, 1)) == 500
+def test_resolve_rate_ppm_within_a_range():
+    history = [(date(2024, 1, 1), date(2025, 1, 1), 50_000)]
+    assert resolve_rate_ppm(history, date(2024, 6, 1)) == 50_000
 
 
-def test_resolve_rate_bp_effective_from_is_inclusive():
-    history = [(date(2024, 1, 1), date(2025, 1, 1), 500)]
-    assert resolve_rate_bp(history, date(2024, 1, 1)) == 500
+def test_resolve_rate_ppm_effective_from_is_inclusive():
+    history = [(date(2024, 1, 1), date(2025, 1, 1), 50_000)]
+    assert resolve_rate_ppm(history, date(2024, 1, 1)) == 50_000
 
 
-def test_resolve_rate_bp_effective_to_is_exclusive():
-    history = [(date(2024, 1, 1), date(2025, 1, 1), 500)]
-    assert resolve_rate_bp(history, date(2025, 1, 1)) is None
+def test_resolve_rate_ppm_effective_to_is_exclusive():
+    history = [(date(2024, 1, 1), date(2025, 1, 1), 50_000)]
+    assert resolve_rate_ppm(history, date(2025, 1, 1)) is None
 
 
-def test_resolve_rate_bp_before_any_rate_existed():
-    history = [(date(2024, 1, 1), None, 500)]
-    assert resolve_rate_bp(history, date(2023, 12, 31)) is None
+def test_resolve_rate_ppm_before_any_rate_existed():
+    history = [(date(2024, 1, 1), None, 50_000)]
+    assert resolve_rate_ppm(history, date(2023, 12, 31)) is None
 
 
-def test_resolve_rate_bp_open_ended_rate_covers_today_and_beyond():
-    history = [(date(2024, 1, 1), None, 500)]
-    assert resolve_rate_bp(history, date(2099, 1, 1)) == 500
+def test_resolve_rate_ppm_open_ended_rate_covers_today_and_beyond():
+    history = [(date(2024, 1, 1), None, 50_000)]
+    assert resolve_rate_ppm(history, date(2099, 1, 1)) == 50_000
 
 
-def test_resolve_rate_bp_picks_the_right_rate_across_a_change():
+def test_resolve_rate_ppm_picks_the_right_rate_across_a_change():
     history = [
-        (date(2024, 1, 1), date(2025, 1, 1), 500),
-        (date(2025, 1, 1), None, 700),
+        (date(2024, 1, 1), date(2025, 1, 1), 50_000),
+        (date(2025, 1, 1), None, 70_000),
     ]
-    assert resolve_rate_bp(history, date(2024, 12, 31)) == 500
-    assert resolve_rate_bp(history, date(2025, 1, 1)) == 700
+    assert resolve_rate_ppm(history, date(2024, 12, 31)) == 50_000
+    assert resolve_rate_ppm(history, date(2025, 1, 1)) == 70_000
+
+
+# --- #119: the ppm scale change itself ---------------------------------------------------
+
+
+def test_ppm_scale_matches_old_bp_results_exactly():
+    """Every whole-basis-point rate (5%, 7%, 13%, 15%) must compute identical cents whether
+    run through the old bp arithmetic or `compute_line_tax`'s new ppm scale (`old_bp * 100`)
+    — the migration only changes the unit, never an amount already issued."""
+    for old_bp, amount_cents in ((500, 10_000), (700, 999), (1300, 4_999), (1500, 330)):
+        before = _bp_scale_tax(amount_cents, old_bp)
+        new_style = ComponentRate("T", old_bp * 100)  # the same rate, in ppm
+        after = compute_line_tax(amount_cents, [new_style], "exclusive")
+        assert before == after.component_cents["T"] == after.tax_cents
+
+
+def _bp_scale_tax(amount_cents: int, rate_bp: int) -> int:
+    """The pre-#119 arithmetic, `round_half_up(amount_cents * rate_bp / 10_000)` — kept here,
+    isolated, only to prove the new ppm scale reproduces it exactly for whole-bp rates."""
+    from decimal import ROUND_HALF_UP, Decimal
+
+    return int((Decimal(amount_cents) * rate_bp / 10_000).quantize(Decimal("1"), ROUND_HALF_UP))
+
+
+def test_qst_is_exact_at_the_new_scale():
+    """QST's legal rate, 9.975%, is 99_750 ppm exactly — no rounding of the rate itself, unlike
+    the old bp scale's forced 998 bp (9.98%, an over-charge). $100.00 at 9.975% is exactly
+    $9.975, which still rounds half-up to $9.98 per line (CLAUDE.md), and that is *not* the
+    same as flatly charging 9.98%: a larger amount tells the two rates apart."""
+    qst = ComponentRate("QST", 99_750)
+    hundred_dollars = compute_line_tax(10_000, [qst], "exclusive")
+    assert hundred_dollars.component_cents["QST"] == 998  # 9.975 rounds half-up to 9.98
+
+    # At a larger, less-round amount the exact 9.975% and a flat 9.98% diverge.
+    exact = compute_line_tax(1_234_567, [qst], "exclusive")
+    flat_998_bp = ComponentRate("QST", 99_800)  # 9.98%, what the old bp scale was forced to
+    rounded = compute_line_tax(1_234_567, [flat_998_bp], "exclusive")
+    assert exact.component_cents["QST"] != rounded.component_cents["QST"]

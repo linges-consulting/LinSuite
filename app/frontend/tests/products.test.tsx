@@ -179,7 +179,7 @@ function fakeServer() {
           province,
           active: true,
           rates: [],
-          current_rate_bp: 500,
+          current_rate_ppm: 50_000,
           applicable_to_business: true,
         })
         return Response.json({

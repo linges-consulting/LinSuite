@@ -44,7 +44,7 @@ from billing.models import (
     TaxComponent,
 )
 from billing.pricing import OverrideConflict, PricedLine, distribute_override, price_line
-from billing.tax import ComponentRate, LineTax, invoice_tax_totals, resolve_rate_bp
+from billing.tax import ComponentRate, LineTax, invoice_tax_totals, resolve_rate_ppm
 from core.access_log import LogAccessOf
 from core.audit import record_event
 from core.db import SessionDep
@@ -232,10 +232,10 @@ async def applicable_components(
     for component in components:
         if not (component.province is None or component.province == business.province):
             continue
-        history = [(r.effective_from, r.effective_to, r.rate_bp) for r in component.rates]
-        rate_bp = resolve_rate_bp(history, today)
-        if rate_bp is not None:
-            resolved.append(ComponentRate(code=component.code, rate_bp=rate_bp))
+        history = [(r.effective_from, r.effective_to, r.rate_ppm) for r in component.rates]
+        rate_ppm = resolve_rate_ppm(history, today)
+        if rate_ppm is not None:
+            resolved.append(ComponentRate(code=component.code, rate_ppm=rate_ppm))
     return resolved
 
 

@@ -193,8 +193,12 @@ def _money(cents: int, symbol: str) -> str:
     return f"{'-' if cents < 0 else ''}{symbol}{dollars:,}.{rem:02d}"
 
 
-def _rate(bp: int) -> str:
-    return f"{bp // 100}.{bp % 100:02d}"
+def _rate(ppm: int) -> str:
+    """A tax rate's percent, up to three decimals, trailing zeros trimmed (5, not 5.000; 9.975
+    for QST exact) — `rate_ppm` is parts per million, `10_000` ppm to a percentage point."""
+    whole, remainder = divmod(ppm, 10_000)
+    text = f"{whole}.{remainder:04d}"[:-1]  # four fractional digits, then drop ppm's last one
+    return text.rstrip("0").rstrip(".") or "0"
 
 
 def show_clinical_fields(business: Business) -> bool:
@@ -381,7 +385,7 @@ def render_receipt_html(
         payment_status=payment_status,
         show_clinical=show_clinical_fields(business),
         taxes=[
-            {"code": t.component_code, "rate": _rate(t.rate_bp), "amount_cents": t.amount_cents}
+            {"code": t.component_code, "rate": _rate(t.rate_ppm), "amount_cents": t.amount_cents}
             for t in line.taxes
         ],
         money=lambda cents: _money(cents, business.currency_symbol),

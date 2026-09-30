@@ -37,8 +37,8 @@ from sqlalchemy.orm import selectinload
 from auth.capabilities import Requires
 from auth.models import User
 from billing.bill_review import business_or_404
-from billing.models import MAX_TAX_RATE_BP, TaxComponent, TaxComponentRate
-from billing.tax import resolve_rate_bp
+from billing.models import MAX_TAX_RATE_PPM, TaxComponent, TaxComponentRate
+from billing.tax import resolve_rate_ppm
 from billing.tax_table import find_component, rate_as_of
 from core.audit import record_event
 from core.db import SessionDep
@@ -70,14 +70,14 @@ router = APIRouter(
     prefix="/admin/billing", tags=["billing"], dependencies=[Depends(Requires("billing.manage"))]
 )
 
-RateBp = Annotated[int, Field(ge=0, le=MAX_TAX_RATE_BP)]
+RatePpm = Annotated[int, Field(ge=0, le=MAX_TAX_RATE_PPM)]
 Code = Annotated[str, Field(min_length=1, max_length=16)]
 Name = Annotated[str, Field(min_length=1, max_length=100)]
 
 
 class TaxRateOut(BaseModel):
     id: uuid.UUID
-    rate_bp: int
+    rate_ppm: int
     effective_from: Date
     effective_to: Date | None
 
@@ -92,7 +92,7 @@ class TaxComponentOut(BaseModel):
     # The rate in effect today, in this business's own timezone (CLAUDE.md "Time": a date
     # boundary is read locally, never off a raw UTC instant). `None` when the component has
     # no rate covering today — a component just created with a future `effective_from`.
-    current_rate_bp: int | None
+    current_rate_ppm: int | None
     # What acceptance criterion 1 asks the panel to show: whether this business's own
     # province would pick this component up. A hint only — see the module docstring.
     applicable_to_business: bool
@@ -110,7 +110,7 @@ class TaxComponentCreate(BaseModel):
     code: Code
     name: Name
     province: Annotated[str | None, Field(max_length=2)] = None
-    rate_bp: RateBp
+    rate_ppm: RatePpm
     effective_from: Date
 
     @field_validator("code", mode="after")
@@ -165,7 +165,7 @@ class TaxComponentPatch(BaseModel):
 
 
 class TaxRateCreate(BaseModel):
-    rate_bp: RateBp
+    rate_ppm: RatePpm
     effective_from: Date
 
 
@@ -196,7 +196,7 @@ async def _load(db: SessionDep, component_id: uuid.UUID) -> TaxComponent:
 
 def _out(component: TaxComponent, *, today: Date, business_province: str | None) -> TaxComponentOut:
     rates = sorted(component.rates, key=lambda r: r.effective_from)
-    history = [(r.effective_from, r.effective_to, r.rate_bp) for r in rates]
+    history = [(r.effective_from, r.effective_to, r.rate_ppm) for r in rates]
     return TaxComponentOut(
         id=component.id,
         code=component.code,
@@ -206,13 +206,13 @@ def _out(component: TaxComponent, *, today: Date, business_province: str | None)
         rates=[
             TaxRateOut(
                 id=r.id,
-                rate_bp=r.rate_bp,
+                rate_ppm=r.rate_ppm,
                 effective_from=r.effective_from,
                 effective_to=r.effective_to,
             )
             for r in rates
         ],
-        current_rate_bp=resolve_rate_bp(history, today),
+        current_rate_ppm=resolve_rate_ppm(history, today),
         applicable_to_business=component.province is None
         or component.province == business_province,
         origin=component.origin,
@@ -244,7 +244,7 @@ async def create_tax_component(
         code=payload.code, name=payload.name, province=payload.province, active=True
     )
     component.rates = [
-        TaxComponentRate(rate_bp=payload.rate_bp, effective_from=payload.effective_from)
+        TaxComponentRate(rate_ppm=payload.rate_ppm, effective_from=payload.effective_from)
     ]
     db.add(component)
     try:
@@ -261,7 +261,7 @@ async def create_tax_component(
         target_type="tax_component",
         target_id=str(component.id),
         actor_user_id=admin.id,
-        metadata={"code": component.code, "rate_bp": payload.rate_bp},
+        metadata={"code": component.code, "rate_ppm": payload.rate_ppm},
     )
     await db.commit()
     await db.refresh(component, attribute_names=["rates"])
@@ -343,7 +343,7 @@ async def add_tax_component_rate(
     db.add(
         TaxComponentRate(
             component_id=component.id,
-            rate_bp=payload.rate_bp,
+            rate_ppm=payload.rate_ppm,
             effective_from=payload.effective_from,
         )
     )
@@ -356,7 +356,7 @@ async def add_tax_component_rate(
         target_id=str(component.id),
         actor_user_id=admin.id,
         metadata={
-            "rate_bp": payload.rate_bp,
+            "rate_ppm": payload.rate_ppm,
             "effective_from": payload.effective_from.isoformat(),
         },
     )
@@ -387,7 +387,7 @@ class TaxStatusOut(BaseModel):
 
 def _component_up_to_date(component: TaxComponent, as_of: Date) -> bool:
     """A pre-filled component is current if the table still lists the exact rate it was given
-    — same `rate_bp`, same `effective_from` — among its own rate rows. A component whose
+    — same `rate_ppm`, same `effective_from` — among its own rate rows. A component whose
     `province` the table no longer recognises (should not happen with today's thirteen, but a
     future table edit could narrow one) counts as up to date: there is nothing newer to compare
     against, only a component the table no longer covers, which is a different conversation."""
@@ -400,7 +400,7 @@ def _component_up_to_date(component: TaxComponent, as_of: Date) -> bool:
     if table_rate is None:
         return True
     return any(
-        r.effective_from == table_rate.effective_from and r.rate_bp == table_rate.rate_bp
+        r.effective_from == table_rate.effective_from and r.rate_ppm == table_rate.rate_ppm
         for r in component.rates
     )
 
