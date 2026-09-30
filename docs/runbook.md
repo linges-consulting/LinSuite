@@ -23,7 +23,7 @@ Conventions used below:
 3. [Key escrow](#3-key-escrow)
 4. [On-prem TLS](#4-on-prem-tls)
 5. [DMARC for the sending domain](#5-dmarc-for-the-sending-domain)
-6. [Offsite backups: Object Lock and the no-delete proof](#6-offsite-backups-object-lock-and-the-no-delete-proof)
+6. [Offsite backups: NAS pull or Object Lock](#6-offsite-backups-nas-pull-or-object-lock)
 7. [Monthly prune, from the operator workstation](#7-monthly-prune-from-the-operator-workstation)
 8. [Quarterly restore rehearsal](#8-quarterly-restore-rehearsal)
 9. [Healthcheck / dead-man monitoring](#9-healthcheck--dead-man-monitoring)
@@ -76,7 +76,8 @@ network; Traefik remains the public router for both the frontend and `/api`.
 3. Create `.env` with mode `0600`. Set `APP_HOST` to the exact hostname, `APP_BASE_URL` to its
    `https://` URL, `ACME_EMAIL` to a monitored mailbox, and keep `COOKIE_SECURE=true`. Replace
    every placeholder secret and escrow the encryption keys as described in §3. Configure an
-   offsite backup target as described in §6; the default `BACKUP_TARGET=local` is for tests.
+   offsite backup target as described in §6. For a NAS pull, `BACKUP_TARGET=local` is the
+   source repository, and the NAS copy must be working before client data is entered.
 4. Validate the merged configuration, then build and start it from the repository root:
    ```sh
    docker compose --env-file .env -f infra/compose.yaml -f infra/compose.production.yaml config --quiet
@@ -486,7 +487,61 @@ has nothing meaningful to enforce until SPF/DKIM alignment exists to check.
    runbook — treat it as an operator judgement call once `quarantine` has run clean for a
    while too.
 
-## 6. Offsite backups: Object Lock and the no-delete proof
+## 6. Offsite backups: NAS pull or Object Lock
+
+### NAS pull from a public VPS (Proxmox Backrest LXC)
+
+The VPS runs its normal 02:00 UTC `pg_dump -Fc` into a local encrypted Restic repository.
+A separate NAS job reads that repository over outbound SSH/SFTP and uses `restic copy` to
+create an independent repository on the NAS ZFS share. The NAS initiates the connection;
+there is no inbound port on the home network. Backrest can index and restore the NAS
+repository, but its repository list alone does not schedule a copy. Do not copy PostgreSQL's
+live Docker volume, and do not point Backrest at the VPS repository alone: either would leave
+no independent, restorable NAS copy.
+
+For the Aayush RackNerd deployment, the source is Docker volume
+`linsuite_backup_local_repo` and the destination is `/backups/linsuite` in Proxmox LXC 107,
+backed by `tank_SG_14TB/backups`. The VPS has a dedicated `linsuite-pull` SFTP-only account,
+chrooted to the source repository with `internal-sftp -R`. It has a NAS-only SSH public key
+and group read permission on Restic files; it cannot change or delete the VPS snapshots. The
+NAS pins the VPS host's ED25519 key, rather than accepting an unverified key each run.
+
+The NAS LXC stores the source and destination repository passwords in separate root-only
+files under `/root/.config/linsuite-pull/`. The source password matches the VPS `.env`'s
+`RESTIC_PASSWORD`; the destination password is independent. Escrow both passwords and the
+VPS `.env` document keys **outside** both repositories (§3). Keep the backup key and all
+health-record encryption keys out of the Git repository and the Backrest screenshots.
+
+`infra/backup/nas-pull.sh` is installed as `/usr/local/sbin/linsuite-nas-pull` in the LXC.
+`infra/backup/systemd/linsuite-nas-pull.{service,timer}` runs it daily at 04:00 UTC, two
+hours after the VPS backup, and catches missed runs after a reboot. It refuses a source whose
+latest snapshot is older than 36 hours, copies new snapshots, then checks the NAS repository.
+The VPS source is read-only over SFTP, so `restic copy --no-lock` is necessary. The NAS script
+serializes itself with `flock`; **do not schedule Backrest write operations or maintenance on
+this repository at the same time.** Backrest's repo entry has its automatic forget, prune,
+and check schedules disabled; it indexes copied snapshots for browsing and manual restore.
+
+Check the live path after deployment:
+
+```sh
+# On the VPS, from /srv/linsuite:
+docker compose --env-file .env -f infra/compose.yaml -f infra/compose.production.yaml \
+  exec -T backup /usr/local/bin/backup.sh
+
+# In the NAS LXC:
+systemctl start linsuite-nas-pull.service
+systemctl show linsuite-nas-pull.service -p Result -p ExecMainStatus
+restic -r /backups/linsuite \
+  --password-file /root/.config/linsuite-pull/nas-password check --read-data
+```
+
+Use Backrest's **Index Snapshots** on `LinSuite_Aayush_Wellness` to display copied snapshots.
+Restore a snapshot into a temporary directory and confirm `pg_restore --list` can read its
+`linsuite.dump`. A full scratch-database restore remains the initial go-live rehearsal (§8).
+Until a retention policy and failure alert are in place, monitor both the VPS's 35 GB disk
+and `systemctl --failed` / the timer's last successful run. The NAS copy is independent of
+VPS credentials, but unlike B2 Object Lock it is not immutable against NAS administrator
+mistakes or compromise.
 
 ### Bucket setup (Backblaze B2 — the documented offsite target, `docs/tech-stack.md` §10)
 
@@ -793,7 +848,7 @@ LINSUITE PROVISIONING CHECKLIST — <Tenant>
       Next renewal/reissue reminder set for: __________
 [ ] DMARC configured (§5)
       p=none set on: __________     p=quarantine set on: __________ (after 2 clean weeks)
-[ ] Object Lock bucket + no-delete key set up (§6) — date: __________
+[ ] Offsite copy verified: NAS pull or Object Lock bucket + no-delete key (§6) — date: __________
       Proof 1 (server key cannot prune) — ran __________, result: __________
       Proof 2 (Object Lock blocks delete inside window) — ran __________, result: __________
 [ ] Monthly prune schedule established (§7) — reminder set: [ ] yes

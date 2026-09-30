@@ -1,0 +1,10 @@
+[Unit]
+Description=Pull LinSuite Restic snapshots from VPS to NAS ZFS
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/usr/bin/findmnt -n /backups
+ExecStart=/usr/local/sbin/linsuite-nas-pull
+TimeoutStartSec=2h

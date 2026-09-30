@@ -6,16 +6,19 @@
 # backup.sh`, runs the script directly.
 set -eu
 
+# A one-off `docker compose run --rm backup backup.sh` should run the requested command.
+if [ "$#" -gt 0 ]; then
+    exec "$@"
+fi
+
 SCHEDULE="${BACKUP_SCHEDULE:-0 2 * * *}"
 
-# Every var backup.sh reads must survive into cron's own process, which does not inherit the
-# container's environment the way an interactive shell does — so freeze it into /etc/environment
-# and have the crontab line source it. (`env` here, not `printenv`, so a value containing a
-# newline cannot inject a second crontab line — none of ours do, but the redirection form makes
-# that a property of the mechanism rather than of today's variable list.)
-env > /etc/environment
+# BusyBox crond gives jobs a minimal environment. `export -p` writes shell-quoted assignments,
+# so values containing spaces (notably BACKUP_SCHEDULE) survive when the cron job sources it.
+# A plain `env > file` is not sourceable for those values and silently breaks the nightly job.
+export -p > /etc/backup.env
 
-echo "$SCHEDULE . /etc/environment; /usr/local/bin/backup.sh" > /etc/crontabs/root
+echo "$SCHEDULE . /etc/backup.env; /usr/local/bin/backup.sh" > /etc/crontabs/root
 
 echo "backup: scheduled '$SCHEDULE' UTC (crond -f -l 2)"
 exec crond -f -l 2

@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily LinSuite VPS backup pull
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 UTC
+Persistent=true
+Unit=linsuite-nas-pull.service
+
+[Install]
+WantedBy=timers.target
