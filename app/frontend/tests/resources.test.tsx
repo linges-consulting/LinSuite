@@ -158,7 +158,7 @@ function renderResources() {
 }
 
 async function openResources(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('tab', { name: 'Resources' }))
+  await user.click(await screen.findByRole('button', { name: 'Spaces & equipment' }))
 }
 
 async function openActions(user: ReturnType<typeof userEvent.setup>, name: string) {

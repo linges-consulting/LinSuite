@@ -12,7 +12,7 @@ test('choosing Staff Mode on an admin-only page leaves it for Home', async () =>
   stubApi({ signedIn: true, adminWindowMs: 600_000 })
 
   renderApp('/settings')
-  expect(await screen.findByRole('tab', { name: 'Business' })).toBeInTheDocument()
+  expect(await screen.findByRole('button', { name: 'Business profile' })).toBeInTheDocument()
 
   await user.click(screen.getByRole('button', { name: /Switch mode/ }))
   await user.click(
@@ -20,7 +20,7 @@ test('choosing Staff Mode on an admin-only page leaves it for Home', async () =>
   )
 
   await waitFor(
-    () => expect(screen.queryByRole('tab', { name: 'Business' })).not.toBeInTheDocument(),
+    () => expect(screen.queryByRole('button', { name: 'Business profile' })).not.toBeInTheDocument(),
     { timeout: 5_000 },
   )
   expect(screen.queryByText('This area needs Admin Mode')).not.toBeInTheDocument()

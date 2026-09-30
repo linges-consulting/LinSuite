@@ -56,7 +56,7 @@ import { RESOURCES, STAFF_PALETTE } from '@/lib/query-keys'
 export function ResourcesPanel() {
   return (
     <Tabs defaultValue="space" className="gap-4">
-      <TabsList>
+      <TabsList variant="line">
         <TabsTrigger value="space">Spaces</TabsTrigger>
         <TabsTrigger value="equipment">Equipment</TabsTrigger>
       </TabsList>

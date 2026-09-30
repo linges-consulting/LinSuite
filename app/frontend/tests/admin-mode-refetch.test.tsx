@@ -94,7 +94,7 @@ test('entering Admin Mode brings Settings up on its own, with no reload', async 
   await user.click(await screen.findByRole('menuitem', { name: /Admin Mode/ }))
 
   // The panel returns on its own — no reload, no second click.
-  await user.click(await screen.findByRole('tab', { name: 'Roles' }))
+  await user.click(await screen.findByRole('button', { name: 'Roles' }))
   await waitFor(
     () => expect(screen.getByRole('button', { name: 'New role' })).toBeInTheDocument(),
     { timeout: 5_000 },
