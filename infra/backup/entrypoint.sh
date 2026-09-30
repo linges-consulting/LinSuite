@@ -16,6 +16,8 @@ SCHEDULE="${BACKUP_SCHEDULE:-0 2 * * *}"
 # BusyBox crond gives jobs a minimal environment. `export -p` writes shell-quoted assignments,
 # so values containing spaces (notably BACKUP_SCHEDULE) survive when the cron job sources it.
 # A plain `env > file` is not sourceable for those values and silently breaks the nightly job.
+# This file contains credentials, so only root may read it.
+umask 077
 export -p > /etc/backup.env
 
 echo "$SCHEDULE . /etc/backup.env; /usr/local/bin/backup.sh" > /etc/crontabs/root

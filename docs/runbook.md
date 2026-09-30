@@ -849,9 +849,10 @@ LINSUITE PROVISIONING CHECKLIST — <Tenant>
 [ ] DMARC configured (§5)
       p=none set on: __________     p=quarantine set on: __________ (after 2 clean weeks)
 [ ] Offsite copy verified: NAS pull or Object Lock bucket + no-delete key (§6) — date: __________
-      Proof 1 (server key cannot prune) — ran __________, result: __________
-      Proof 2 (Object Lock blocks delete inside window) — ran __________, result: __________
-[ ] Monthly prune schedule established (§7) — reminder set: [ ] yes
+      NAS: last successful pull __________; restored dump parsed by pg_restore: [ ] yes
+      B2 only: server key cannot prune __________; Object Lock blocks deletion __________
+[ ] Backup retention and pruning schedule established (§6–7) — date: __________
+[ ] Failed-backup and failed-NAS-pull alerts verified (§9) — date: __________
       Prune log:
         __________  (date)  result: __________
         __________  (date)  result: __________
