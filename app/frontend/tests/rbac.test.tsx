@@ -152,7 +152,7 @@ describe('the Roles panel', () => {
     renderSettings()
 
     // Settings opens on Business; the Roles panel is a tab away.
-    await user.click(await screen.findByRole('tab', { name: 'Roles' }))
+    await user.click(await screen.findByRole('button', { name: 'Roles' }))
 
     await user.click(await screen.findByRole('button', { name: 'New role' }))
     await user.type(screen.getByLabelText('Name'), 'Stylist')
@@ -177,7 +177,7 @@ describe('the Roles panel', () => {
     renderSettings()
 
     // Settings opens on Business; the Roles panel is a tab away.
-    await user.click(await screen.findByRole('tab', { name: 'Roles' }))
+    await user.click(await screen.findByRole('button', { name: 'Roles' }))
 
     const card = (await screen.findByText('Receptionist')).closest('[data-slot="card"]')!
     await user.click(within(card as HTMLElement).getByRole('button', { name: 'Edit' }))
@@ -199,7 +199,7 @@ describe('the Roles panel', () => {
     renderSettings()
 
     // Settings opens on Business; the Roles panel is a tab away.
-    await user.click(await screen.findByRole('tab', { name: 'Roles' }))
+    await user.click(await screen.findByRole('button', { name: 'Roles' }))
 
     await user.click(await screen.findByRole('button', { name: 'New role' }))
 
@@ -213,7 +213,7 @@ describe('the Roles panel', () => {
     renderSettings()
 
     // Settings opens on Business; the Roles panel is a tab away.
-    await user.click(await screen.findByRole('tab', { name: 'Roles' }))
+    await user.click(await screen.findByRole('button', { name: 'Roles' }))
 
     const card = (await screen.findByText('Administrator')).closest('[data-slot="card"]')!
     expect(within(card as HTMLElement).getByText('Built-in')).toBeInTheDocument()
@@ -230,10 +230,11 @@ describe('the Roles panel', () => {
     renderSettings()
 
     // Settings opens on Business; the Roles panel is a tab away.
-    await user.click(await screen.findByRole('tab', { name: 'Roles' }))
+    await user.click(await screen.findByRole('button', { name: 'Roles' }))
 
-    // Scoped to the panel: "Staff" is also the name of a tab since Task 10.
-    const panel = await screen.findByRole('tabpanel')
+    // Scoped to the panel: "Staff" is also the name of a sidebar item since Task 10.
+    await screen.findByText('Receptionist')
+    const panel = document.querySelector('[data-slot="settings-panel"]') as HTMLElement
     const builtIn = within(panel).getByText('Staff').closest('[data-slot="card"]')!
     expect(within(builtIn as HTMLElement).queryByRole('button', { name: /delete/i })).toBeNull()
   })
@@ -244,7 +245,7 @@ describe('the Roles panel', () => {
     renderSettings()
 
     // Settings opens on Business; the Roles panel is a tab away.
-    await user.click(await screen.findByRole('tab', { name: 'Roles' }))
+    await user.click(await screen.findByRole('button', { name: 'Roles' }))
 
     const card = (await screen.findByText('Receptionist')).closest('[data-slot="card"]')!
     await user.click(within(card as HTMLElement).getByRole('button', { name: /Delete Receptionist/ }))

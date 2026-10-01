@@ -162,7 +162,7 @@ function renderSettings() {
 }
 
 async function openServices(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('tab', { name: 'Services' }))
+  await user.click(await screen.findByRole('button', { name: 'Services' }))
   await screen.findByText('Swedish Massage')
 }
 

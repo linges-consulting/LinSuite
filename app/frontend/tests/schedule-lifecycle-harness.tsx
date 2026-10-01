@@ -14,8 +14,8 @@ import { SchedulePage } from '@/routes/schedule'
  */
 
 export const ROSTER = [
-  { id: 's1', display_name: 'Ana Rossi', colour: 'blue', hex: '#1d4ed8', dark_hex: '#659dff', sort_order: 0, user_id: 'u1', max_concurrent_appointments: 1 },
-  { id: 's2', display_name: 'Bo Chen', colour: 'teal', hex: '#0f766e', dark_hex: '#68b5ac', sort_order: 1, user_id: 'u2', max_concurrent_appointments: 2 },
+  { id: 's1', display_name: 'Ana Rossi', colour: 'blue', hex: '#1d4ed8', dark_hex: '#659dff', sort_order: 0, user_id: 'u1', max_concurrent_appointments: 1, is_practitioner: true },
+  { id: 's2', display_name: 'Bo Chen', colour: 'teal', hex: '#0f766e', dark_hex: '#68b5ac', sort_order: 1, user_id: 'u2', max_concurrent_appointments: 2, is_practitioner: true },
 ]
 
 export const TEN = '2026-06-15T14:00:00Z'
@@ -156,7 +156,19 @@ export function fakeServer(appointments: any[] = [], packageCredits: any[] = [])
   return calls
 }
 
+/** Both practitioners already chosen in the Practitioners picker (the signed-in `u1` is
+ *  `s1`) — the picker's own default-narrowing is `tests/schedule-practitioners.test.tsx`'s;
+ *  these transition tests want every column visible, as the calendar always showed them. */
+function seedBothPractitionersChosen() {
+  try {
+    localStorage.setItem('linsuite.schedule.practitioners.u1', JSON.stringify(['s1', 's2']))
+  } catch {
+    // jsdom always has localStorage.
+  }
+}
+
 export function renderSchedule() {
+  seedBothPractitionersChosen()
   return render(
     <ThemeProvider>
       <QueryClientProvider client={createQueryClient()}>

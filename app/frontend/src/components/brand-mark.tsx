@@ -1,4 +1,5 @@
 import { useBranding } from '@/lib/branding'
+import { initialsOf } from '@/lib/initials'
 
 /**
  * The business's mark and name, in the sidebar and above the sign-in card.
@@ -10,8 +11,8 @@ import { useBranding } from '@/lib/branding'
  * the width follows, up to the 240 px sidebar's `max-w-32` so a very wide mark cannot push
  * the name out.
  *
- * The square is the fallback rather than a placeholder image: it is already the brand colour,
- * so an instance that never uploads a logo still looks deliberate.
+ * Without a logo the square carries the business's initials on the brand colour, so an instance
+ * that never uploads a logo still looks deliberate and still says whose it is.
  */
 export function BrandMark({ className }: { className?: string }) {
   const { data } = useBranding()
@@ -25,7 +26,13 @@ export function BrandMark({ className }: { className?: string }) {
           className="h-6 w-auto max-w-32 shrink-0 rounded-md object-contain"
         />
       ) : (
-        <span aria-hidden className="size-6 shrink-0 rounded-md bg-primary" />
+        <span
+          aria-hidden
+          data-testid="brand-initials"
+          className="flex size-6 shrink-0 items-center justify-center rounded-md bg-primary text-[10px] leading-none font-semibold tracking-tight text-primary-foreground"
+        >
+          {initialsOf(name)}
+        </span>
       )}
       <span className="truncate">{name}</span>
     </span>

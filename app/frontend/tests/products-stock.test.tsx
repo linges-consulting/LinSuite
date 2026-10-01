@@ -114,7 +114,7 @@ function fakeServer(opts: { capabilities?: string[]; mode?: 'staff' | 'admin' } 
 }
 
 async function openProducts(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('tab', { name: 'Products' }))
+  await user.click(await screen.findByRole('button', { name: 'Products' }))
   await screen.findByText('Shampoo')
 }
 
@@ -158,7 +158,7 @@ describe('capability and mode gating', () => {
     renderApp('/settings')
 
     expect(await screen.findByText('This area needs Admin Mode')).toBeInTheDocument()
-    expect(screen.queryByRole('tab', { name: 'Products' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Products' })).not.toBeInTheDocument()
   })
 
   it('offers only the one capability actually held', async () => {
